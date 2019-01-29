@@ -6,8 +6,11 @@ import numpy as np
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from tokenization import InputFeatures, RawData, make_tokenizer_model
+from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model
 from .university_college_london_corpus import ucl_data
+
+
+__all__ = ['DataLoader']
 
 
 def _save_to_cache(cache_path, data, kwargs):
@@ -75,16 +78,18 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         return None
 
     loaded = np.load(cache_path)
-    num_input_examples = loaded['__num_input_examples__']
-    has_input_examples = loaded['__has_input_examples__']
-    num_validation_input_examples = loaded['__num_validation_input_examples__']
-    has_validation_input_examples = loaded['__has_validation_input_examples__']
-    num_test_input_examples = loaded['__num_test_input_examples__']
-    has_test_input_examples = loaded['__has_test_input_examples__']
-    lengths = loaded['__lengths__']
-    is_pre_split = loaded['__is_pre_split__'].item()
-    test_proportion = loaded['__test_proportion__'].item()
-    validation_proportion_of_train = loaded['__validation_proportion_of_train__'].item()
+
+    special_keys = [
+        '__num_input_examples__',
+        '__has_input_examples__',
+        '__num_validation_input_examples__',
+        '__has_validation_input_examples__',
+        '__num_test_input_examples__',
+        '__has_test_input_examples__',
+        '__lengths__',
+        '__is_pre_split__',
+        '__test_proportion__',
+        '__validation_proportion_of_train__']
 
     kwargs_file = dict()
     response_data = dict()
@@ -92,11 +97,11 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     for k in loaded.keys():
         if k.startswith('__kwarg__'):
             kwargs_file[k[len('__kwarg__'):]] = loaded[k]
-        if k.startswith('__response_data__'):
+        elif k.startswith('__response_data__'):
             response_data[k[len('__response_data__'):]] = loaded[k]
         elif not k.startswith('__'):
             example_data[k] = loaded[k]
-        else:
+        elif k not in special_keys:
             raise ValueError('Unexpected key: {}'.format(k))
 
     if len(kwargs) != len(kwargs_file):
@@ -109,7 +114,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
             return None
 
     all_examples = None
-    splits = np.cumsum(lengths)[:-1]
+    splits = np.cumsum(loaded['__lengths__'])[:-1]
     for k in example_data:
 
         if k == 'unique_id':
@@ -127,19 +132,21 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         ex = InputFeatures(**all_examples[idx])
         all_examples[idx] = ex
 
-    example_splits = [num_input_examples, num_input_examples + num_validation_input_examples]
+    example_splits = [
+        loaded['__num_input_examples__'].item(),
+        loaded['__num_input_examples__'].item() + loaded['__num_validation_input_examples__'].item()]
 
     input_examples = all_examples[:example_splits[0]]
     validation_input_examples = all_examples[example_splits[0]:example_splits[1]]
     test_input_examples = all_examples[example_splits[1]:]
 
-    if not has_input_examples:
+    if not loaded['__has_input_examples__'].item():
         assert(len(input_examples) == 0)
         input_examples = None
-    if not has_validation_input_examples:
+    if not loaded['__has_validation_input_examples__'].item():
         assert(len(validation_input_examples) == 0)
         validation_input_examples = None
-    if not has_test_input_examples:
+    if not loaded['__has_test_input_examples__'].item():
         assert(len(test_input_examples) == 0)
         test_input_examples = None
 
@@ -148,9 +155,9 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         response_data,
         test_input_examples=test_input_examples,
         validation_input_examples=validation_input_examples,
-        is_pre_split=is_pre_split,
-        test_proportion=test_proportion,
-        validation_proportion_of_train=validation_proportion_of_train)
+        is_pre_split=loaded['__is_pre_split__'].item(),
+        test_proportion=loaded['__test_proportion__'].item(),
+        validation_proportion_of_train=loaded['__validation_proportion_of_train__'].item())
 
 
 class DataLoader(object):
@@ -167,7 +174,8 @@ class DataLoader(object):
 
     def __init__(
             self,
-            bert_vocabulary_path,
+            bert_pre_trained_model_name,
+            max_sequence_length,
             cache_path,
             geco_path,
             bnc_root,
@@ -203,12 +211,12 @@ class DataLoader(object):
                     kwargs = data_key_kwarg_dict[DataManager.harry_potter]
                 result = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
         """
-        (self.bert_vocabulary_path, self.cache_path, self.geco_path, self.bnc_root, self.harry_potter_path,
-         self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
+        (self.bert_pre_trained_model_name, self.max_sequence_length, self.cache_path, self.geco_path, self.bnc_root,
+         self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
          self.english_web_universal_dependencies_v_1_2_path, self.proto_roles_english_web_path, self.ontonotes_path,
          self.proto_roles_prop_bank_path, self.data_key_kwarg_dict) = (
-            bert_vocabulary_path, cache_path, geco_path, bnc_root, harry_potter_path, frank_2013_eye_path,
-            frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
+            bert_pre_trained_model_name, max_sequence_length, cache_path, geco_path, bnc_root, harry_potter_path,
+            frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
             proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, data_key_kwarg_dict)
 
     def load(
@@ -217,7 +225,8 @@ class DataLoader(object):
             data_preparer=None,
             force_cache_miss=False):
 
-        bert_tokenizer = BertTokenizer(self.bert_vocabulary_path, do_lower_case=True)
+        bert_tokenizer = BertTokenizer.from_pretrained(
+            self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
         spacy_tokenizer_model = make_tokenizer_model()
 
         if isinstance(keys, str):
@@ -246,7 +255,8 @@ class DataLoader(object):
                 #     result[key] = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
                 if key == DataLoader.ucl:
                     result[key] = ucl_data(
-                        self.frank_2013_eye_path, self.frank_2015_erp_path, numerical_tokens, start_tokens, **kwargs)
+                        spacy_tokenizer_model, bert_tokenizer, self.max_sequence_length, self.frank_2013_eye_path,
+                        self.frank_2015_erp_path, **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:

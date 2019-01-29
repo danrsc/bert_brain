@@ -1,3 +1,5 @@
+from string import punctuation
+import numpy as np
 import spacy
 from spacy.symbols import ORTH
 
@@ -68,6 +70,12 @@ def make_tokenizer_model(model='en_core_web_md'):
 def _data_token_better(bert_token_pairs, i, j):
     token_i, is_stop_i = bert_token_pairs[i]
     token_j, is_stop_j = bert_token_pairs[j]
+    is_continue_i = token_i.startswith('##')
+    is_continue_j = token_j.startswith('##')
+    if is_continue_i and not is_continue_j:
+        return False
+    if not is_continue_i and is_continue_j:
+        return True
     if is_stop_i and not is_stop_j:
         return False
     if not is_stop_i and is_stop_j:
@@ -97,64 +105,94 @@ def group_by_cum_lengths(cum_lengths, tokens):
     yield group
 
 
+def align_spacy_stop(spacy_tokens, bert_tokens):
+    # create character-level is-stop
+    char_is_stop = list()
+    for t, idx, is_stop, prob in spacy_tokens:
+        for c in t:
+            char_is_stop.append(is_stop)
+    idx = 0
+    bert_stops = list()
+    for t in bert_tokens:
+        if t.startswith('##'):
+            t = t[2:]
+        all_stop = True
+        for c in t:
+            current = char_is_stop[idx]
+            idx += 1
+            if c not in punctuation and not current:
+                all_stop = False
+        bert_stops.append(all_stop)
+    return list(zip(bert_tokens, bert_stops))
+
+
 def bert_tokenize_with_spacy_meta(
         spacy_model, bert_tokenizer, max_sequence_length, unique_id, words, data_offset, type_id=0):
 
     sent = ''
     cum_lengths = list()
 
+    bert_token_groups = list()
     for w in words:
 
         if len(sent) > 0:
             sent += ' '
         sent += str(w)
         cum_lengths.append(len(sent))
+        bert_token_groups.append(bert_tokenizer.tokenize(w))
 
-    word_token_groups = group_by_cum_lengths(cum_lengths, tokenize_single(sent, spacy_model))
-    # bert tokenization does not seem to care whether we do word-by-word or not; it is simple whitespace
+    spacy_token_groups = group_by_cum_lengths(cum_lengths, tokenize_single(sent, spacy_model))
+
+    # bert bert_erp_tokenization does not seem to care whether we do word-by-word or not; it is simple whitespace
     # splitting etc., then sub-word tokens are created from that
 
     example_tokens = list()
     example_mask = list()
     example_is_stop = list()
+    example_is_begin_word_pieces = list()
     example_type_ids = list()
     example_data_ids = list()
 
-    for special_token in ['[CLS]', '[SEP]']:
+    def _append_special_token(special_token):
         example_tokens.append(special_token)
         example_mask.append(1)
         example_is_stop.append(1)
+        example_is_begin_word_pieces.append(1)
         example_type_ids.append(type_id)
         example_data_ids.append(-1)
 
-    for idx_group, token_group in enumerate(word_token_groups):
-        group_bert_tokenized = list()
-        for token, idx, is_stop, prob in token_group:
-            # for now, we are not worrying about prob; just the stop words
-            for bert_token in bert_tokenizer.tokenize(token):
-                group_bert_tokenized.append((bert_token, is_stop))
+    _append_special_token('[CLS]')
 
-        idx_data = get_data_token_index(group_bert_tokenized) if len(group_bert_tokenized) > 1 else 0
-
-        for idx_token, (t, is_stop) in enumerate(group_bert_tokenized):
+    for idx_group, (spacy_token_group, bert_token_group) in enumerate(zip(spacy_token_groups, bert_token_groups)):
+        # for now, we are not worrying about prob; just the stop words
+        bert_tokens_with_stop = align_spacy_stop(spacy_token_group, bert_token_group)
+        idx_data = get_data_token_index(bert_tokens_with_stop)
+        for idx_token, (t, is_stop) in enumerate(bert_tokens_with_stop):
             example_tokens.append(t)
             example_mask.append(1)
-            example_is_stop.append(is_stop)
+            example_is_stop.append(1 if is_stop else 0)
+            is_continue_word_piece = t.startswith('##')
+            example_is_begin_word_pieces.append(0 if is_continue_word_piece else 1)
             example_type_ids.append(type_id)
+            # we follow the BERT paper and always use the first word-piece as the labeled one
             example_data_ids.append(data_offset + idx_group if idx_token == idx_data else -1)
+
+    _append_special_token('[SEP]')
 
     if len(example_tokens) > max_sequence_length:
         example_tokens = example_tokens[:max_sequence_length]
         example_mask = example_mask[:max_sequence_length]
         example_is_stop = example_is_stop[:max_sequence_length]
+        example_is_begin_word_pieces = example_is_begin_word_pieces[:max_sequence_length]
         example_type_ids = example_type_ids[:max_sequence_length]
         example_data_ids = example_data_ids[:max_sequence_length]
 
     return InputFeatures(
         unique_id=unique_id,
-        tokens=example_tokens,
-        input_ids=bert_tokenizer.convert_tokens_to_ids(example_tokens),
-        input_mask=example_mask,
-        input_is_stop=example_is_stop,
-        input_type_ids=example_type_ids,
-        data_ids=example_data_ids)
+        tokens=np.array(example_tokens),
+        input_ids=np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens)),
+        input_mask=np.array(example_mask),
+        input_is_stop=np.array(example_is_stop),
+        input_is_begin_word_pieces=np.array(example_is_begin_word_pieces),
+        input_type_ids=np.array(example_type_ids),
+        data_ids=np.array(example_data_ids))

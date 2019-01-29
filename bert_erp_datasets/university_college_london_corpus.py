@@ -5,7 +5,7 @@ import os
 from collections import OrderedDict
 import numpy as np
 
-from tokenization import bert_tokenize_with_spacy_meta, RawData
+from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData
 
 __all__ = ['read_frank_2015_erp', 'read_frank_2013', 'frank_2015_erp_data', 'ucl_data']
 

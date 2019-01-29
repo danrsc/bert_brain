@@ -13,6 +13,7 @@ class InputFeatures:
     input_ids: Sequence[int]
     input_mask: Sequence[int]
     input_is_stop: Sequence[int]
+    input_is_begin_word_pieces: Sequence[int]
     input_type_ids: Sequence[int]
     data_ids: Sequence[int]
 
