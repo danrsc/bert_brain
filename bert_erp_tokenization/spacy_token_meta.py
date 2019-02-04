@@ -186,6 +186,7 @@ def bert_tokenize_with_spacy_meta(
         example_is_begin_word_pieces = example_is_begin_word_pieces[:max_sequence_length]
         example_type_ids = example_type_ids[:max_sequence_length]
         example_data_ids = example_data_ids[:max_sequence_length]
+        raise ValueError('Raise max_sequence_length; not currently supporting multiple examples per document')
 
     return InputFeatures(
         unique_id=unique_id,

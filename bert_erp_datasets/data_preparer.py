@@ -95,17 +95,15 @@ def _collect_data_column_results(items):
 class PreprocessBoxcox:
 
     def __init__(
-            self, data_indices_key, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None, is_stop_key=None):
-        self.data_indices_key = data_indices_key
+            self, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None):
         self.data_key_whitelist = data_key_whitelist
         self.data_key_blacklist = data_key_blacklist
         self.stop_mode = stop_mode
-        self.is_stop_key = is_stop_key
 
     def __call__(self, loaded_data_tuple):
         from scipy.stats import boxcox
         train_indices = np.concatenate(
-            _get_data_indices(loaded_data_tuple.train, self.data_indices_key, self.stop_mode, self.is_stop_key))
+            _get_data_indices(loaded_data_tuple.train, self.stop_mode))
         train_indices = train_indices[train_indices >= 0]
 
         modified = dict()
@@ -147,16 +145,14 @@ class PreprocessLog:
 class PreprocessDetrend:
 
     def __init__(
-            self, data_indices_key, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None, is_stop_key=None):
-        self.data_indices_key = data_indices_key
+            self, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None):
         self.data_key_whitelist = data_key_whitelist
         self.data_key_blacklist = data_key_blacklist
         self.stop_mode = stop_mode
-        self.is_stop_key = is_stop_key
 
     def __call__(self, loaded_data_tuple):
         train_indices = np.concatenate(
-            _get_data_indices(loaded_data_tuple.train, self.data_indices_key, self.stop_mode, self.is_stop_key))
+            _get_data_indices(loaded_data_tuple.train, self.stop_mode))
         train_indices = train_indices[train_indices >= 0]
         if not np.all(np.diff(train_indices) > 0):
             raise ValueError('expected passages and data to be in order')
@@ -208,8 +204,7 @@ class PreprocessDiscretize:
 
 class PreprocessBaseline:
 
-    def __init__(self, data_indices_key, num_baseline, data_key_whitelist=None, data_key_blacklist=None):
-        self.data_indices_key = data_indices_key
+    def __init__(self, num_baseline, data_key_whitelist=None, data_key_blacklist=None):
         self.num_baseline = num_baseline
         self.data_key_whitelist = data_key_whitelist
         self.data_key_blacklist = data_key_blacklist
@@ -218,14 +213,14 @@ class PreprocessBaseline:
         max_train_index = None
         if loaded_data_tuple.train is not None:
             for t in loaded_data_tuple.train:
-                max_t = np.nanmax(t[self.data_indices_key])
+                max_t = np.nanmax(t.data_ids)
                 if max_train_index is None or max_t > max_train_index:
                     max_train_index = max_t
 
         if max_train_index is not None and loaded_data_tuple.validation is not None:
             clean_validation = list()
             for v in loaded_data_tuple.validation:
-                v_indices = np.where(v[self.data_indices_key] < 0, np.nan, v[self.data_indices_key])
+                v_indices = np.where(v.data_ids < 0, np.nan, v.data_ids)
                 min_v = np.nanmin(v_indices)
                 if min_v is None or min_v - self.num_baseline > max_train_index:
                     clean_validation.append(v)
@@ -235,7 +230,7 @@ class PreprocessBaseline:
         if max_train_index is not None and loaded_data_tuple.test is not None:
             clean_test = list()
             for t in loaded_data_tuple.test:
-                t_indices = np.where(t[self.data_indices_key] < 0, np.nan, t[self.data_indices_key])
+                t_indices = np.where(t.data_ids < 0, np.nan, t.data_ids)
                 min_t = np.nanmin(t_indices)
                 if min_t is None or min_t - self.num_baseline > max_train_index:
                     clean_test.append(t)
@@ -277,23 +272,20 @@ def _compute_baseline(item, num_baseline):
 class PreprocessSequenceStandardize:
 
     def __init__(
-            self, data_indices_key, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None, is_stop_key=None):
-        self.data_indices_key, self.data_key_whitelist, self.data_key_blacklist, self.stop_mode, self.is_stop_key = (
-            data_indices_key, data_key_whitelist, data_key_blacklist, stop_mode, is_stop_key)
+            self, data_key_whitelist=None, data_key_blacklist=None, stop_mode=None):
+        self.data_key_whitelist, self.data_key_blacklist, self.stop_mode = (
+            data_key_whitelist, data_key_blacklist, stop_mode)
 
     def __call__(self, loaded_data_tuple):
         modified = dict()
         for t in chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test):
 
-            if self.stop_mode is not None and self.is_stop_key is None:
-                raise ValueError('If stop mode is specified, is_stop_key must also be specified')
-
-            data_indices = t[self.data_indices_key]
+            data_indices = t.data_ids
             compute_indices = data_indices
             if self.stop_mode == 'content':
-                compute_indices = np.where(t[self.is_stop_key], -1, compute_indices)
+                compute_indices = np.where(t.input_is_stop, -1, compute_indices)
             elif self.stop_mode == 'stop':
-                compute_indices = np.where(t[self.is_stop_key], compute_indices, -1)
+                compute_indices = np.where(t.input_is_stop, compute_indices, -1)
             elif self.stop_mode is not None:
                 raise ValueError('Unable to understand stop_mode: {}'.format(self.stop_mode))
 
@@ -337,21 +329,17 @@ class PreprocessPCA:
 
     def __init__(
             self,
-            data_indices_key,
             feature_axis=1,
             data_key_whitelist=None,
             data_key_blacklist=None,
-            stop_mode=None,
-            is_stop_key=None):
-        (self.data_indices_key, self.feature_axis, self.data_key_whitelist, self.data_key_blacklist,
-         self.stop_mode, self.is_stop_key) = (
-            data_indices_key, feature_axis, data_key_whitelist, data_key_blacklist,
-            stop_mode, is_stop_key)
+            stop_mode=None):
+        (self.feature_axis, self.data_key_whitelist, self.data_key_blacklist, self.stop_mode) = (
+            feature_axis, data_key_whitelist, data_key_blacklist, stop_mode)
 
     def __call__(self, loaded_data_tuple):
 
         train_indices = np.concatenate(
-            _get_data_indices(loaded_data_tuple.train, self.data_indices_key, self.stop_mode, self.is_stop_key), axis=0)
+            _get_data_indices(loaded_data_tuple.train, self.stop_mode), axis=0)
         valid_train_indices = train_indices[train_indices >= 0]
 
         modified = dict()
@@ -386,17 +374,14 @@ class PreprocessPCA:
         return replace(loaded_data_tuple, data=FrozenCopyOfDict.replace(loaded_data_tuple.data, modified))
 
 
-def _get_data_indices(passages, data_indices_key, stop_mode, is_stop_key):
-    if stop_mode is not None and is_stop_key is None:
-        raise ValueError('If stop mode is specified, is_stop_key must also be specified')
-
+def _get_data_indices(examples, stop_mode):
     result = list()
-    for p in passages:
-        data_indices = p[data_indices_key]
+    for ex in examples:
+        data_indices = ex.data_ids
         if stop_mode == 'content':
-            data_indices = np.where(p[is_stop_key], -1, data_indices)
+            data_indices = np.where(ex.input_is_stop, -1, data_indices)
         elif stop_mode == 'stop':
-            data_indices = np.where(p[is_stop_key], data_indices, -1)
+            data_indices = np.where(ex.input_is_stop, data_indices, -1)
         elif stop_mode is not None:
             raise ValueError('Unable to understand stop_mode: {}'.format(stop_mode))
         result.append(data_indices)
@@ -407,21 +392,17 @@ class PreprocessStandardize:
 
     def __init__(
             self,
-            data_indices_key,
             average_axis=1,
             data_key_whitelist=None,
             data_key_blacklist=None,
-            stop_mode=None,
-            is_stop_key=None):
-        (self.data_indices_key, self.average_axis, self.data_key_whitelist, self.data_key_blacklist,
-         self.stop_mode, self.is_stop_key) = (
-            data_indices_key, average_axis, data_key_whitelist, data_key_blacklist,
-            stop_mode, is_stop_key)
+            stop_mode=None):
+        (self.average_axis, self.data_key_whitelist, self.data_key_blacklist, self.stop_mode) = (
+            average_axis, data_key_whitelist, data_key_blacklist, stop_mode)
 
     def __call__(self, loaded_data_tuple):
 
         train_indices = np.concatenate(
-            _get_data_indices(loaded_data_tuple.train, self.data_indices_key, self.stop_mode, self.is_stop_key), axis=0)
+            _get_data_indices(loaded_data_tuple.train, self.stop_mode), axis=0)
         valid_train_indices = train_indices[train_indices >= 0]
 
         modified = dict()

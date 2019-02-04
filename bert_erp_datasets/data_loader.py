@@ -278,9 +278,9 @@ class DataLoader(object):
             else:
                 result[key] = cached
 
-            if data_preparer is not None:
-                result[key] = data_preparer.prepare(result[key])
-
             print('done')
+
+        if data_preparer is not None:
+            result = data_preparer.prepare(result)
 
         return result
