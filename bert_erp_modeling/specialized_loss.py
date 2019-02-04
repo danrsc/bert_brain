@@ -62,7 +62,8 @@ class NamedTargetStopWordMSE:
         self.shapes = OrderedDict(ordered_shape_dict)
         self.splits = list()
         for k in self.shapes:
-            self.splits.append(np.prod(self.shapes[k]))
+            n = max(1, int(np.prod(self.shapes[k])))
+            self.splits.append(n)
 
     def __call__(self, predictions, target, is_stop, is_begin_word_pieces, return_detailed=False, unique_ids=None):
         split_predictions = torch.split(predictions, self.splits, dim=-1)
@@ -70,15 +71,15 @@ class NamedTargetStopWordMSE:
         result = OrderedDict()
         detailed_result = OrderedDict() if return_detailed else None
         for k, k_predictions, k_target in zip(self.shapes, split_predictions, split_target):
-            k_predictions = k_predictions.view(k_predictions.size()[0] + self.shapes[k])
-            k_target = k_target.view(k_target.size()[0] + self.shapes[k])
+            k_predictions = k_predictions.view(k_predictions.size()[:2] + self.shapes[k])
+            k_target = k_target.view(k_target.size()[:2] + self.shapes[k])
             mask = stop_word_and_target_not_nan_mask(self.keep_content, k_target, is_stop, is_begin_word_pieces)
             sq_err, valid_count = masked_squared_error(mask, k_predictions, k_target)
             result[k] = sq_err, valid_count
             if return_detailed:
-                batch_mask = mask.detach.cpu.numpy()
-                batch_predictions = k_predictions.detach.cpu().numpy()
-                batch_target = k_target.detach.cpu().numpy()
+                batch_mask = mask.detach().cpu().numpy()
+                batch_predictions = k_predictions.detach().cpu().numpy()
+                batch_target = k_target.detach().cpu().numpy()
                 batch_mask = np.split(batch_mask, len(batch_mask))
                 batch_predictions = np.split(batch_predictions, len(batch_predictions))
                 batch_target = np.split(batch_target, len(batch_target))
@@ -87,7 +88,11 @@ class NamedTargetStopWordMSE:
                         batch_mask, batch_predictions, batch_target)):
                     unique_id = unique_ids[idx].item() if unique_ids is not None else None
                     detailed_result[k].append(
-                        DetailedResult(example_mask, example_predictions, example_targets, unique_id))
+                        DetailedResult(
+                            np.squeeze(example_mask, axis=0) == 1,  # convert to bool
+                            np.squeeze(example_predictions, axis=0),
+                            np.squeeze(example_targets, axis=0),
+                            unique_id))
         if return_detailed:
             return result, detailed_result
         return result

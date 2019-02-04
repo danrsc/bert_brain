@@ -27,7 +27,7 @@ def _default_task_settings():
     # take boxcox transform of these
     ucl_log_keys = {'first_fixation', 'first_pass', 'right_bounded', 'go_past', 'reading_time'}
 
-    preprocess_standardize = PreprocessStandardize('data_indices', stop_mode='content', is_stop_key='is_stops')
+    preprocess_standardize = PreprocessStandardize(stop_mode='content')
 
     return {
         DataLoader.ucl: TaskSettings(

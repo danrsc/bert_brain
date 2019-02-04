@@ -16,14 +16,13 @@
 import sys
 from shutil import rmtree
 import argparse
-import collections
 from collections import OrderedDict
 import itertools
 import logging
 import json
 import os
 import random
-from dataclasses import replace, dataclass
+from dataclasses import replace, dataclass, asdict as dataclass_as_dict
 from typing import Sequence, List
 import hashlib
 from tqdm import tqdm, trange
@@ -62,7 +61,7 @@ def _num_tokens(tokens):
     return len(tokens)
 
 
-def write_predictions(output_path, all_results, unique_id_to_tokens, verbose_logging):
+def write_predictions(output_path, all_results, unique_id_to_tokens):
     """Write final predictions to the json file."""
     logger.info("Writing predictions to: %s" % output_path)
 
@@ -71,12 +70,12 @@ def write_predictions(output_path, all_results, unique_id_to_tokens, verbose_log
         for detailed_result in all_results[key]:
             tokens = unique_id_to_tokens[detailed_result.unique_id]
             num_tokens = _num_tokens(tokens)
-            output_results.append(OutputResult(
+            output_results.append(dataclass_as_dict(OutputResult(
                 key,
                 tokens[:num_tokens],
-                list(detailed_result.mask[:num_tokens]),
-                list(detailed_result.predictions[:num_tokens]),
-                list(detailed_result.targets[:num_tokens])))
+                [bool(x) for x in detailed_result.mask[:num_tokens]],
+                [float(x) for x in detailed_result.prediction[:num_tokens]],
+                [float(x) for x in detailed_result.target[:num_tokens]])))
     with open(output_path, "w") as writer:
         writer.write(json.dumps(output_results, indent=4) + "\n")
 
@@ -154,10 +153,16 @@ def evaluate(settings, model, loss_handler, device, global_step, eval_results, e
     all_results = OrderedDict()
     logger.info("Start evaluating")
 
-    for input_ids, input_mask, is_stop, is_begin_word_pieces, response_data, unique_ids in tqdm(
-            eval_data_loader, desc="Evaluating"):
-        if len(all_results) % 1000 == 0:
-            logger.info("Processing example: %d" % (len(all_results)))
+    if settings.show_step_progress:
+        batch_iterator = tqdm(eval_data_loader, desc="Evaluating")
+    else:
+        batch_iterator = eval_data_loader
+
+    total_loss = 0
+    total_count = 0
+    for input_ids, input_mask, is_stop, is_begin_word_pieces, response_data, unique_ids in batch_iterator:
+        # if len(all_results) % 1000 == 0:
+        #     logger.info("Processing example: %d" % (len(all_results)))
         input_ids, input_mask, is_stop, is_begin_word_pieces, response_data = to_device(
             device, input_ids, input_mask, is_stop, is_begin_word_pieces, response_data)
         with torch.no_grad():
@@ -176,16 +181,21 @@ def evaluate(settings, model, loss_handler, device, global_step, eval_results, e
             loss = None
             for data_key in loss_dict:
                 sq_err, valid_count = loss_dict[data_key]
-                current = sq_err.detach().cpu().numpy().sum().item() / valid_count.detach().cpu().numpy.item()
+                current = sq_err.detach().cpu().numpy().sum().item() / valid_count
                 if data_key in settings.loss_tasks:
                     if loss is None:
                         loss = current
                     else:
                         loss += current
-                eval_results.add_result(
-                    data_key,
-                    global_step,
-                    sq_err.detach().cpu().numpy().sum().item() / valid_count.detach().cpu().numpy().item())
+                eval_results.add_result(data_key, global_step, current)
+            if loss is not None:
+                total_loss += loss
+                total_count += len(unique_ids)
+
+    if total_count > 0:
+        print('eval', total_loss / total_count)
+    else:
+        print('eval', np.nan)
 
     if return_detailed:
         return all_results
@@ -194,7 +204,7 @@ def evaluate(settings, model, loss_handler, device, global_step, eval_results, e
 def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_runs: int):
     if settings.local_rank == -1 or settings.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not settings.no_cuda else "cpu")
-        n_gpu = torch.cuda.device_count()
+        n_gpu = 1  # torch.cuda.device_count()
     else:
         device = torch.device("cuda", settings.local_rank)
         n_gpu = 1
@@ -220,8 +230,8 @@ def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_r
             # bert_pre_trained_model_name=settings.bert_model,
             data_key_kwarg_dict={DataLoader.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye')})
         hash_ = task_hash(loss_tasks)
-        model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
-        base_path_ = os.path.join(temp_paths.base_path, set_name, hash_)
+        model_path_ = os.path.join(temp_paths.model_path, 'bert', set_name, hash_)
+        base_path_ = os.path.join(temp_paths.base_path, 'bert', set_name, hash_)
 
         if not os.path.exists(model_path_):
             os.makedirs(model_path_)
@@ -238,8 +248,8 @@ def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_r
 
 
 def _seed(seed, index_run, n_gpu):
-    hash_ = hashlib.sha256(seed)
-    hash_.update(index_run)
+    hash_ = hashlib.sha256('{}'.format(seed).encode())
+    hash_.update('{}'.format(index_run).encode())
     seed = np.frombuffer(hash_.digest(), dtype='uint32')
     random_state = np.random.RandomState(seed)
     np.random.set_state(random_state.get_state())
@@ -272,14 +282,21 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     assert(len(data) == 1)
 
     first_data = _first(data)
+    train_data, data_key_to_shape, _ = make_dataset(max_sequence_length, first_data.train, first_data.data)
+    validation_data, validation_id_to_tokens = None, None
+    if first_data.validation is not None and len(first_data.validation) > 0:
+        validation_data, _, validation_id_to_tokens = make_dataset(
+            max_sequence_length, first_data.validation, first_data.data, include_unique_id=True)
 
     num_train_steps = int(
         len(first_data.train) /
         settings.train_batch_size /
         settings.gradient_accumulation_steps * settings.num_train_epochs)
 
+    num_predictions = sum(max(1, int(np.prod(data_key_to_shape[k]))) for k in data_key_to_shape)
+
     # Prepare model
-    model = BertForTokenRegression.from_pretrained(settings.bert_model, num_predictions=first_data.data.size()[1])
+    model = BertForTokenRegression.from_pretrained(settings.bert_model, num_predictions=num_predictions)
     if settings.fp16:
         model.half()
     model.to(device)
@@ -315,12 +332,6 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     logger.info("  Num split examples = %d", len(first_data.train))
     logger.info("  Batch size = %d", settings.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
-
-    train_data, data_key_to_shape, _ = make_dataset(max_sequence_length, first_data.train, first_data.data)
-    validation_data, validation_id_to_tokens = None, None
-    if first_data.validation is not None and len(first_data.validation) > 0:
-        validation_data, _, validation_id_to_tokens = make_dataset(
-            max_sequence_length, first_data.validation, first_data.data, include_unique_id=True)
 
     loss_handler = NamedTargetStopWordMSE(keep_content=True, ordered_shape_dict=data_key_to_shape)
 
@@ -362,9 +373,10 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                 train_results.add_result(
                     data_key,
                     global_step,
-                    sq_err.detach().cpu().numpy().sum().item() / valid_count.detach().cpu().numpy().item())
+                    sq_err.detach().cpu().numpy().sum().item() / valid_count)
 
             if loss is not None:
+                print('train', loss.item() / len(input_ids))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.fp16 and settings.loss_scale != 1.0:
@@ -422,8 +434,8 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     else:
         all_test = []
 
-    write_predictions(output_validation_path, all_validation, validation_id_to_tokens, settings.verbose_logging)
-    write_predictions(output_test_path, all_test, test_id_to_tokens, settings.verbose_logging)
+    write_predictions(output_validation_path, all_validation, validation_id_to_tokens)
+    write_predictions(output_test_path, all_test, test_id_to_tokens)
 
 
 class SwitchRemember:
@@ -454,6 +466,11 @@ def named_variations(name):
 
     if name == 'erp':
         training_variations = list(iterate_powerset(erp_tasks))
+        settings = Settings(task_data_keys=(DataLoader.ucl,))
+        num_runs = 100
+        min_memory = 4 * 1024 ** 3
+    elif name == 'erp_joint':
+        training_variations = [erp_tasks]
         settings = Settings(task_data_keys=(DataLoader.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3

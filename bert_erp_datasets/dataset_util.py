@@ -38,11 +38,12 @@ def _pad(to_pad, sequence_length, value=0):
 
 def _pad_tokens(tokens, sequence_length, value='[PAD]'):
     if len(tokens) < sequence_length:
-        return tokens + [value] * sequence_length - len(tokens)
-    return tokens
+        return list(tokens) + [value] * (sequence_length - len(tokens))
+    return list(tokens)
 
 
 def _filled_values(indices, values, sequence_length, fill_with):
+    indices = _pad(indices, sequence_length, value=-1)
     valid_indices = indices[indices >= 0]
     vals = np.full((sequence_length,) + values.shape[1:], fill_with)
     vals[indices >= 0] = values[valid_indices]
@@ -53,9 +54,9 @@ def make_dataset(max_sequence_length, examples, response_data, include_unique_id
     all_input_ids = torch.tensor([_pad(f.input_ids, max_sequence_length) for f in examples], dtype=torch.long)
     all_input_mask = torch.tensor([_pad(f.input_mask, max_sequence_length) for f in examples], dtype=torch.long)
     all_input_is_stop = torch.tensor(
-        [_pad(f.input_is_stop, max_sequence_length, value=1) for f in examples], dtype=torch.long)
+        [_pad(f.input_is_stop, max_sequence_length, value=1) for f in examples], dtype=torch.uint8)
     all_input_is_begin_word_pieces = torch.tensor(
-        [_pad(f.input_is_begin_word_pieces, max_sequence_length) for f in examples], dtype=torch.long)
+        [_pad(f.input_is_begin_word_pieces, max_sequence_length) for f in examples], dtype=torch.uint8)
 
     unique_id_to_tokens = dict()
     for f in examples:
