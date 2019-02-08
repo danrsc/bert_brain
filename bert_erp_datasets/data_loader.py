@@ -8,6 +8,7 @@ from pytorch_pretrained_bert import BertTokenizer
 
 from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model
 from .university_college_london_corpus import ucl_data
+from .natural_stories import natural_stories_data
 
 
 __all__ = ['DataLoader']
@@ -169,8 +170,9 @@ class DataLoader(object):
     dundee = 'dundee'
     proto_roles_english_web = 'proto_roles_english_web'
     proto_roles_prop_bank = 'proto_roles_prop_bank'
+    natural_stories = 'natural_stories'
 
-    all_keys = geco, bnc, harry_potter, ucl, dundee, proto_roles_english_web, proto_roles_prop_bank
+    all_keys = geco, bnc, harry_potter, ucl, dundee, proto_roles_english_web, proto_roles_prop_bank, natural_stories
 
     def __init__(
             self,
@@ -187,6 +189,7 @@ class DataLoader(object):
             proto_roles_english_web_path,
             ontonotes_path,
             proto_roles_prop_bank_path,
+            natural_stories_path,
             data_key_kwarg_dict=None):
         """
         This object knows how to load data, and stores settings that should be invariant across calls to load
@@ -214,10 +217,11 @@ class DataLoader(object):
         (self.bert_pre_trained_model_name, self.max_sequence_length, self.cache_path, self.geco_path, self.bnc_root,
          self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
          self.english_web_universal_dependencies_v_1_2_path, self.proto_roles_english_web_path, self.ontonotes_path,
-         self.proto_roles_prop_bank_path, self.data_key_kwarg_dict) = (
+         self.proto_roles_prop_bank_path, self.natural_stories_path, self.data_key_kwarg_dict) = (
             bert_pre_trained_model_name, max_sequence_length, cache_path, geco_path, bnc_root, harry_potter_path,
             frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
-            proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, data_key_kwarg_dict)
+            proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, natural_stories_path,
+            data_key_kwarg_dict)
 
     def load(
             self,
@@ -257,6 +261,10 @@ class DataLoader(object):
                     result[key] = ucl_data(
                         spacy_tokenizer_model, bert_tokenizer, self.max_sequence_length, self.frank_2013_eye_path,
                         self.frank_2015_erp_path, **kwargs)
+                elif key == DataLoader.natural_stories:
+                    result[key] = natural_stories_data(
+                        spacy_tokenizer_model, bert_tokenizer, self.max_sequence_length, self.natural_stories_path,
+                        **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:

@@ -99,7 +99,7 @@ class Settings:
     show_step_progress: bool = False
 
     # Whether not to use CUDA when available
-    no_cuda: bool = True
+    no_cuda: bool = False
 
     def get_data_preprocessors(self):
         result = dict()

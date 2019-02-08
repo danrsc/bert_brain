@@ -45,6 +45,11 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+__all__ = [
+    'OutputResult', 'write_predictions', 'task_hash', 'named_variations', 'TaskResult', 'TaskResults', 'evaluate',
+    'run_variation', 'SwitchRemember', 'iterate_powerset']
+
+
 @dataclass
 class OutputResult:
     name: str
@@ -474,6 +479,11 @@ def named_variations(name):
         settings = Settings(task_data_keys=(DataLoader.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
+    elif name == 'nat_stories':
+        training_variations = [['ns_spr']]
+        settings = Settings(task_data_keys=(DataLoader.natural_stories,))
+        num_runs = 100
+        min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 
@@ -493,19 +503,18 @@ def main():
 
     args = parser.parse_args()
 
-    name_ = '{}_variations'.format(args.name)
-
     if args.clean:
         while True:
-            answer = input('About to remove results at {}. Is this really what you want to do [y/n]? '.format(name_))
+            answer = input('About to remove results at {}. Is this really what you want to do [y/n]? '.format(
+                args.name))
             if answer in {'Y', 'y', 'N', 'n'}:
                 if answer == 'N' or answer == 'n':
                     sys.exit(0)
                 break
 
         paths_ = Paths()
-        model_path = os.path.join(paths_.model_path, name_)
-        base_path = os.path.join(paths_.base_path, name_)
+        model_path = os.path.join(paths_.model_path, 'bert', args.name)
+        base_path = os.path.join(paths_.base_path, 'bert', args.name)
         if os.path.exists(model_path):
             rmtree(model_path)
         if os.path.exists(base_path):

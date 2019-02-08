@@ -22,6 +22,7 @@ class Paths:
     default_relative_proto_roles_prop_bank_path = os.path.join(
         'protoroles_eng_pb', 'protoroles_eng_pb_08302015.tsv')
     default_relative_ontonotes_path = os.path.join('conll-formatted-ontonotes-5.0', 'data')
+    default_relative_natural_stories_path = 'natural_stories'
 
     pre_trained_base_path: str = '/share/volume0/drschwar/BERT'
     base_path: str = '/share/volume0/drschwar/ulmfit_data/'
@@ -39,6 +40,7 @@ class Paths:
     proto_roles_english_web_path: Optional[str] = None
     proto_roles_prop_bank_path: Optional[str] = None
     ontonotes_path: Optional[str] = None
+    natural_stories_path: Optional[str] = None
 
     def __post_init__(self):
         if self.pre_trained_path is None:
@@ -68,6 +70,8 @@ class Paths:
                 self.base_path, Paths.default_relative_proto_roles_prop_bank_path)
         if self.ontonotes_path is None:
             self.ontonotes_path = os.path.join(self.base_path, Paths.default_relative_ontonotes_path)
+        if self.natural_stories_path is None:
+            self.natural_stories_path = os.path.join(self.base_path, Paths.default_relative_natural_stories_path)
 
     def make_data_loader(
             self, bert_pre_trained_model_name='bert-base-uncased', max_sequence_length=128, data_key_kwarg_dict=None):
@@ -77,4 +81,5 @@ class Paths:
             self.cache_path, self.geco_path, self.bnc_root, self.harry_potter_path, self.frank_2013_eye_path,
             self.frank_2015_erp_path, self.dundee_path, self.english_web_universal_dependencies_v_1_2_path,
             self.proto_roles_english_web_path, self.ontonotes_path, self.proto_roles_prop_bank_path,
+            self.natural_stories_path,
             data_key_kwarg_dict=data_key_kwarg_dict)

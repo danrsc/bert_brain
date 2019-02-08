@@ -26,6 +26,8 @@ __all__ = [
     'PreprocessMakeBinary',
     'PreprocessNanMean',
     'PreprocessPCA',
+    'PreprocessNanGeometricMean',
+    'PreprocessClip',
     'PreprocessMany']
 
 
@@ -466,6 +468,47 @@ class PreprocessNanMean:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             modified = dict((k, np.nanmean(loaded_data_tuple.data[k], axis=self.axis)) for k in _iterate_data_keys(
+                loaded_data_tuple.data, self.data_key_whitelist, self.data_key_blacklist))
+        return replace(loaded_data_tuple, data=FrozenCopyOfDict.replace(loaded_data_tuple.data, modified))
+
+
+class PreprocessClip:
+
+    def __init__(self, minimum=None, maximum=None, data_key_whitelist=None, data_key_blacklist=None):
+        self.data_key_whitelist = data_key_whitelist
+        self.data_key_blacklist = data_key_blacklist
+        self.min = minimum
+        self.max = maximum
+
+    def _clip(self, x):
+        if self.min is not None:
+            x = np.maximum(self.min, x)
+        if self.max is not None:
+            x = np.minimum(self.max, x)
+        return x
+
+    def __call__(self, loaded_data_tuple):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            modified = dict((k, self._clip(loaded_data_tuple.data[k])) for k in _iterate_data_keys(
+                loaded_data_tuple.data, self.data_key_whitelist, self.data_key_blacklist))
+        return replace(loaded_data_tuple, data=FrozenCopyOfDict.replace(loaded_data_tuple.data, modified))
+
+
+class PreprocessNanGeometricMean:
+
+    def __init__(self, data_key_whitelist=None, data_key_blacklist=None, axis=1):
+        self.data_key_whitelist = data_key_whitelist
+        self.data_key_blacklist = data_key_blacklist
+        self.axis = axis
+
+    def _geom_mean(self, x):
+        return np.exp(np.nanmean(np.log(x), axis=self.axis))
+
+    def __call__(self, loaded_data_tuple):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            modified = dict((k, self._geom_mean(loaded_data_tuple.data[k])) for k in _iterate_data_keys(
                 loaded_data_tuple.data, self.data_key_whitelist, self.data_key_blacklist))
         return replace(loaded_data_tuple, data=FrozenCopyOfDict.replace(loaded_data_tuple.data, modified))
 
