@@ -32,9 +32,10 @@ def masked_squared_error(mask, input, target):
 
 def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_word_pieces):
     if is_stop is not None:
-        print(target.size(), is_stop.size(), is_begin_word_pieces.size())
         if len(is_stop.size()) < len(target.size()):
             is_stop = is_stop.view(is_stop.size() + (1,) * (len(target.size()) - len(is_stop.size())))
+            is_begin_word_pieces = is_begin_word_pieces.view(
+                is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
         is_keep = logical_not(is_stop) if keep_content else is_stop
         if is_begin_word_pieces is not None:
             return is_keep & logical_not(torch.isnan(target)) & is_begin_word_pieces

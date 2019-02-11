@@ -12,7 +12,6 @@ __all__ = ['TaskSettings', 'Settings']
 @dataclass
 class TaskSettings:
     critic_type: str
-    fill_value: Any
     preprocessor: Optional[Callable] = None
     # stop_word_mode can be:
     #     None: no distinction made between content words and stop words
@@ -31,11 +30,15 @@ def _default_task_settings():
 
     return {
         DataLoader.ucl: TaskSettings(
-            critic_type='mse',
-            fill_value=np.nan,
+            critic_type='mse',  # not currently used
             preprocessor=PreprocessMany(
                 PreprocessLog(data_key_whitelist=ucl_log_keys),
                 preprocess_standardize)),
+        DataLoader.natural_stories: TaskSettings(
+            critic_type='mse',
+            preprocessor=PreprocessMany(
+                PreprocessLog(),
+                preprocess_standardize))
     }
 
 
