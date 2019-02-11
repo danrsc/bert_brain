@@ -60,10 +60,12 @@ def _read_sentence_ids(directory_path):
             #         defined language-specific subtype of one.
             # DEPS:   Enhanced dependency graph in the form of a list of head-deprel pairs.
             # MISC:   Any other annotation.
-            if line.strip().startswith('#'):
+            line = line.strip()
+            if line.startswith('#'):
                 continue
-            if len(line.strip()) == 0:
+            if len(line) == 0:
                 sentence_id += 1
+                continue
             id_, form, lemma, upos, xpos, feats, head, deprel, deps, misc = line.split('\t')
             token_id = [int(p) for p in misc[len('TokenId='):].split('.')]
             if len(token_id) > 2:
@@ -133,7 +135,7 @@ def read_natural_stories(spacy_tokenize_model, bert_tokenizer, directory_path):
     examples = list()
     for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
         offsets = [key_to_row[(r.item, r.zone)] for r in sentence_word_records]
-        assert(np.diff(offsets) == 1)  # assert these are contiguous
+        assert(np.all(np.diff(offsets) == 1))  # assert these are contiguous
         input_features = bert_tokenize_with_spacy_meta(
             spacy_tokenize_model, bert_tokenizer, unique_id,
             [r.word for r in sentence_word_records], offsets[0])

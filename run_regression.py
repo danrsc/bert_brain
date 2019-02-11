@@ -475,8 +475,8 @@ def named_variations(name):
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories':
-        training_variations = [['ns_spr']]
-        settings = Settings(task_data_keys=(DataLoader.natural_stories,))
+        training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
+        settings = Settings(task_data_keys=(DataLoader.natural_stories, DataLoader.ucl))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     else:

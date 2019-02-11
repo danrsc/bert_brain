@@ -42,7 +42,7 @@ def _save_to_cache(cache_path, data, kwargs):
     for example in all_examples:
         ex = dataclasses.asdict(example)
         for k in ex:
-            if k == 'unique_id':
+            if data.field_specs is not None and k in data.field_specs and not data.field_specs[k].is_sequence:
                 result[k].append(ex[k])
             elif k == 'tokens':
                 result['__lengths__'].append(len(ex[k]))
@@ -61,7 +61,8 @@ def _save_to_cache(cache_path, data, kwargs):
 
     if data.field_specs is not None:
         for k in data.field_specs:
-            result['__field_spec_tensor_dtype__{}'.format(k)] = str(data.field_specs[k].tensor_dtype)
+            tensor_dtype = 'str' if data.field_specs[k].tensor_dtype == str else str(data.field_specs[k].tensor_dtype)
+            result['__field_spec_tensor_dtype__{}'.format(k)] = tensor_dtype
             result['__field_spec_fill_value__{}'.format(k)] = data.field_specs[k].fill_value
             result['__field_spec_is_sequence__{}'.format(k)] = data.field_specs[k].is_sequence
 
@@ -80,7 +81,7 @@ def _save_to_cache(cache_path, data, kwargs):
 
 
 def _str_to_torch_dtype(s):
-    if s in {'str'}:
+    if s in {'str', '<class \'str\'>'}:
         return str
     if s in {'torch.float32', 'torch.float', 'float32', 'float'}:
         return torch.float32
@@ -139,7 +140,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         is_prefix = False
         for prefix in key_prefixes:
             if k.startswith(prefix):
-                prefix_results[k[len(prefix):]] = loaded[k]
+                prefix_results[prefix][k[len(prefix):]] = loaded[k]
                 is_prefix = True
                 break
         if not is_prefix:
@@ -154,14 +155,29 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     for k in kwargs:
         if k not in prefix_results['__kwarg__']:
             return None
-        if kwargs[k] != prefix_results['__kwarg__']:
+        if kwargs[k] != prefix_results['__kwarg__'][k].item():
             return None
+
+    tensor_dtypes = prefix_results['__field_spec_tensor_dtype__']
+    fill_values = prefix_results['__field_spec_fill_value__']
+    is_sequence = prefix_results['__field_spec_is_sequence__']
+    assert (len(tensor_dtypes) == len(fill_values))
+    assert (len(tensor_dtypes) == len(is_sequence))
+    field_specs = dict()
+    for k in tensor_dtypes:
+        field_specs[k] = FieldSpec(
+            fill_value=fill_values[k].item(),
+            tensor_dtype=_str_to_torch_dtype(tensor_dtypes[k].item()),
+            is_sequence=is_sequence[k].item())
+
+    if len(field_specs) == 0:
+        field_specs = None
 
     all_examples = None
     splits = np.cumsum(loaded['__lengths__'])[:-1]
     for k in example_data:
 
-        if k == 'unique_id':
+        if field_specs is not None and k in field_specs and not field_specs[k].is_sequence:
             current = example_data[k]
         else:
             current = np.split(example_data[k], splits)
@@ -194,21 +210,6 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     if not loaded['__has_test_input_examples__'].item():
         assert(len(test_input_examples) == 0)
         test_input_examples = None
-
-    tensor_dtypes = prefix_results['__field_spec_tensor_dtype__']
-    fill_values = prefix_results['__field_spec_fill_value__']
-    is_sequence = prefix_results['__field_spec_is_sequence__']
-    assert(len(tensor_dtypes) == len(fill_values))
-    assert(len(tensor_dtypes) == len(is_sequence))
-    field_specs = dict()
-    for k in tensor_dtypes:
-        field_specs[k] = FieldSpec(
-            fill_value=fill_values[k].item(),
-            tensor_dtype=_str_to_torch_dtype(tensor_dtypes[k].item()),
-            is_sequence=is_sequence[k].item())
-
-    if len(field_specs) == 0:
-        field_specs = None
 
     return RawData(
         input_examples,

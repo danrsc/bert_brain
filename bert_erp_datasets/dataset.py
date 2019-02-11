@@ -206,9 +206,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
 
             self._num_examples[data_key] = len(examples)
             self._response_data[data_key] = response_data
-            for key in self._example_tensors:
-                self._example_tensors[key] = torch.tensor(
-                    self._example_tensors[key], dtype=field_specs[key].tensor_dtype)
+
+        for key in self._example_tensors:
+            self._example_tensors[key] = torch.tensor(
+                self._example_tensors[key], dtype=field_specs[key].tensor_dtype)
 
         self._is_sequence = dict((f, field_specs[f].is_sequence) for f in field_specs)
 
