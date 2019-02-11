@@ -184,8 +184,12 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
             loss = None
             for data_key in loss_dict:
                 weight, (sq_err, valid_count) = loss_dict[data_key]
-                current = sq_err.detach().cpu().numpy().sum().item() / valid_count
-                if data_key in settings.loss_tasks:
+                no_valid_inputs = isinstance(sq_err, str) and sq_err == 'no_valid_inputs'
+                if no_valid_inputs:
+                    current = np.nan
+                else:
+                    current = sq_err.detach().cpu().numpy().sum().item() / valid_count
+                if data_key in settings.loss_tasks and not no_valid_inputs:
                     if loss is None:
                         loss = weight * current
                     else:
@@ -381,16 +385,18 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
             loss = None
             for data_key in loss_dict:
                 weight, (sq_err, valid_count) = loss_dict[data_key]
-                if data_key in settings.loss_tasks:
+                no_valid_inputs = isinstance(sq_err, str) and sq_err == 'no_valid_inputs'
+                if data_key in settings.loss_tasks and not no_valid_inputs:
                     current = weight * sq_err.sum() / valid_count
                     if loss is None:
                         loss = current
                     else:
                         loss += current
+                train_result = np.nan if no_valid_inputs else sq_err.detach().cpu().numpy().sum().item() / valid_count
                 train_results.add_result(
                     data_key,
                     global_step,
-                    sq_err.detach().cpu().numpy().sum().item() / valid_count)
+                    train_result)
 
             if loss is not None:
                 tqdm.write('train: {}'.format(loss.item() / len(batch['unique_id'])))

@@ -34,15 +34,19 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
     if is_stop is not None:
         if len(is_stop.size()) < len(target.size()):
             is_stop = is_stop.view(is_stop.size() + (1,) * (len(target.size()) - len(is_stop.size())))
-            is_begin_word_pieces = is_begin_word_pieces.view(
-                is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
         is_keep = logical_not(is_stop) if keep_content else is_stop
         if is_begin_word_pieces is not None:
+            if len(is_begin_word_pieces.size()) < len(target.size()):
+                is_begin_word_pieces = is_begin_word_pieces.view(
+                    is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
             return is_keep & logical_not(torch.isnan(target)) & is_begin_word_pieces
         else:
             return is_keep & logical_not(torch.isnan(target))
     else:
         if is_begin_word_pieces is not None:
+            if len(is_begin_word_pieces.size()) < len(target.size()):
+                is_begin_word_pieces = is_begin_word_pieces.view(
+                    is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
             return logical_not(torch.isnan(target)) & is_begin_word_pieces
         else:
             return logical_not(torch.isnan(target))
@@ -69,7 +73,11 @@ class NamedTargetStopWordMSE:
         target = batch[self.field]
         mask = stop_word_and_target_not_nan_mask(
             self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
-        sq_err, valid_count = masked_squared_error(mask, predictions, target)
+        try:
+            sq_err, valid_count = masked_squared_error(mask, predictions, target)
+        except NoValidInputs:
+            sq_err = 'no_valid_inputs'
+            valid_count = 0
         result = sq_err, valid_count
         if return_detailed:
             batch_mask = mask.detach().cpu().numpy()
