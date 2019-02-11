@@ -11,6 +11,7 @@ from pytorch_pretrained_bert import BertTokenizer
 from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, FieldSpec
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
+from .harry_potter import harry_potter_data
 
 
 __all__ = ['DataLoader']
@@ -346,8 +347,6 @@ class DataLoader(object):
                 # elif key == DataLoader.bnc:
                 #     result[key] = bnc_data(
                 #         self.bnc_root, numerical_tokens, start_tokens, quick_for_test=quick_for_test, **kwargs)
-                # elif key == DataLoader.harry_potter:
-                #     result[key] = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
                 if key == DataLoader.ucl:
                     result[key] = ucl_data(
                         spacy_tokenizer_model, bert_tokenizer, self.frank_2013_eye_path,
@@ -355,6 +354,9 @@ class DataLoader(object):
                 elif key == DataLoader.natural_stories:
                     result[key] = natural_stories_data(
                         spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
+                elif key == DataLoader.harry_potter:
+                    result[key] = harry_potter_data(
+                        spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:

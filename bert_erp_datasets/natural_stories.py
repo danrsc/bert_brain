@@ -2,13 +2,14 @@ import os
 import itertools
 import csv
 from dataclasses import dataclass
+import dataclasses
 import numpy as np
 
 
 from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData
 
 
-__all__ = ['read_natural_stories', 'natural_stories_data']
+__all__ = ['read_natural_stories', 'natural_stories_data', 'read_natural_story_codings']
 
 
 @dataclass
@@ -104,6 +105,161 @@ def _read_story_sentences(directory_path):
             yield sentence
 
 
+@dataclass
+class _CodingRecord:
+    # categorized into groups as in http://www.lrec-conf.org/proceedings/lrec2018/pdf/337.pdf
+    # see that link for examples of each
+
+    story_name: str
+    sentence_number: int
+    sentence: str
+
+    # conjunction
+    local_verb_phrase_conjunction: int
+    non_local_verb_phrase_conjunction: int
+    local_noun_phrase_conjunction: int
+    non_local_noun_phrase_conjunction: int
+    sentential_co_ordination: int
+    complementizer_phrase_conjunctions: int
+    adjective_conjunction: int
+
+    # relative clauses
+    source_relative_clause_restrictive: int
+    source_relative_clause_non_restrictive: int
+    object_relative_clause_restrictive: int
+    object_relative_clause_non_restrictive: int
+    object_relative_clause_non_canonical: int
+    no_relativizer_object_relative_clause: int
+    adverbial_relative_clause: int
+    free_relative_clause: int
+
+    # ambiguity
+    noun_phrase_sentence_ambiguity: int
+    main_verb_reduced_relative_ambiguity_easier: int
+    main_verb_reduced_relative_ambiguity_hard: int
+    prepositional_phrase_attachment_ambiguity: int
+
+    # displacement
+    tough_movement: int
+    parenthetical: int
+    topicalization: int
+    question_wh_subject: int
+    question_wh_other: int
+
+    # miscellaneous
+    non_local_subject_verb: int
+    non_local_verb_direct_object: int
+    gerund_modifier: int
+    sentential_subject: int
+    post_nominal_adjective: int
+    idiom: int
+    quotation: int
+    it_cleft: int
+    even_than_construction: int
+    if_then_construction: int
+    as_as_construction: int
+    so_that_construction: int
+    question_yn: int
+    infinitive_verb_phrase_subject: int
+    inanimate_subjects: int
+    animacy_hierarchy_violation: int
+
+
+def _read_coding(path, story_name):
+
+    field_name_map = {
+        'sentence_number': 'SentNum',
+        'sentence': 'Sentence',
+
+        # conjunction
+        'local_verb_phrase_conjunction': 'local VP conjunction',
+        'non_local_verb_phrase_conjunction': 'non-local VP conjunction',
+        'local_noun_phrase_conjunction': 'local NP conjunction',
+        'non_local_noun_phrase_conjunction': 'non-local NP conjunction',
+        'sentential_co_ordination': 'S co-ordination',
+        'complementizer_phrase_conjunctions': 'CP conjunctions',
+        'adjective_conjunction': 'adj conjunction',
+
+        # relative clauses
+        'source_relative_clause_restrictive': 'SRC restr',
+        'source_relative_clause_non_restrictive': 'SRC non-restr',
+        'object_relative_clause_restrictive': 'ORC restr',
+        'object_relative_clause_non_restrictive': 'ORC non-restr',
+        'object_relative_clause_non_canonical': 'ORC non-canon',
+        'no_relativizer_object_relative_clause': 'no-relativizer ORC',
+        'adverbial_relative_clause': 'adverbial RC',
+        'free_relative_clause': 'free relative',
+
+        # ambiguity
+        'noun_phrase_sentence_ambiguity': 'NP/S ambig',
+        'main_verb_reduced_relative_ambiguity_easier': 'MV/RR ambig EASIER',
+        'main_verb_reduced_relative_ambiguity_hard': 'MV/RR ambig HARD',
+        'prepositional_phrase_attachment_ambiguity': 'attachment ambig',
+
+        # displacement
+        'tough_movement': 'tough mvt',
+        'parenthetical': 'parenthetical',
+        'topicalization': 'topicalization',
+        'question_wh_subject': 'question_wh_subj',
+        'question_wh_other': 'question_wh_other',
+
+        # miscellaneous
+        'non_local_subject_verb': 'non-local SV',
+        'non_local_verb_direct_object': 'non-local verb-DO',
+        'gerund_modifier': 'gerund modifier',
+        'sentential_subject': 'sent subj',
+        'post_nominal_adjective': 'post-nominal adj',
+        'idiom': 'idiom',
+        'quotation': 'quote',
+        'it_cleft': 'it-cleft',
+        'even_than_construction': 'even…than',
+        'if_then_construction': 'if...then constr',
+        'as_as_construction': 'as…as constr',
+        'so_that_construction': 'so…that constr',
+        'question_yn': 'question_YN',
+        'infinitive_verb_phrase_subject': 'inf VP subject',
+        'inanimate_subjects': 'inanimate subjects',
+        'animacy_hierarchy_violation': 'animacy hierarchy viol'
+    }
+
+    fields = dataclasses.fields(_CodingRecord)
+
+    for field in fields:
+        if field.name == 'story_name':
+            continue
+        if field.name not in field_name_map:
+            raise ValueError('missing field in field_name_map: {}'.format(field.name))
+
+    records = list()
+    with open(path, 'rt', newline='') as coding_file:
+        for record in csv.DictReader(coding_file, delimiter='\t'):
+            values = dict()
+            for field in fields:
+                if field.name == 'story_name':
+                    values[field.name] = story_name
+                    continue
+                record_name = field_name_map[field.name]
+                str_value = record[record_name].strip()
+                if len(str_value) == 0 and field.type == int:
+                    values[field.name] = 0
+                else:
+                    values[field.name] = field.type(record[record_name])
+            records.append(_CodingRecord(**values))
+    return records
+
+
+def _read_codings(directory_path):
+
+    result = dict()
+    for coding_file_name in [
+            'aqua.txt', 'boar.txt', 'elvis.txt', 'high_school.txt', 'king_of_birds.txt', 'matchstick.txt',
+            'mr_sticky.txt', 'roswell.txt', 'tourette.txt', 'tulips.txt']:
+        story_name = os.path.splitext(coding_file_name)[0]
+        for record in _read_coding(os.path.join(directory_path, coding_file_name), story_name):
+            result[record.sentence] = record
+    return result
+
+
 def _read_reaction_times(directory_path):
     groups = dict()
     all_worker_ids = set()
@@ -127,6 +283,16 @@ def _read_reaction_times(directory_path):
                 reaction_times[idx_key, idx_worker] = groups[key][worker]
 
     return reaction_times, sorted_keys, all_worker_ids
+
+
+def read_natural_story_codings(directory_path):
+    codings = _read_codings(directory_path)
+    result = dict()
+    for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
+        text = ' '.join(sentence_word_records)
+        if text not in codings:
+            raise ValueError('Unable to find codings for sentence: {}'.format(text))
+        result[unique_id] = codings[text]
 
 
 def read_natural_stories(spacy_tokenize_model, bert_tokenizer, directory_path):
