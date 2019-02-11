@@ -127,7 +127,7 @@ def _read_reaction_times(directory_path):
     return reaction_times, sorted_keys, all_worker_ids
 
 
-def read_natural_stories(spacy_tokenize_model, bert_tokenizer, max_sequence_length, directory_path):
+def read_natural_stories(spacy_tokenize_model, bert_tokenizer, directory_path):
     reaction_times, keys, _ = _read_reaction_times(directory_path)
     key_to_row = dict((k, i) for i, k in enumerate(keys))
     examples = list()
@@ -135,15 +135,15 @@ def read_natural_stories(spacy_tokenize_model, bert_tokenizer, max_sequence_leng
         offsets = [key_to_row[(r.item, r.zone)] for r in sentence_word_records]
         assert(np.diff(offsets) == 1)  # assert these are contiguous
         input_features = bert_tokenize_with_spacy_meta(
-            spacy_tokenize_model, bert_tokenizer, max_sequence_length, unique_id,
+            spacy_tokenize_model, bert_tokenizer, unique_id,
             [r.word for r in sentence_word_records], offsets[0])
         examples.append(input_features)
 
     return examples, {'ns_spr': reaction_times}
 
 
-def natural_stories_data(spacy_tokenize_model, bert_tokenizer, max_sequence_length, path):
-    examples, data = read_natural_stories(spacy_tokenize_model, bert_tokenizer, max_sequence_length, path)
+def natural_stories_data(spacy_tokenize_model, bert_tokenizer, path):
+    examples, data = read_natural_stories(spacy_tokenize_model, bert_tokenizer, path)
     return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
 
 

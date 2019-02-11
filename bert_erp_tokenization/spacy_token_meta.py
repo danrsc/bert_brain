@@ -126,8 +126,7 @@ def align_spacy_stop(spacy_tokens, bert_tokens):
     return list(zip(bert_tokens, bert_stops))
 
 
-def bert_tokenize_with_spacy_meta(
-        spacy_model, bert_tokenizer, max_sequence_length, unique_id, words, data_offset, type_id=0):
+def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words, data_offset, type_id=0):
 
     sent = ''
     cum_lengths = list()
@@ -179,18 +178,9 @@ def bert_tokenize_with_spacy_meta(
 
     _append_special_token('[SEP]')
 
-    if len(example_tokens) > max_sequence_length:
-        example_tokens = example_tokens[:max_sequence_length]
-        example_mask = example_mask[:max_sequence_length]
-        example_is_stop = example_is_stop[:max_sequence_length]
-        example_is_begin_word_pieces = example_is_begin_word_pieces[:max_sequence_length]
-        example_type_ids = example_type_ids[:max_sequence_length]
-        example_data_ids = example_data_ids[:max_sequence_length]
-        raise ValueError('Raise max_sequence_length; not currently supporting multiple examples per document')
-
     return InputFeatures(
         unique_id=unique_id,
-        tokens=np.array(example_tokens),
+        tokens=example_tokens,
         input_ids=np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens)),
         input_mask=np.array(example_mask),
         input_is_stop=np.array(example_is_stop),

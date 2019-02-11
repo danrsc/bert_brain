@@ -3,7 +3,7 @@ from itertools import zip_longest
 from _collections_abc import Mapping
 
 
-__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'FrozenCopyOfDict']
+__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'FrozenCopyOfDict', 'SwitchRemember']
 
 
 def zip_equal(*it):
@@ -92,3 +92,18 @@ class FrozenCopyOfDict(Mapping):
         for k in mapping:
             result._dict[k] = mapping[k]
         return result
+
+
+class SwitchRemember:
+
+    def __init__(self, var):
+        self.var = var
+        self._tests = set()
+
+    @property
+    def tests(self):
+        return list(sorted(self._tests))
+
+    def __eq__(self, test):
+        self._tests.add(test)
+        return self.var == test

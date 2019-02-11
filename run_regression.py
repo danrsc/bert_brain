@@ -34,8 +34,10 @@ from torch.utils.data.distributed import DistributedSampler
 
 from pytorch_pretrained_bert.optimization import BertAdam
 
+from bert_erp_common import SwitchRemember
 from bert_erp_modeling import BertForTokenRegression, NamedTargetStopWordMSE
-from bert_erp_datasets import DataLoader, DataPreparer, make_dataset, max_example_sequence_length, to_device
+from bert_erp_datasets import \
+    DataLoader, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 
@@ -66,14 +68,14 @@ def _num_tokens(tokens):
     return len(tokens)
 
 
-def write_predictions(output_path, all_results, unique_id_to_tokens):
+def write_predictions(output_path, all_results, data_set):
     """Write final predictions to the json file."""
     logger.info("Writing predictions to: %s" % output_path)
 
     output_results = list()
     for key in all_results:
         for detailed_result in all_results[key]:
-            tokens = unique_id_to_tokens[detailed_result.unique_id]
+            tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
             num_tokens = _num_tokens(tokens)
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
@@ -123,11 +125,6 @@ def task_hash(loss_tasks):
     return hash_.hexdigest()
 
 
-def _first(mapping):
-    for k in mapping:
-        return mapping[k]
-
-
 @dataclass
 class TaskResult:
     step: int
@@ -145,14 +142,14 @@ class TaskResults:
         self.results[name].append(TaskResult(step, value))
 
 
-def evaluate(settings, model, loss_handler, device, global_step, eval_results, eval_data, return_detailed=False):
+def evaluate(settings, model, loss_handlers, device, global_step, eval_results, eval_data_set, return_detailed=False):
 
     if settings.local_rank == -1:
-        eval_sampler = SequentialSampler(eval_data)
+        eval_sampler = SequentialSampler(eval_data_set)
     else:
-        eval_sampler = DistributedSampler(eval_data)
+        eval_sampler = DistributedSampler(eval_data_set)
     eval_data_loader = TorchDataLoader(
-        eval_data, sampler=eval_sampler, batch_size=settings.predict_batch_size)
+        eval_data_set, sampler=eval_sampler, batch_size=settings.predict_batch_size, collate_fn=collate_fn)
 
     model.eval()
     all_results = OrderedDict()
@@ -165,37 +162,38 @@ def evaluate(settings, model, loss_handler, device, global_step, eval_results, e
 
     total_loss = 0
     total_count = 0
-    for input_ids, input_mask, is_stop, is_begin_word_pieces, response_data, unique_ids in batch_iterator:
+    for batch in batch_iterator:
         # if len(all_results) % 1000 == 0:
         #     logger.info("Processing example: %d" % (len(all_results)))
-        input_ids, input_mask, is_stop, is_begin_word_pieces, response_data = to_device(
-            device, input_ids, input_mask, is_stop, is_begin_word_pieces, response_data)
+        for k in batch:
+            batch[k] = batch[k].to(device)
         with torch.no_grad():
-            predictions = model(input_ids, attention_mask=input_mask)
-            loss_result = loss_handler(
-                predictions, response_data, is_stop, is_begin_word_pieces,
-                return_detailed=return_detailed, unique_ids=unique_ids)
+            predictions = model(batch)
+            loss_result = OrderedDict(
+                (h.field, (h.weight, h(batch, predictions, return_detailed=return_detailed))) for h in loss_handlers)
             if return_detailed:
-                loss_dict, detailed = loss_result
-                for k in detailed:
+                loss_dict = OrderedDict()
+                for k in loss_result:
+                    weight, (summary, detailed) = loss_result[k]
+                    loss_dict[k] = weight, summary
                     if k not in all_results:
                         all_results[k] = list()
-                    all_results[k].extend(detailed[k])
+                    all_results[k].extend(detailed)
             else:
                 loss_dict = loss_result
             loss = None
             for data_key in loss_dict:
-                sq_err, valid_count = loss_dict[data_key]
+                weight, (sq_err, valid_count) = loss_dict[data_key]
                 current = sq_err.detach().cpu().numpy().sum().item() / valid_count
                 if data_key in settings.loss_tasks:
                     if loss is None:
-                        loss = current
+                        loss = weight * current
                     else:
-                        loss += current
+                        loss += weight * current
                 eval_results.add_result(data_key, global_step, current)
             if loss is not None:
                 total_loss += loss
-                total_count += len(unique_ids)
+                total_count += len(batch['unique_id'])
 
     if total_count > 0:
         print('eval', total_loss / total_count)
@@ -206,7 +204,7 @@ def evaluate(settings, model, loss_handler, device, global_step, eval_results, e
         return all_results
 
 
-def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_runs: int):
+def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_runs: int, force_cache_miss: bool):
     if settings.local_rank == -1 or settings.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not settings.no_cuda else "cpu")
         n_gpu = 1  # torch.cuda.device_count()
@@ -247,7 +245,7 @@ def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_r
 
     data_loader, base_path, model_path = io_setup()
     settings = replace(settings, loss_tasks=set(loss_tasks))
-    data = data_loader.load(settings.task_data_keys)
+    data = data_loader.load(settings.task_data_keys, force_cache_miss=force_cache_miss)
     for index_run in trange(num_runs, desc='Run'):
         _run_variation_index(settings, base_path, index_run, data, n_gpu, device)
 
@@ -266,7 +264,14 @@ def _seed(seed, index_run, n_gpu):
     return seed
 
 
-def _run_variation_index(settings: Settings, base_path: str, index_run: int, data, n_gpu, device):
+def _loss_weights(loss_count_dict):
+    keys = [k for k in loss_count_dict]
+    counts = np.array([loss_count_dict[k] for k in keys])
+    loss_weights = 1. / (np.sum(1. / counts) * counts)
+    return dict(zip(keys, [w.item() for w in loss_weights]))
+
+
+def _run_variation_index(settings: Settings, base_path: str, index_run: int, data, n_gpu: int, device):
 
     output_dir = os.path.join(base_path, 'run_{}'.format(index_run))
 
@@ -282,26 +287,33 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
 
     max_sequence_length = max_example_sequence_length(data)
 
-    # for now, we are only supporting single dataset here; need to investigate the implications for distributed
-    # training etc if we use more than one dataset, but will experiment with one first to see about memory etc.
-    assert(len(data) == 1)
-
-    first_data = _first(data)
-    train_data, data_key_to_shape, _ = make_dataset(max_sequence_length, first_data.train, first_data.data)
-    validation_data, validation_id_to_tokens = None, None
-    if first_data.validation is not None and len(first_data.validation) > 0:
-        validation_data, _, validation_id_to_tokens = make_dataset(
-            max_sequence_length, first_data.validation, first_data.data, include_unique_id=True)
+    train_data_set = PreparedDataDataset(max_sequence_length, data, which='train')
+    validation_data_set = PreparedDataDataset(max_sequence_length, data, which='validation')
 
     num_train_steps = int(
-        len(first_data.train) /
+        len(train_data_set) /
         settings.train_batch_size /
         settings.gradient_accumulation_steps * settings.num_train_epochs)
 
-    num_predictions = sum(max(1, int(np.prod(data_key_to_shape[k]))) for k in data_key_to_shape)
+    prediction_shapes = OrderedDict()
+
+    loss_example_counts = dict()
+    loss_handlers = list()
+    for k in train_data_set.fields:
+        if train_data_set.is_response_data(k):
+            if k in settings.loss_tasks:
+                data_key = train_data_set.data_set_key_for_field(k)
+                loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
+            loss_handlers.append(NamedTargetStopWordMSE(k, keep_content=True))
+            prediction_shapes[k] = train_data_set.value_shape(k)
+
+    loss_weights = _loss_weights(loss_example_counts)
+    for loss_handler in loss_handlers:
+        if loss_handler.field in loss_weights:
+            loss_handler.weight = loss_weights[loss_handler.field]
 
     # Prepare model
-    model = BertForTokenRegression.from_pretrained(settings.bert_model, num_predictions=num_predictions)
+    model = BertForTokenRegression.from_pretrained(settings.bert_model, prediction_key_to_shape=prediction_shapes)
     if settings.fp16:
         model.half()
     model.to(device)
@@ -313,11 +325,11 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
 
     # Prepare optimizer
     if settings.fp16:
-        param_optimizer = [(n, param.clone().detach().to('cpu').float().requires_grad_()) \
-                            for n, param in model.named_parameters()]
+        param_optimizer = [(n, param.clone().detach().to('cpu').float().requires_grad_())
+                           for n, param in model.named_parameters()]
     elif settings.optimize_on_cpu:
-        param_optimizer = [(n, param.clone().detach().to('cpu').requires_grad_()) \
-                            for n, param in model.named_parameters()]
+        param_optimizer = [(n, param.clone().detach().to('cpu').requires_grad_())
+                           for n, param in model.named_parameters()]
     else:
         param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta']
@@ -333,18 +345,18 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     train_results = TaskResults()
     validation_results = TaskResults()
     logger.info("***** Running training *****")
-    logger.info("  Num orig examples = %d", len(first_data.train))
-    logger.info("  Num split examples = %d", len(first_data.train))
+    logger.info("  Num orig examples = %d", len(train_data_set))
+    # for now we set max_sequence_length so these are never split
+    logger.info("  Num split examples = %d", len(train_data_set))
     logger.info("  Batch size = %d", settings.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
 
-    loss_handler = NamedTargetStopWordMSE(keep_content=True, ordered_shape_dict=data_key_to_shape)
-
     if settings.local_rank == -1:
-        train_sampler = RandomSampler(train_data)
+        train_sampler = RandomSampler(train_data_set)
     else:
-        train_sampler = DistributedSampler(train_data)
-    train_data_loader = TorchDataLoader(train_data, sampler=train_sampler, batch_size=settings.train_batch_size)
+        train_sampler = DistributedSampler(train_data_set)
+    train_data_loader = TorchDataLoader(
+        train_data_set, sampler=train_sampler, batch_size=settings.train_batch_size, collate_fn=collate_fn)
 
     if settings.show_epoch_progress:
         epoch_range = trange(int(settings.num_train_epochs), desc="Epoch")
@@ -362,15 +374,15 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
 
         for step, batch in enumerate(batch_iterator):
             if n_gpu == 1:
-                batch = tuple(t.to(device) for t in batch)  # multi-gpu does scattering it-self
-            input_ids, input_mask, is_stop, is_begin_word_pieces, response_data = batch
-            predictions = model(input_ids, attention_mask=input_mask)
-            loss_dict = loss_handler(predictions, response_data, is_stop, is_begin_word_pieces)
+                for k in batch:
+                    batch[k] = batch[k].to(device)
+            predictions = model(batch)
+            loss_dict = OrderedDict((h.field, (h.weight, h(batch, predictions))) for h in loss_handlers)
             loss = None
             for data_key in loss_dict:
-                sq_err, valid_count = loss_dict[data_key]
+                weight, (sq_err, valid_count) = loss_dict[data_key]
                 if data_key in settings.loss_tasks:
-                    current = sq_err.sum() / valid_count
+                    current = weight * sq_err.sum() / valid_count
                     if loss is None:
                         loss = current
                     else:
@@ -381,7 +393,7 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                     sq_err.detach().cpu().numpy().sum().item() / valid_count)
 
             if loss is not None:
-                print('train', loss.item() / len(input_ids))
+                tqdm.write('train: {}'.format(loss.item() / len(batch['unique_id'])))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.fp16 and settings.loss_scale != 1.0:
@@ -410,52 +422,35 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                     model.zero_grad()
                     global_step += 1
 
-        if validation_data is not None:
-            evaluate(settings, model, loss_handler, device, global_step, validation_results, validation_data)
+        if len(validation_data_set) > 0:
+            evaluate(settings, model, loss_handlers, device, global_step, validation_results, validation_data_set)
 
     logger.info("***** Running predictions *****")
-    logger.info("  Num orig examples = %d", len(first_data.validation))
-    logger.info("  Num split examples = %d", len(first_data.validation))
+    logger.info("  Num orig examples = %d", len(validation_data_set))
+    logger.info("  Num split examples = %d", len(validation_data_set))
     logger.info("  Batch size = %d", settings.predict_batch_size)
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    if validation_data is not None:
+    if len(validation_data_set) > 0:
         all_validation = evaluate(
-            settings, model, loss_handler, device, global_step, validation_results, validation_data,
+            settings, model, loss_handlers, device, global_step, validation_results, validation_data_set,
             return_detailed=True)
     else:
-        all_validation = []
+        all_validation = {}
 
-    test_id_to_tokens = None
-    if first_data.test is not None and len(first_data.test) > 0:
-        test_data, _, test_id_to_tokens = make_dataset(
-            max_sequence_length, first_data.test, first_data.data, include_unique_id=True)
-        test_results = TaskResults()
+    test_data_set = PreparedDataDataset(max_sequence_length, data, which='test')
+
+    test_results = TaskResults()
+    if len(test_data_set) > 0:
         all_test = evaluate(
-            settings, model, loss_handler, device, global_step, test_results, test_data,
-            return_detailed=True)
+            settings, model, loss_handlers, device, global_step, test_results, test_data_set, return_detailed=True)
     else:
-        all_test = []
+        all_test = {}
 
-    write_predictions(output_validation_path, all_validation, validation_id_to_tokens)
-    write_predictions(output_test_path, all_test, test_id_to_tokens)
-
-
-class SwitchRemember:
-
-    def __init__(self, var):
-        self.var = var
-        self._tests = set()
-
-    @property
-    def tests(self):
-        return list(sorted(self._tests))
-
-    def __eq__(self, test):
-        self._tests.add(test)
-        return self.var == test
+    write_predictions(output_validation_path, all_validation, validation_data_set)
+    write_predictions(output_test_path, all_test, test_data_set)
 
 
 def iterate_powerset(items):
@@ -498,6 +493,10 @@ def main():
                         help='DANGER: If specified, the current results will'
                              ' be removed and we will start from scratch')
 
+    parser.add_argument('--force_cache_miss', action='store_true', required=False,
+                        help='If specified, data will be loaded from raw files and then recached. '
+                             'Useful if loading logic has changed')
+
     parser.add_argument(
         '--name', action='store', required=False, default='erp', help='Which set to run')
 
@@ -524,7 +523,7 @@ def main():
     training_variations_, settings_, num_runs_, min_memory_ = named_variations(args.name)
 
     for training_variation in training_variations_:
-        run_variation(args.name, training_variation, settings_, num_runs_)
+        run_variation(args.name, training_variation, settings_, num_runs_, args.force_cache_miss)
 
 
 if __name__ == '__main__':

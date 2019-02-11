@@ -1,12 +1,14 @@
 import os
 from collections import OrderedDict
+import itertools
 import dataclasses
 
 import numpy as np
+import torch
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model
+from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, FieldSpec
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
 
@@ -57,6 +59,12 @@ def _save_to_cache(cache_path, data, kwargs):
     for k in data.response_data:
         result['__response_data__{}'.format(k)] = data.response_data[k]
 
+    if data.field_specs is not None:
+        for k in data.field_specs:
+            result['__field_spec_tensor_dtype__{}'.format(k)] = str(data.field_specs[k].tensor_dtype)
+            result['__field_spec_fill_value__{}'.format(k)] = data.field_specs[k].fill_value
+            result['__field_spec_is_sequence__{}'.format(k)] = data.field_specs[k].is_sequence
+
     np.savez(
         cache_path,
         __num_input_examples__=num_input_examples,
@@ -69,6 +77,28 @@ def _save_to_cache(cache_path, data, kwargs):
         __test_proportion__=data.test_proportion,
         __validation_proportion_of_train__=data.validation_proportion_of_train,
         **result)
+
+
+def _str_to_torch_dtype(s):
+    if s in {'str'}:
+        return str
+    if s in {'torch.float32', 'torch.float', 'float32', 'float'}:
+        return torch.float32
+    if s in {'torch.float64', 'torch.double', 'float64', 'double'}:
+        return torch.float64
+    if s in {'torch.float16', 'torch.half', 'float16', 'half'}:
+        return torch.float16
+    if s in {'torch.uint8', 'uint8'}:
+        return torch.uint8
+    if s in {'torch.int8', 'int8'}:
+        return torch.int8
+    if s in {'torch.int16', 'torch.short', 'int16', 'short'}:
+        return torch.int16
+    if s in {'torch.int32', 'torch.int', 'int32', 'int'}:
+        return torch.int32
+    if s in {'torch.int64', 'torch.long', 'int64', 'long'}:
+        return torch.long
+    raise ValueError('Unknown dtype: {}'.format(s))
 
 
 def _load_from_cache(cache_path, kwargs, force_cache_miss):
@@ -92,26 +122,39 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         '__test_proportion__',
         '__validation_proportion_of_train__']
 
-    kwargs_file = dict()
-    response_data = dict()
-    example_data = dict()
-    for k in loaded.keys():
-        if k.startswith('__kwarg__'):
-            kwargs_file[k[len('__kwarg__'):]] = loaded[k]
-        elif k.startswith('__response_data__'):
-            response_data[k[len('__response_data__'):]] = loaded[k]
-        elif not k.startswith('__'):
-            example_data[k] = loaded[k]
-        elif k not in special_keys:
-            raise ValueError('Unexpected key: {}'.format(k))
+    key_prefixes = [
+        '__kwarg__',
+        '__response_data__',
+        '__field_spec_tensor_dtype__',
+        '__field_spec_fill_value__',
+        '__field_spec_is_sequence__']
 
-    if len(kwargs) != len(kwargs_file):
+    prefix_results = dict()
+    example_data = dict()
+
+    for prefix in key_prefixes:
+        prefix_results[prefix] = dict()
+
+    for k in loaded.keys():
+        is_prefix = False
+        for prefix in key_prefixes:
+            if k.startswith(prefix):
+                prefix_results[k[len(prefix):]] = loaded[k]
+                is_prefix = True
+                break
+        if not is_prefix:
+            if not k.startswith('__'):
+                example_data[k] = loaded[k]
+            elif k not in special_keys:
+                raise ValueError('Unexpected key: {}'.format(k))
+
+    if len(kwargs) != len(prefix_results['__kwarg__']):
         return None
 
     for k in kwargs:
-        if k not in kwargs_file:
+        if k not in prefix_results['__kwarg__']:
             return None
-        if kwargs[k] != kwargs_file[k]:
+        if kwargs[k] != prefix_results['__kwarg__']:
             return None
 
     all_examples = None
@@ -131,6 +174,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
 
     for idx in range(len(all_examples)):
         ex = InputFeatures(**all_examples[idx])
+        ex.tokens = [s for s in ex.tokens]  # convert array back to list of tokens
         all_examples[idx] = ex
 
     example_splits = [
@@ -151,14 +195,60 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         assert(len(test_input_examples) == 0)
         test_input_examples = None
 
+    tensor_dtypes = prefix_results['__field_spec_tensor_dtype__']
+    fill_values = prefix_results['__field_spec_fill_value__']
+    is_sequence = prefix_results['__field_spec_is_sequence__']
+    assert(len(tensor_dtypes) == len(fill_values))
+    assert(len(tensor_dtypes) == len(is_sequence))
+    field_specs = dict()
+    for k in tensor_dtypes:
+        field_specs[k] = FieldSpec(
+            fill_value=fill_values[k].item(),
+            tensor_dtype=_str_to_torch_dtype(tensor_dtypes[k].item()),
+            is_sequence=is_sequence[k].item())
+
+    if len(field_specs) == 0:
+        field_specs = None
+
     return RawData(
         input_examples,
-        response_data,
+        prefix_results['__response_data__'],
         test_input_examples=test_input_examples,
         validation_input_examples=validation_input_examples,
         is_pre_split=loaded['__is_pre_split__'].item(),
         test_proportion=loaded['__test_proportion__'].item(),
-        validation_proportion_of_train=loaded['__validation_proportion_of_train__'].item())
+        validation_proportion_of_train=loaded['__validation_proportion_of_train__'].item(),
+        field_specs=field_specs)
+
+
+def _populate_default_field_specs(raw_data):
+    x, y, z = raw_data.input_examples, raw_data.validation_input_examples, raw_data.test_input_examples
+    if x is None:
+        x = []
+    if y is None:
+        y = []
+    if z is None:
+        z = []
+    all_fields = set()
+    for ex in itertools.chain(x, y, z):
+        all_fields.update([field.name for field in dataclasses.fields(ex)])
+
+    default_field_specs = {
+        'unique_id': FieldSpec(tensor_dtype=torch.long, is_sequence=False),
+        'tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
+        'input_ids': FieldSpec(tensor_dtype=torch.long),
+        'input_mask': FieldSpec(tensor_dtype=torch.uint8),
+        'input_is_stop': FieldSpec(fill_value=1, tensor_dtype=torch.uint8),
+        'input_is_begin_word_pieces': FieldSpec(tensor_dtype=torch.uint8),
+        'input_type_ids': FieldSpec(tensor_dtype=torch.long),
+        'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long)
+    }
+
+    if raw_data.field_specs is None:
+        raw_data.field_specs = {}
+    for field in all_fields:
+        if field not in raw_data.field_specs and field in default_field_specs:
+            raw_data.field_specs[field] = default_field_specs[field]
 
 
 class DataLoader(object):
@@ -177,7 +267,6 @@ class DataLoader(object):
     def __init__(
             self,
             bert_pre_trained_model_name,
-            max_sequence_length,
             cache_path,
             geco_path,
             bnc_root,
@@ -214,11 +303,11 @@ class DataLoader(object):
                     kwargs = data_key_kwarg_dict[DataManager.harry_potter]
                 result = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
         """
-        (self.bert_pre_trained_model_name, self.max_sequence_length, self.cache_path, self.geco_path, self.bnc_root,
+        (self.bert_pre_trained_model_name, self.cache_path, self.geco_path, self.bnc_root,
          self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
          self.english_web_universal_dependencies_v_1_2_path, self.proto_roles_english_web_path, self.ontonotes_path,
          self.proto_roles_prop_bank_path, self.natural_stories_path, self.data_key_kwarg_dict) = (
-            bert_pre_trained_model_name, max_sequence_length, cache_path, geco_path, bnc_root, harry_potter_path,
+            bert_pre_trained_model_name, cache_path, geco_path, bnc_root, harry_potter_path,
             frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
             proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, natural_stories_path,
             data_key_kwarg_dict)
@@ -237,6 +326,7 @@ class DataLoader(object):
             keys = [keys]
 
         result = OrderedDict()
+
         for key in keys:
 
             cache_path = os.path.join(self.cache_path, '{}.npz'.format(key))
@@ -259,12 +349,11 @@ class DataLoader(object):
                 #     result[key] = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
                 if key == DataLoader.ucl:
                     result[key] = ucl_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.max_sequence_length, self.frank_2013_eye_path,
+                        spacy_tokenizer_model, bert_tokenizer, self.frank_2013_eye_path,
                         self.frank_2015_erp_path, **kwargs)
                 elif key == DataLoader.natural_stories:
                     result[key] = natural_stories_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.max_sequence_length, self.natural_stories_path,
-                        **kwargs)
+                        spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:
@@ -281,6 +370,7 @@ class DataLoader(object):
                 else:
                     raise ValueError('Unrecognized key: {}'.format(key))
 
+                _populate_default_field_specs(result[key])
                 _save_to_cache(cache_path, result[key], kwargs)
 
             else:

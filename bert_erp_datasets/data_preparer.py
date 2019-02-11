@@ -5,15 +5,17 @@ from functools import partial
 from itertools import groupby, chain
 from dataclasses import dataclass, replace
 from typing import List, Mapping, Any, Optional
-from bert_erp_common import FrozenCopyOfDict
 import numpy as np
 from scipy.stats import boxcox
 from sklearn.decomposition import PCA
 
+from bert_erp_tokenization import FieldSpec
+from bert_erp_common import FrozenCopyOfDict
+
 
 __all__ = [
     'DataPreparer',
-    'LoadedDataTuple',
+    'PreparedData',
     'split_data',
     'PreprocessBoxcox',
     'PreprocessLog',
@@ -526,11 +528,12 @@ class PreprocessMany:
 
 
 @dataclass(frozen=True)
-class LoadedDataTuple:
+class PreparedData:
     train: Optional[List[Mapping[str, Any]]] = None
     validation: Optional[List[Mapping[str, Any]]] = None
     test: Optional[List[Mapping[str, Any]]] = None
     data: Optional[Mapping[str, Any]] = None
+    field_specs: Optional[Mapping[str, FieldSpec]] = None
 
 
 class DataPreparer(object):
@@ -546,11 +549,12 @@ class DataPreparer(object):
 
         for k in raw_data_dict:
             if raw_data_dict[k].is_pre_split:
-                result[k] = LoadedDataTuple(
+                result[k] = PreparedData(
                     raw_data_dict[k].input_examples,
                     raw_data_dict[k].validation_input_examples,
                     raw_data_dict[k].test_input_examples,
-                    FrozenCopyOfDict(raw_data_dict[k].response_data))
+                    FrozenCopyOfDict(raw_data_dict[k].response_data),
+                    field_specs=raw_data_dict[k].field_specs)
             else:
                 if k not in self._random_state:
                     self._random_state[k] = np.random.RandomState(self._seed)
@@ -559,11 +563,12 @@ class DataPreparer(object):
                     raw_data_dict[k].test_proportion,
                     raw_data_dict[k].validation_proportion_of_train,
                     random_state=self._random_state[k])
-                loaded_data_tuple = LoadedDataTuple(
+                loaded_data_tuple = PreparedData(
                     train_input_examples,
                     validation_input_examples,
                     test_input_examples,
-                    FrozenCopyOfDict(raw_data_dict[k].response_data))
+                    FrozenCopyOfDict(raw_data_dict[k].response_data),
+                    field_specs=raw_data_dict[k].field_specs)
                 result[k] = loaded_data_tuple
 
         for k in result:

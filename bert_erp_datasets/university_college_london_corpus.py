@@ -10,7 +10,7 @@ from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData
 __all__ = ['read_frank_2015_erp', 'read_frank_2013', 'frank_2015_erp_data', 'ucl_data']
 
 
-def read_frank_2015_erp(spacy_tokenize_model, bert_tokenizer, max_sequence_length, path, return_baseline=False):
+def read_frank_2015_erp(spacy_tokenize_model, bert_tokenizer, path, return_baseline=False):
     from scipy.io import loadmat
     data = loadmat(path)
     sentences = data['sentences'].squeeze(axis=1)
@@ -32,7 +32,7 @@ def read_frank_2015_erp(spacy_tokenize_model, bert_tokenizer, max_sequence_lengt
         s = s.squeeze(axis=0)
 
         input_features = bert_tokenize_with_spacy_meta(
-            spacy_tokenize_model, bert_tokenizer, max_sequence_length, i, [str(w[0]) for w in s], len(rows))
+            spacy_tokenize_model, bert_tokenizer, i, [str(w[0]) for w in s], len(rows))
 
         examples.append(input_features)
 
@@ -154,7 +154,7 @@ def _read_self_paced_data(path):
 
 
 def read_frank_2013(
-        spacy_tokenize_model, bert_tokenizer, max_sequence_length, path, include_eye=True, self_paced_inclusion='all'):
+        spacy_tokenize_model, bert_tokenizer, path, include_eye=True, self_paced_inclusion='all'):
 
     eye_subject_ids = set()
     for subject_data in _read_eye_subject_file(os.path.join(path, 'eyetracking.subj.txt')):
@@ -300,7 +300,7 @@ def read_frank_2013(
             continue
 
         input_features = bert_tokenize_with_spacy_meta(
-            spacy_tokenize_model, bert_tokenizer, max_sequence_length, sentence_id, sentence, offset)
+            spacy_tokenize_model, bert_tokenizer, sentence_id, sentence, offset)
 
         examples.append(input_features)
 
@@ -309,15 +309,14 @@ def read_frank_2013(
     return examples, merged_data_flat
 
 
-def ucl_data(spacy_tokenize_model, bert_tokenizer, max_sequence_length, frank_2013_eye_path, frank_2015_erp_path,
+def ucl_data(spacy_tokenize_model, bert_tokenizer, frank_2013_eye_path, frank_2015_erp_path,
              subtract_erp_baseline=False, include_erp=True, include_eye=True, self_paced_inclusion='all'):
 
     examples_erp = None
     erp = None
     if include_erp:
         erp_result = read_frank_2015_erp(
-            spacy_tokenize_model, bert_tokenizer, max_sequence_length, frank_2015_erp_path,
-            return_baseline=subtract_erp_baseline)
+            spacy_tokenize_model, bert_tokenizer, frank_2015_erp_path, return_baseline=subtract_erp_baseline)
         if subtract_erp_baseline:
             examples_erp, erp, baseline = erp_result
             for k in erp:
@@ -329,8 +328,7 @@ def ucl_data(spacy_tokenize_model, bert_tokenizer, max_sequence_length, frank_20
     eye = None
     if include_eye or (self_paced_inclusion is not False and self_paced_inclusion != 'none'):
         examples_eye, eye = read_frank_2013(
-            spacy_tokenize_model, bert_tokenizer, max_sequence_length,
-            frank_2013_eye_path, include_eye, self_paced_inclusion)
+            spacy_tokenize_model, bert_tokenizer, frank_2013_eye_path, include_eye, self_paced_inclusion)
 
     if examples_eye is not None and examples_erp is not None:
         merged_examples = list()
@@ -397,9 +395,8 @@ def ucl_data(spacy_tokenize_model, bert_tokenizer, max_sequence_length, frank_20
     return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
 
 
-def frank_2015_erp_data(spacy_tokenize_model, bert_tokenizer, max_sequence_length, path, subtract_baseline=False):
-    result = read_frank_2015_erp(
-        spacy_tokenize_model, bert_tokenizer, max_sequence_length, path, return_baseline=subtract_baseline)
+def frank_2015_erp_data(spacy_tokenize_model, bert_tokenizer, path, subtract_baseline=False):
+    result = read_frank_2015_erp(spacy_tokenize_model, bert_tokenizer, path, return_baseline=subtract_baseline)
     if subtract_baseline:
         frank, erp, baseline = result
         for k in erp:

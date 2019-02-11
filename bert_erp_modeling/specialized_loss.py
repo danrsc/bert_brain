@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,47 +51,42 @@ class DetailedResult:
     mask: np.array
     prediction: np.array
     target: np.array
+    data_set_id: Optional[int] = None
     unique_id: Optional[int] = None
 
 
 class NamedTargetStopWordMSE:
 
-    def __init__(self, keep_content, ordered_shape_dict):
+    def __init__(self, field, keep_content, weight=1.):
+        self.field = field
+        self.weight = weight
         self.keep_content = keep_content
-        self.shapes = OrderedDict(ordered_shape_dict)
-        self.splits = list()
-        for k in self.shapes:
-            n = max(1, int(np.prod(self.shapes[k])))
-            self.splits.append(n)
 
-    def __call__(self, predictions, target, is_stop, is_begin_word_pieces, return_detailed=False, unique_ids=None):
-        split_predictions = torch.split(predictions, self.splits, dim=-1)
-        split_target = torch.split(target, self.splits, dim=-1)
-        result = OrderedDict()
-        detailed_result = OrderedDict() if return_detailed else None
-        for k, k_predictions, k_target in zip(self.shapes, split_predictions, split_target):
-            k_predictions = k_predictions.view(k_predictions.size()[:2] + self.shapes[k])
-            k_target = k_target.view(k_target.size()[:2] + self.shapes[k])
-            mask = stop_word_and_target_not_nan_mask(self.keep_content, k_target, is_stop, is_begin_word_pieces)
-            sq_err, valid_count = masked_squared_error(mask, k_predictions, k_target)
-            result[k] = sq_err, valid_count
-            if return_detailed:
-                batch_mask = mask.detach().cpu().numpy()
-                batch_predictions = k_predictions.detach().cpu().numpy()
-                batch_target = k_target.detach().cpu().numpy()
-                batch_mask = np.split(batch_mask, len(batch_mask))
-                batch_predictions = np.split(batch_predictions, len(batch_predictions))
-                batch_target = np.split(batch_target, len(batch_target))
-                detailed_result[k] = list()
-                for idx, (example_mask, example_predictions, example_targets) in enumerate(zip(
-                        batch_mask, batch_predictions, batch_target)):
-                    unique_id = unique_ids[idx].item() if unique_ids is not None else None
-                    detailed_result[k].append(
-                        DetailedResult(
-                            np.squeeze(example_mask, axis=0) == 1,  # convert to bool
-                            np.squeeze(example_predictions, axis=0),
-                            np.squeeze(example_targets, axis=0),
-                            unique_id))
+    def __call__(self, batch, predictions, return_detailed=False):
+        predictions = predictions[self.field]
+        target = batch[self.field]
+        mask = stop_word_and_target_not_nan_mask(
+            self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
+        sq_err, valid_count = masked_squared_error(mask, predictions, target)
+        result = sq_err, valid_count
         if return_detailed:
+            batch_mask = mask.detach().cpu().numpy()
+            batch_predictions = predictions.detach().cpu().numpy()
+            batch_target = target.detach().cpu().numpy()
+            batch_mask = np.split(batch_mask, len(batch_mask))
+            batch_predictions = np.split(batch_predictions, len(batch_predictions))
+            batch_target = np.split(batch_target, len(batch_target))
+            detailed_result = list()
+            for idx, (example_mask, example_predictions, example_targets) in enumerate(zip(
+                    batch_mask, batch_predictions, batch_target)):
+                data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
+                unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
+                detailed_result.append(
+                    DetailedResult(
+                        np.squeeze(example_mask, axis=0) == 1,  # convert to bool
+                        np.squeeze(example_predictions, axis=0),
+                        np.squeeze(example_targets, axis=0),
+                        data_set_id,
+                        unique_id))
             return result, detailed_result
         return result
