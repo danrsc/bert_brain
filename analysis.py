@@ -4,7 +4,7 @@ import numpy as np
 from run_regression import task_hash
 
 
-def print_variation_results(paths, variation_set_name, training_variation, num_runs):
+def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs):
     output_dir = os.path.join(paths.base_path, 'bert', variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     for index_run in range(num_runs):
@@ -14,7 +14,7 @@ def print_variation_results(paths, variation_set_name, training_variation, num_r
             output_results = json.load(validation_json_file)
         for output_result in output_results:
             name = output_result['name']
-            if name not in training_variation:
+            if name not in training_variation and name not in aux_loss:
                 continue
             if name not in run_aggregated:
                 run_aggregated[name] = (list(), list(), list())
@@ -51,7 +51,7 @@ def print_variation_results(paths, variation_set_name, training_variation, num_r
     print('')
 
 
-def sentence_predictions(paths, variation_set_name, training_variation, num_runs):
+def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
     output_dir = os.path.join(paths.base_path, 'bert', variation_set_name, task_hash(set(training_variation)))
     result = dict()
     for index_run in range(num_runs):
@@ -60,15 +60,15 @@ def sentence_predictions(paths, variation_set_name, training_variation, num_runs
             output_results = json.load(validation_json_file)
         for output_result in output_results:
             name = output_result['name']
-            if name not in training_variation:
+            if name not in training_variation and name not in aux_loss:
                 continue
-            if name not in result:
-                result[name] = dict()
             data_key, unique_id = output_result['data_key'], output_result['unique_id']
-            if data_key not in result[name]:
-                result[name][data_key] = dict()
-            if unique_id not in result[name][data_key]:
-                result[name][data_key][unique_id] = list()
-            result[name][data_key][unique_id].append(output_result)
+            if data_key not in result:
+                result[data_key] = dict()
+            if unique_id not in result[data_key]:
+                result[data_key][unique_id] = dict()
+            if name not in result[data_key][unique_id]:
+                result[data_key][unique_id][name] = list()
+            result[data_key][unique_id][name].append(output_result)
 
     return result

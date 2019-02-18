@@ -6,7 +6,7 @@ import dataclasses
 import numpy as np
 
 
-from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData
+from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData, make_tokenizer_model
 
 
 __all__ = ['read_natural_stories', 'natural_stories_data', 'read_natural_story_codings']
@@ -285,14 +285,21 @@ def _read_reaction_times(directory_path):
     return reaction_times, sorted_keys, all_worker_ids
 
 
-def read_natural_story_codings(directory_path):
+def read_natural_story_codings(directory_path, data_loader):
+
+    bert_tokenizer = data_loader.make_bert_tokenizer()
+    spacy_tokenize_model = make_tokenizer_model()
+
     codings = _read_codings(directory_path)
     result = dict()
     for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
-        text = ' '.join([wr.word for wr in sentence_word_records])
+        words = [wr.word for wr in sentence_word_records]
+        text = ' '.join(words)
+        input_features = bert_tokenize_with_spacy_meta(spacy_tokenize_model, bert_tokenizer, unique_id, words, 0)
+        token_key = ' '.join(input_features.tokens)
         if text not in codings:
             raise ValueError('Unable to find codings for sentence: {}'.format(text))
-        result[unique_id] = codings[text]
+        result[token_key] = codings[text]
     return result
 
 

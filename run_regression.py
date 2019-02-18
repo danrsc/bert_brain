@@ -230,7 +230,14 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
         return all_results
 
 
-def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_runs: int, force_cache_miss: bool):
+def run_variation(
+            set_name,
+            loss_tasks: Sequence[str],
+            settings: Settings,
+            num_runs: int,
+            auxiliary_loss_tasks: Sequence[str],
+            force_cache_miss: bool):
+
     if settings.local_rank == -1 or settings.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not settings.no_cuda else "cpu")
         n_gpu = 1  # torch.cuda.device_count()
@@ -270,7 +277,9 @@ def run_variation(set_name, loss_tasks: Sequence[str], settings: Settings, num_r
         return data_loader_, base_path_, model_path_
 
     data_loader, base_path, model_path = io_setup()
-    settings = replace(settings, loss_tasks=set(loss_tasks))
+    loss_tasks = set(loss_tasks)
+    loss_tasks.update(auxiliary_loss_tasks)
+    settings = replace(settings, loss_tasks=loss_tasks)
     data = data_loader.load(settings.task_data_keys, force_cache_miss=force_cache_miss)
     for index_run in trange(num_runs, desc='Run'):
         _run_variation_index(settings, base_path, index_run, data, n_gpu, device)
@@ -501,6 +510,7 @@ def named_variations(name):
 
     erp_tasks = ('epnp', 'pnp', 'elan', 'lan', 'n400', 'p600')
     name = SwitchRemember(name)
+    auxiliary_loss_tasks = set()
 
     if name == 'erp':
         training_variations = list(iterate_powerset(erp_tasks))
@@ -517,10 +527,17 @@ def named_variations(name):
         settings = Settings(task_data_keys=(DataLoader.natural_stories, DataLoader.ucl))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
+    elif name == 'nat_stories_head_loc':
+        training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
+        settings = Settings(
+            task_data_keys=(DataLoader.natural_stories, DataLoader.ucl))
+        auxiliary_loss_tasks = {'input_head_location'}
+        num_runs = 100
+        min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 
-    return training_variations, settings, num_runs, min_memory
+    return training_variations, settings, num_runs, min_memory, auxiliary_loss_tasks
 
 
 def main():
@@ -563,9 +580,9 @@ def main():
             rmtree(base_path)
         sys.exit(0)
 
-    training_variations_, settings_, num_runs_, min_memory_ = named_variations(args.name)
+    training_variations_, settings_, num_runs_, min_memory_, aux_loss_tasks = named_variations(args.name)
     for training_variation in training_variations_:
-        run_variation(args.name, training_variation, settings_, num_runs_, args.force_cache_miss)
+        run_variation(args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss)
 
 
 if __name__ == '__main__':

@@ -320,14 +320,16 @@ class DataLoader(object):
             proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, natural_stories_path,
             data_key_kwarg_dict)
 
+    def make_bert_tokenizer(self):
+        return BertTokenizer.from_pretrained(self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
+
     def load(
             self,
             keys,
             data_preparer=None,
             force_cache_miss=False):
 
-        bert_tokenizer = BertTokenizer.from_pretrained(
-            self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
+        bert_tokenizer = self.make_bert_tokenizer()
         spacy_tokenizer_model = make_tokenizer_model()
 
         if isinstance(keys, str):
