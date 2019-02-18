@@ -293,6 +293,7 @@ def read_natural_story_codings(directory_path):
         if text not in codings:
             raise ValueError('Unable to find codings for sentence: {}'.format(text))
         result[unique_id] = codings[text]
+    return result
 
 
 def read_natural_stories(spacy_tokenize_model, bert_tokenizer, directory_path):
