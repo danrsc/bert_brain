@@ -239,7 +239,7 @@ def _read_coding(path, story_name):
                     values[field.name] = story_name
                     continue
                 record_name = field_name_map[field.name]
-                str_value = record[record_name].strip()
+                str_value = '' if record_name not in record else record[record_name].strip()
                 if len(str_value) == 0 and field.type == int:
                     values[field.name] = 0
                 else:
@@ -289,7 +289,7 @@ def read_natural_story_codings(directory_path):
     codings = _read_codings(directory_path)
     result = dict()
     for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
-        text = ' '.join(sentence_word_records)
+        text = ' '.join([wr.word for wr in sentence_word_records])
         if text not in codings:
             raise ValueError('Unable to find codings for sentence: {}'.format(text))
         result[unique_id] = codings[text]
