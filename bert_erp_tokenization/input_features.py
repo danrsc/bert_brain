@@ -35,7 +35,12 @@ class InputFeatures:
     input_mask: Sequence[int]
     input_is_stop: Sequence[int]
     input_is_begin_word_pieces: Sequence[int]
+    input_lengths: Sequence[int]
+    input_probs: Sequence[float]
     input_type_ids: Sequence[int]
+    input_head_location: Sequence[int]
+    input_head_tokens: Sequence[str]
+    input_head_token_ids: Sequence[int]
     data_ids: Sequence[int]
 
 

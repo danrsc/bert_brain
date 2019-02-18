@@ -192,6 +192,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     for idx in range(len(all_examples)):
         ex = InputFeatures(**all_examples[idx])
         ex.tokens = [s for s in ex.tokens]  # convert array back to list of tokens
+        ex.input_head_tokens = [s for s in ex.input_head_tokens]
         all_examples[idx] = ex
 
     example_splits = [
@@ -242,6 +243,11 @@ def _populate_default_field_specs(raw_data):
         'input_mask': FieldSpec(tensor_dtype=torch.uint8),
         'input_is_stop': FieldSpec(fill_value=1, tensor_dtype=torch.uint8),
         'input_is_begin_word_pieces': FieldSpec(tensor_dtype=torch.uint8),
+        'input_lengths': FieldSpec(tensor_dtype=torch.long),
+        'input_probs': FieldSpec(fill_value=-20.),
+        'input_head_location': FieldSpec(fill_value=np.nan),
+        'input_head_tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
+        'input_head_token_ids': FieldSpec(tensor_dtype=torch.long),
         'input_type_ids': FieldSpec(tensor_dtype=torch.long),
         'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long)
     }

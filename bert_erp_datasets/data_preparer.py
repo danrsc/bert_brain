@@ -356,7 +356,7 @@ class PreprocessPCA:
             # -> (samples, task, features)
             all_values = np.reshape(
                 all_values,
-                (all_values.shape[0], max(1, int(np.prod(all_values.shape[1:-1]))), all_values.shape[-1]))
+                (all_values.shape[0], int(np.prod(all_values.shape[1:-1]))), all_values.shape[-1])
             # -> (task, samples, features)
             all_values = np.transpose(all_values, (1, 0, 2))
             result = list()
@@ -476,17 +476,27 @@ class PreprocessNanMean:
 
 class PreprocessClip:
 
-    def __init__(self, minimum=None, maximum=None, data_key_whitelist=None, data_key_blacklist=None):
+    def __init__(
+            self, minimum=None, maximum=None, value_beyond_min=None, value_beyond_max=None,
+            data_key_whitelist=None, data_key_blacklist=None):
         self.data_key_whitelist = data_key_whitelist
         self.data_key_blacklist = data_key_blacklist
+        self.value_beyond_min = value_beyond_min
+        self.value_beyond_max = value_beyond_max
         self.min = minimum
         self.max = maximum
 
     def _clip(self, x):
         if self.min is not None:
-            x = np.maximum(self.min, x)
+            if self.value_beyond_min is not None:
+                x = np.where(x < self.min, self.value_beyond_min, x)
+            else:
+                x = np.maximum(self.min, x)
         if self.max is not None:
-            x = np.minimum(self.max, x)
+            if self.value_beyond_max is not None:
+                x = np.where(x > self.max, self.value_beyond_max, x)
+            else:
+                x = np.minimum(self.max, x)
         return x
 
     def __call__(self, loaded_data_tuple):

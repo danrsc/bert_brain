@@ -41,10 +41,27 @@ from bert_erp_datasets import \
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 
+
+class TqdmHandler(logging.StreamHandler):
+
+    def __init__(self):
+        logging.StreamHandler.__init__(self)
+
+    def emit(self, record):
+        msg = self.format(record)
+        tqdm.write(msg)
+
+
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO)
+                    level=logging.WARNING)
 logger = logging.getLogger(__name__)
+logging_handler = TqdmHandler()
+logging_handler.setFormatter(
+    logging.Formatter(
+        fmt='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+        datefmt='%m/%d/%Y %H:%M:%S'))
+logger.addHandler(logging_handler)
 
 
 __all__ = [
@@ -55,6 +72,8 @@ __all__ = [
 @dataclass
 class OutputResult:
     name: str
+    data_key: str
+    unique_id: int
     tokens: List[str]
     mask: List[int]
     prediction: List[float]
@@ -76,9 +95,12 @@ def write_predictions(output_path, all_results, data_set):
     for key in all_results:
         for detailed_result in all_results[key]:
             tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
+            data_key = data_set.data_set_key_for_id(detailed_result.data_set_id)
             num_tokens = _num_tokens(tokens)
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
+                data_key,
+                detailed_result.unique_id.item(),
                 tokens[:num_tokens],
                 [bool(x) for x in detailed_result.mask[:num_tokens]],
                 [float(x) for x in detailed_result.prediction[:num_tokens]],
@@ -200,9 +222,9 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
                 total_count += len(batch['unique_id'])
 
     if total_count > 0:
-        print('eval', total_loss / total_count)
+        logger.info('eval: {}'.format(total_loss / total_count))
     else:
-        print('eval', np.nan)
+        logger.info('eval: {}'.format(np.nan))
 
     if return_detailed:
         return all_results
@@ -304,10 +326,13 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     loss_example_counts = dict()
     loss_handlers = list()
     for k in train_data_set.fields:
-        if train_data_set.is_response_data(k):
+        if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
             if k in settings.loss_tasks:
                 data_key = train_data_set.data_set_key_for_field(k)
-                loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
+                if data_key is None:
+                    loss_example_counts[k] = len(train_data_set)
+                else:
+                    loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
             loss_handlers.append(NamedTargetStopWordMSE(k, keep_content=True))
             prediction_shapes[k] = train_data_set.value_shape(k)
 
@@ -316,8 +341,15 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
         if loss_handler.field in loss_weights:
             loss_handler.weight = loss_weights[loss_handler.field]
 
+    additional_input_keys_to_shapes = OrderedDict()
+    for k in train_data_set.fields:
+        if k in settings.additional_input_fields:
+            additional_input_keys_to_shapes[k] = train_data_set.value_shape(k)
+
     # Prepare model
-    model = BertForTokenRegression.from_pretrained(settings.bert_model, prediction_key_to_shape=prediction_shapes)
+    model = BertForTokenRegression.from_pretrained(
+        settings.bert_model, prediction_key_to_shape=prediction_shapes,
+        additional_input_keys_to_shapes=additional_input_keys_to_shapes)
     if settings.fp16:
         model.half()
     model.to(device)
@@ -399,7 +431,7 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                     train_result)
 
             if loss is not None:
-                tqdm.write('train: {}'.format(loss.item() / len(batch['unique_id'])))
+                logger.info('train: {}'.format(loss.item() / len(batch['unique_id'])))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.fp16 and settings.loss_scale != 1.0:
@@ -503,10 +535,15 @@ def main():
                         help='If specified, data will be loaded from raw files and then recached. '
                              'Useful if loading logic has changed')
 
+    parser.add_argument('--log_level', action='store', required=False, default='WARNING',
+                        help='Sets the log-level. Defaults to WARNING')
+
     parser.add_argument(
         '--name', action='store', required=False, default='erp', help='Which set to run')
 
     args = parser.parse_args()
+
+    logger.setLevel(args.log_level)
 
     if args.clean:
         while True:
@@ -527,7 +564,6 @@ def main():
         sys.exit(0)
 
     training_variations_, settings_, num_runs_, min_memory_ = named_variations(args.name)
-
     for training_variation in training_variations_:
         run_variation(args.name, training_variation, settings_, num_runs_, args.force_cache_miss)
 

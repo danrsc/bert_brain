@@ -3,7 +3,7 @@ from typing import Any, Sequence, Callable, MutableMapping, Optional
 
 import numpy as np
 from bert_erp_datasets import DataLoader, PreprocessMany, PreprocessStandardize, PreprocessLog, PreprocessPCA, \
-    PreprocessMakeBinary, PreprocessNanMean
+    PreprocessMakeBinary, PreprocessNanMean, PreprocessClip
 
 
 __all__ = ['TaskSettings', 'Settings']
@@ -37,9 +37,14 @@ def _default_task_settings():
         DataLoader.natural_stories: TaskSettings(
             critic_type='mse',
             preprocessor=PreprocessMany(
+                PreprocessClip(maximum=3000, value_beyond_max=np.nan),
                 PreprocessLog(),
                 preprocess_standardize))
     }
+
+
+def _default_additional_fields():
+    return {'input_lengths', 'input_probs'}
 
 
 @dataclass
@@ -47,9 +52,10 @@ class Settings:
     # can use an extension to render to file, e.g. 'png', or 'show' to plot
     visualize_mode: str = None
 
-    # which sets to load for the decoder step
+    # which data to load
     task_data_keys: Optional[Sequence[str]] = (DataLoader.ucl,)
 
+    # task specific settings, see TaskSettings
     task_settings: MutableMapping[str, TaskSettings] = field(default_factory=_default_task_settings)
 
     bert_model: str = 'bert-base-uncased'
@@ -70,8 +76,16 @@ class Settings:
     # When splitting up a long document into chunks, how much stride to take between chunks.
     doc_stride: int = 128
 
+    # fields which should be used to evaluate the loss
     loss_tasks: set = field(default_factory=set)
-    loss_data: set = field(default_factory=set)
+
+    # fields which are not in the response_data part of the RawData structure, but which should nevertheless be used
+    # as output targets of the model. If a field is already in loss_tasks then it does not need to also be specified
+    # here, but this allows non-loss fields to be output/evaluated
+    non_response_outputs: set = field(default_factory=set)
+
+    # fields which should be concatenated with the output of BERT before the head is applied
+    additional_input_fields: set = field(default_factory=_default_additional_fields)
 
     save_checkpoints_steps: int = 1000
 

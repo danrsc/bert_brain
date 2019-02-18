@@ -109,7 +109,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                     fields = [field.name for field in dataclasses.fields(f)]
                     for field in fields:
 
-                        if field == token_field:
+                        if current.field_specs[field].tensor_dtype == str:
                             continue
 
                         if field not in self._example_tensors:
