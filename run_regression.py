@@ -35,7 +35,7 @@ from torch.utils.data.distributed import DistributedSampler
 from pytorch_pretrained_bert.optimization import BertAdam
 
 from bert_erp_common import SwitchRemember
-from bert_erp_modeling import BertForTokenRegression, NamedTargetStopWordMSE
+from bert_erp_modeling import BertForTokenRegression, NamedTargetStopWordAwareMSE
 from bert_erp_datasets import \
     DataLoader, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
 from bert_erp_settings import Settings
@@ -73,7 +73,6 @@ __all__ = [
 class OutputResult:
     name: str
     data_key: str
-    unique_id: int
     tokens: List[str]
     mask: List[int]
     prediction: List[float]
@@ -100,7 +99,6 @@ def write_predictions(output_path, all_results, data_set):
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
                 data_key,
-                detailed_result.unique_id.item(),
                 tokens[:num_tokens],
                 [bool(x) for x in detailed_result.mask[:num_tokens]],
                 [float(x) for x in detailed_result.prediction[:num_tokens]],
@@ -192,7 +190,9 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
         with torch.no_grad():
             predictions = model(batch)
             loss_result = OrderedDict(
-                (h.field, (h.weight, h(batch, predictions, return_detailed=return_detailed))) for h in loss_handlers)
+                (h.field,
+                 (h.weight, h(batch, predictions, return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
+                for h in loss_handlers)
             if return_detailed:
                 loss_dict = OrderedDict()
                 for k in loss_result:
@@ -205,12 +205,12 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
                 loss_dict = loss_result
             loss = None
             for data_key in loss_dict:
-                weight, (sq_err, valid_count) = loss_dict[data_key]
-                no_valid_inputs = isinstance(sq_err, str) and sq_err == 'no_valid_inputs'
+                weight, data_loss = loss_dict[data_key]
+                no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
                 if no_valid_inputs:
                     current = np.nan
                 else:
-                    current = sq_err.detach().cpu().numpy().sum().item() / valid_count
+                    current = data_loss
                 if data_key in settings.loss_tasks and not no_valid_inputs:
                     if loss is None:
                         loss = weight * current
@@ -342,7 +342,7 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                     loss_example_counts[k] = len(train_data_set)
                 else:
                     loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
-            loss_handlers.append(NamedTargetStopWordMSE(k, keep_content=True))
+            loss_handlers.append(NamedTargetStopWordAwareMSE(k, keep_content=True))
             prediction_shapes[k] = train_data_set.value_shape(k)
 
     loss_weights = _loss_weights(loss_example_counts)
@@ -422,18 +422,19 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                 for k in batch:
                     batch[k] = batch[k].to(device)
             predictions = model(batch)
-            loss_dict = OrderedDict((h.field, (h.weight, h(batch, predictions))) for h in loss_handlers)
+            loss_dict = OrderedDict(
+                (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
             loss = None
             for data_key in loss_dict:
-                weight, (sq_err, valid_count) = loss_dict[data_key]
-                no_valid_inputs = isinstance(sq_err, str) and sq_err == 'no_valid_inputs'
+                weight, data_loss = loss_dict[data_key]
+                no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
                 if data_key in settings.loss_tasks and not no_valid_inputs:
-                    current = weight * sq_err.sum() / valid_count
+                    current = weight * data_loss
                     if loss is None:
                         loss = current
                     else:
                         loss += current
-                train_result = np.nan if no_valid_inputs else sq_err.detach().cpu().numpy().sum().item() / valid_count
+                train_result = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
                 train_results.add_result(
                     data_key,
                     global_step,
