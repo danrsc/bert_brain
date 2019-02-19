@@ -124,8 +124,8 @@ class _CodingRecord:
     adjective_conjunction: int
 
     # relative clauses
-    source_relative_clause_restrictive: int
-    source_relative_clause_non_restrictive: int
+    subject_relative_clause_restrictive: int
+    subject_relative_clause_non_restrictive: int
     object_relative_clause_restrictive: int
     object_relative_clause_non_restrictive: int
     object_relative_clause_non_canonical: int
@@ -181,8 +181,8 @@ def _read_coding(path, story_name):
         'adjective_conjunction': 'adj conjunction',
 
         # relative clauses
-        'source_relative_clause_restrictive': 'SRC restr',
-        'source_relative_clause_non_restrictive': 'SRC non-restr',
+        'subject_relative_clause_restrictive': 'SRC restr',
+        'subject_relative_clause_non_restrictive': 'SRC non-restr',
         'object_relative_clause_restrictive': 'ORC restr',
         'object_relative_clause_non_restrictive': 'ORC non-restr',
         'object_relative_clause_non_canonical': 'ORC non-canon',
