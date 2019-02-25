@@ -117,6 +117,19 @@ class DetailedResult:
     unique_id: Optional[int] = None
 
 
+def _masked_reduce(loss, valid_count, reduction, as_numpy):
+    if as_numpy:
+        loss = loss.detach().cpu().numpy()
+    if reduction == 'mean' or reduction == 'sum':
+        loss = loss.sum()
+        if as_numpy:
+            loss = loss.item()
+        if reduction == 'mean':
+            return loss / valid_count
+        return loss
+    return loss, valid_count
+
+
 class _NamedTargetStopWordAwareLoss:
 
     def __init__(self, field, keep_content, weight):
@@ -140,7 +153,16 @@ class _NamedTargetStopWordAwareLoss:
         target = batch[self.field]
         mask = stop_word_and_target_not_nan_mask(
             self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
-        result = self._masked_loss(mask, predictions, target, reduction, as_numpy)
+
+        try:
+            result, valid_count = self._masked_loss(mask, predictions, target)
+            result = _masked_reduce(result, valid_count, reduction, as_numpy)
+        except NoValidInputs:
+            if reduction == 'mean' or reduction == 'sum':
+                result = 'no_valid_inputs'
+            else:
+                result = 'no_valid_inputs', 0
+
         if apply_weight:
             result = self.apply_weight(result)
 
@@ -166,33 +188,14 @@ class _NamedTargetStopWordAwareLoss:
             return result, detailed_result
         return result
 
-    def _masked_loss(self, mask, predictions, target, reduction, as_numpy):
+    def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
 
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
 
-    def _masked_loss(self, mask, predictions, target, reduction, as_numpy):
-        try:
-            sq_err, valid_count = masked_squared_error(mask, predictions, target)
-            if as_numpy:
-                sq_err = sq_err.detach().cpu().numpy()
-                if reduction == 'mean' or reduction == 'sum':
-                    sq_err = sq_err.sum().item()
-                    if reduction == 'mean':
-                        return sq_err / valid_count
-                    return sq_err
-                return sq_err, valid_count
-            if reduction == 'mean' or reduction == 'sum':
-                sq_err = sq_err.sum()
-                if reduction == 'mean':
-                    return sq_err / valid_count
-                return sq_err
-            return sq_err, valid_count
-        except NoValidInputs:
-            if reduction == 'mean' or reduction == 'sum':
-                return 'no_valid_inputs'
-            return 'no_valid_inputs', 0
+    def _masked_loss(self, mask, predictions, target):
+        return masked_squared_error(mask, predictions, target)
 
 
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
@@ -201,24 +204,10 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
         super().__init__(field, keep_content, weight)
         self.should_penalize_scale = should_penalize_scale
 
-    def _masked_loss(self, mask, predictions, target, reduction, as_numpy):
-        try:
-            distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
-                mask, predictions, target)
-            loss = distance
-            if self.should_penalize_scale:
-                loss = loss + (var_input - var_target) ** 2
-            if as_numpy:
-                loss = loss.detach().cpu().numpy()
-            if reduction == 'mean' or reduction == 'sum':
-                loss = loss.sum()
-                if as_numpy:
-                    loss = loss.item()
-                if reduction == 'mean':
-                    return loss / valid_count
-                return loss
-            return loss, valid_count
-        except NoValidInputs:
-            if reduction == 'mean' or reduction == 'sum':
-                return 'no_valid_inputs'
-            return 'no_valid_inputs', 0
+    def _masked_loss(self, mask, predictions, target):
+        distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
+            mask, predictions, target)
+        loss = distance
+        if self.should_penalize_scale:
+            loss = loss + (var_input - var_target) ** 2
+        return loss, valid_count
