@@ -12,6 +12,7 @@ from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, 
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
 from .harry_potter import harry_potter_data
+from .number_dataset import number_agreement_data
 
 
 __all__ = ['DataLoader']
@@ -269,6 +270,7 @@ class DataLoader(object):
     proto_roles_english_web = 'proto_roles_english_web'
     proto_roles_prop_bank = 'proto_roles_prop_bank'
     natural_stories = 'natural_stories'
+    number_dataset = 'number_dataset'
 
     all_keys = geco, bnc, harry_potter, ucl, dundee, proto_roles_english_web, proto_roles_prop_bank, natural_stories
 
@@ -283,10 +285,12 @@ class DataLoader(object):
             frank_2015_erp_path,
             dundee_path,
             english_web_universal_dependencies_v_1_2_path,
+            english_web_universal_dependencies_v_2_3_path,
             proto_roles_english_web_path,
             ontonotes_path,
             proto_roles_prop_bank_path,
             natural_stories_path,
+            number_dataset_path,
             data_key_kwarg_dict=None):
         """
         This object knows how to load data, and stores settings that should be invariant across calls to load
@@ -301,6 +305,8 @@ class DataLoader(object):
                 see https://github.com/UniversalDependencies/UD_English-EWT
                 and http://universaldependencies.org/#download
                 and http://hdl.handle.net/11234/1-1548 (version 1.2 archive)
+            english_web_universal_dependencies_v_2_3_path: The path to v2.3 of English Web universal dependencies
+                see https://github.com/UniversalDependencies/UD_English-EWT
             proto_roles_english_web_path: The path to the labels for semantic proto roles for v1.2 of
                 English Web universal dependencies. See http://decomp.io/data/
             data_key_kwarg_dict: A dictionary keyed by Dataset key (e.g. DataManager.harry_potter), and values
@@ -313,12 +319,13 @@ class DataLoader(object):
         """
         (self.bert_pre_trained_model_name, self.cache_path, self.geco_path, self.bnc_root,
          self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
-         self.english_web_universal_dependencies_v_1_2_path, self.proto_roles_english_web_path, self.ontonotes_path,
-         self.proto_roles_prop_bank_path, self.natural_stories_path, self.data_key_kwarg_dict) = (
+         self.english_web_universal_dependencies_v_1_2_path, self.english_web_universal_dependencies_v_2_3_path,
+         self.proto_roles_english_web_path, self.ontonotes_path, self.proto_roles_prop_bank_path,
+         self.natural_stories_path, self.number_dataset_path, self.data_key_kwarg_dict) = (
             bert_pre_trained_model_name, cache_path, geco_path, bnc_root, harry_potter_path,
             frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
-            proto_roles_english_web_path, ontonotes_path, proto_roles_prop_bank_path, natural_stories_path,
-            data_key_kwarg_dict)
+            english_web_universal_dependencies_v_2_3_path, proto_roles_english_web_path, ontonotes_path,
+            proto_roles_prop_bank_path, natural_stories_path, number_dataset_path, data_key_kwarg_dict)
 
     def make_bert_tokenizer(self):
         return BertTokenizer.from_pretrained(self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
@@ -365,6 +372,9 @@ class DataLoader(object):
                 elif key == DataLoader.harry_potter:
                     result[key] = harry_potter_data(
                         spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
+                elif key == DataLoader.number_dataset:
+                    result[key] = number_agreement_data(
+                        spacy_tokenizer_model, bert_tokenizer, self.number_dataset_path, **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:

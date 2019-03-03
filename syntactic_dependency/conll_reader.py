@@ -111,23 +111,28 @@ class ConllReader:
         if len(block) > 0 or text is not None:
             yield block, text
 
-    def iterate_sentences(self, stream, morphology_preprocess_fn=None):
-        for block, text in ConllReader._iterate_blank_line_blocks(stream):
-            is_valid = True
-            # Check that the grid is consistent.
+    def iterate_sentences(self, stream_or_path, morphology_preprocess_fn=None):
+        if isinstance(stream_or_path, str):
+            with open(stream_or_path, 'rt') as stream:
+                for result in self.iterate_sentences(stream, morphology_preprocess_fn):
+                    yield result
+        else:
+            for block, text in ConllReader._iterate_blank_line_blocks(stream_or_path):
+                is_valid = True
+                # Check that the grid is consistent.
 
-            rows = list()
-            for row in block:
-                if len(row) != len(block[0]):
-                    print(block)
-                    # raise ValueError('Inconsistent number of columns:\n%s'% block)
-                    sys.stderr.write('Inconsistent number of columns', block)
-                    is_valid = False
-                    break
-                rows.append(self._read_row(row, morphology_preprocess_fn))
+                rows = list()
+                for row in block:
+                    if len(row) != len(block[0]):
+                        print(block)
+                        # raise ValueError('Inconsistent number of columns:\n%s'% block)
+                        sys.stderr.write('Inconsistent number of columns', block)
+                        is_valid = False
+                        break
+                    rows.append(self._read_row(row, morphology_preprocess_fn))
 
-            if is_valid:
-                yield rows, text
+                if is_valid:
+                    yield rows, text
 
 
 universal_dependency_reader = ConllReader('universal_dependency_reader')

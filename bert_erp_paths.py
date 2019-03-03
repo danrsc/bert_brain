@@ -17,12 +17,15 @@ class Paths:
     default_relative_dundee_path = 'dundee'
     default_relative_english_web_universal_dependencies_v_1_2_path = os.path.join(
         'universal-dependencies-1.2', 'UD_English')
+    default_relative_english_web_universal_dependencies_v_2_3_path = os.path.join(
+        'universal-dependencies-1.2', 'ud-treebanks-v2.3', 'UD_English-EWT')
     default_relative_proto_roles_english_web_path = os.path.join(
         'protoroles_eng_udewt', 'protoroles_eng_ud1.2_11082016.tsv')
     default_relative_proto_roles_prop_bank_path = os.path.join(
         'protoroles_eng_pb', 'protoroles_eng_pb_08302015.tsv')
     default_relative_ontonotes_path = os.path.join('conll-formatted-ontonotes-5.0', 'data')
     default_relative_natural_stories_path = 'natural_stories'
+    default_relative_number_dataset_path = 'number_dataset'
 
     pre_trained_base_path: str = '/share/volume0/drschwar/BERT'
     base_path: str = '/share/volume0/drschwar/ulmfit_data/'
@@ -37,10 +40,12 @@ class Paths:
     frank_2013_eye_path: Optional[str] = None
     dundee_path: Optional[str] = None
     english_web_universal_dependencies_v_1_2_path: Optional[str] = None
+    english_web_universal_dependencies_v_2_3_path: Optional[str] = None
     proto_roles_english_web_path: Optional[str] = None
     proto_roles_prop_bank_path: Optional[str] = None
     ontonotes_path: Optional[str] = None
     natural_stories_path: Optional[str] = None
+    number_dataset_path: Optional[str] = None
 
     def __post_init__(self):
         if self.pre_trained_path is None:
@@ -62,6 +67,9 @@ class Paths:
         if self.english_web_universal_dependencies_v_1_2_path is None:
             self.english_web_universal_dependencies_v_1_2_path = os.path.join(
                 self.base_path, Paths.default_relative_english_web_universal_dependencies_v_1_2_path)
+        if self.english_web_universal_dependencies_v_2_3_path is None:
+            self.english_web_universal_dependencies_v_2_3_path = os.path.join(
+                self.base_path, Paths.default_relative_english_web_universal_dependencies_v_2_3_path)
         if self.proto_roles_english_web_path is None:
             self.proto_roles_english_web_path = os.path.join(
                 self.base_path, Paths.default_relative_proto_roles_english_web_path)
@@ -72,6 +80,8 @@ class Paths:
             self.ontonotes_path = os.path.join(self.base_path, Paths.default_relative_ontonotes_path)
         if self.natural_stories_path is None:
             self.natural_stories_path = os.path.join(self.base_path, Paths.default_relative_natural_stories_path)
+        if self.number_dataset_path is None:
+            self.number_dataset_path = os.path.join(self.base_path, Paths.default_relative_number_dataset_path)
 
     def make_data_loader(
             self, bert_pre_trained_model_name='bert-base-uncased', data_key_kwarg_dict=None):
@@ -79,6 +89,6 @@ class Paths:
             bert_pre_trained_model_name,
             self.cache_path, self.geco_path, self.bnc_root, self.harry_potter_path, self.frank_2013_eye_path,
             self.frank_2015_erp_path, self.dundee_path, self.english_web_universal_dependencies_v_1_2_path,
-            self.proto_roles_english_web_path, self.ontonotes_path, self.proto_roles_prop_bank_path,
-            self.natural_stories_path,
+            self.english_web_universal_dependencies_v_2_3_path, self.proto_roles_english_web_path, self.ontonotes_path,
+            self.proto_roles_prop_bank_path, self.natural_stories_path, self.number_dataset_path,
             data_key_kwarg_dict=data_key_kwarg_dict)

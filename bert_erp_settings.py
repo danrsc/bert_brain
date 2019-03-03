@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Sequence, Callable, MutableMapping, Optional
+from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional
 
 import numpy as np
 from bert_erp_datasets import DataLoader, PreprocessMany, PreprocessStandardize, PreprocessLog, PreprocessPCA, \
@@ -12,6 +12,7 @@ __all__ = ['TaskSettings', 'Settings']
 @dataclass
 class TaskSettings:
     critic_type: str
+    critic_kwargs: Optional[Mapping] = None
     preprocessor: Optional[Callable] = None
     # stop_word_mode can be:
     #     None: no distinction made between content words and stop words
@@ -30,7 +31,7 @@ def _default_task_settings():
 
     return {
         DataLoader.ucl: TaskSettings(
-            critic_type='mse',  # not currently used
+            critic_type='mse',
             preprocessor=PreprocessMany(
                 PreprocessLog(data_key_whitelist=ucl_log_keys),
                 preprocess_standardize)),
@@ -39,11 +40,13 @@ def _default_task_settings():
             preprocessor=PreprocessMany(
                 PreprocessClip(maximum=3000, value_beyond_max=np.nan),
                 PreprocessLog(),
-                preprocess_standardize))
+                preprocess_standardize)),
+        DataLoader.number_dataset: TaskSettings(
+            critic_type='sequence_cross_entropy')
     }
 
 
-def _default_additional_fields():
+def _default_token_level_additional_fields():
     return {'input_lengths', 'input_probs'}
 
 
@@ -85,7 +88,7 @@ class Settings:
     non_response_outputs: set = field(default_factory=set)
 
     # fields which should be concatenated with the output of BERT before the head is applied
-    additional_input_fields: set = field(default_factory=_default_additional_fields)
+    additional_token_level_input_fields: set = field(default_factory=_default_token_level_additional_fields)
 
     save_checkpoints_steps: int = 1000
 

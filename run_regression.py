@@ -35,7 +35,7 @@ from torch.utils.data.distributed import DistributedSampler
 from pytorch_pretrained_bert.optimization import BertAdam
 
 from bert_erp_common import SwitchRemember
-from bert_erp_modeling import BertForTokenRegression, NamedTargetStopWordAwareMSE
+from bert_erp_modeling import BertMultiHead, make_loss_handler
 from bert_erp_datasets import \
     DataLoader, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
 from bert_erp_settings import Settings
@@ -330,35 +330,45 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
         settings.train_batch_size /
         settings.gradient_accumulation_steps * settings.num_train_epochs)
 
-    prediction_shapes = OrderedDict()
+    token_level_prediction_shapes = OrderedDict()
 
     loss_example_counts = dict()
     loss_handlers = list()
     for k in train_data_set.fields:
         if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
+            data_key = train_data_set.data_set_key_for_field(k)
             if k in settings.loss_tasks:
-                data_key = train_data_set.data_set_key_for_field(k)
                 if data_key is None:
                     loss_example_counts[k] = len(train_data_set)
                 else:
                     loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
-            loss_handlers.append(NamedTargetStopWordAwareMSE(k, keep_content=True))
-            prediction_shapes[k] = train_data_set.value_shape(k)
+            critic_type = 'mse'
+            critic_kwargs = None
+            if k in settings.task_settings:
+                critic_type = settings.task_settings[k].critic_type
+                critic_kwargs = settings.task_settings[k].critic_kwargs
+            else:
+                if data_key is not None and data_key in settings.task_settings:
+                    critic_type = settings.task_settings[data_key].critic_type
+                    critic_kwargs = settings.task_settings[data_key].critic_kwargs
+            loss_handlers.append(make_loss_handler(k, critic_type, critic_kwargs))
+            token_level_prediction_shapes[k] = train_data_set.value_shape(k)
 
     loss_weights = _loss_weights(loss_example_counts)
     for loss_handler in loss_handlers:
         if loss_handler.field in loss_weights:
             loss_handler.weight = loss_weights[loss_handler.field]
 
-    additional_input_keys_to_shapes = OrderedDict()
+    token_level_input_key_to_shape = OrderedDict()
     for k in train_data_set.fields:
-        if k in settings.additional_input_fields:
-            additional_input_keys_to_shapes[k] = train_data_set.value_shape(k)
+        if k in settings.additional_token_level_input_fields:
+            token_level_input_key_to_shape[k] = train_data_set.value_shape(k)
 
     # Prepare model
-    model = BertForTokenRegression.from_pretrained(
-        settings.bert_model, prediction_key_to_shape=prediction_shapes,
-        additional_input_keys_to_shapes=additional_input_keys_to_shapes)
+    model = BertMultiHead.from_pretrained(
+        settings.bert_model,
+        token_prediction_key_to_shape=token_level_prediction_shapes,
+        token_level_input_key_to_shape=token_level_input_key_to_shape)
     if settings.fp16:
         model.half()
     model.to(device)
@@ -561,7 +571,7 @@ def main():
 
     args = parser.parse_args()
 
-    logger.setLevel(args.log_level)
+    logger.setLevel(args.log_level.upper())
 
     if args.clean:
         while True:

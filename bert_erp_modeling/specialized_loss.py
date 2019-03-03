@@ -4,9 +4,25 @@ from typing import Optional
 import numpy as np
 import torch
 
+from bert_erp_common import SwitchRemember
 
-__all__ = ['NoValidInputs', 'logical_not', 'masked_squared_error', 'stop_word_and_target_not_nan_mask',
-           'NamedTargetStopWordAwareMSE', 'NamedTargetStopWordAwarePearsonDistance']
+
+__all__ = [
+    'NoValidInputs',
+    'logical_not',
+    'masked_squared_error',
+    'masked_pearsons_distance',
+    'masked_cross_entropy',
+    'masked_binary_cross_entropy_with_logits',
+    'masked_soft_label_cross_entropy',
+    'stop_word_and_target_not_nan_mask',
+    'NamedTargetStopWordAwareMSE',
+    'NamedTargetStopWordAwarePearsonDistance',
+    'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
+    'NamedTargetStopWordAwareCrossEntropy',
+    'NamedTargetStopWordAwareSoftLabelCrossEntropy',
+    'NamedTargetSequenceLoss',
+    'make_loss_handler']
 
 
 class NoValidInputs(Exception):
@@ -86,6 +102,57 @@ def masked_pearsons_distance(mask, input, target, sequence_axis=1):
     return distance, valid_count, var_input, var_target, mean_input, mean_target
 
 
+def masked_cross_entropy(mask, input, target):
+
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        raise NoValidInputs()
+    input = input.view(np.prod(input.size()[:-1]), input.size()[-1])
+    target = target.view(-1)
+    flat_mask = mask.view(-1)
+    valid_indices = torch.nonzero(flat_mask)
+    input = input[valid_indices]
+    target = target[valid_indices]
+    loss = torch.nn.functional.cross_entropy(input, target, reduction='none')
+    result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
+    result.masked_scatter_(mask, loss)
+    return result, valid_count
+
+
+def masked_binary_cross_entropy_with_logits(mask, input, target, pos_weight=None):
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        raise NoValidInputs()
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        torch.masked_select(input, mask), torch.masked_select(target, mask), reduction='none', pos_weight=pos_weight)
+    result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
+    result.masked_scatter_(mask, loss)
+    return result, valid_count
+
+
+def masked_soft_label_cross_entropy(mask, input, target):
+    # note we just assume that the target values sum to 1 along axis=-1
+    if mask is not None:
+        valid_count = mask.sum().item()
+        if valid_count == 0:
+            raise NoValidInputs()
+
+    # set up 1s in the prediction where the mask is False;
+    # this will mean that log_softmax does not give an nan in case the predictions are
+    # strange where they are meaningless
+    safer_input = torch.ones_like(input)
+    safer_input.masked_scatter_(mask.view(mask.size() + (1,)), input)
+
+    softmax = torch.nn.functional.log_softmax(safer_input, dim=-1)
+    terms = -softmax * target
+    cross_entropy = terms.sum(dim=-1)
+    if mask is not None:
+        cross_entropy = _values_or_zeros(mask, cross_entropy)
+    else:
+        valid_count = np.prod(cross_entropy.size())
+    return cross_entropy, valid_count
+
+
 def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_word_pieces):
     if is_stop is not None:
         if len(is_stop.size()) < len(target.size()):
@@ -110,7 +177,7 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
 
 @dataclass
 class DetailedResult:
-    mask: np.array
+    mask: Optional[np.array]
     prediction: np.array
     target: np.array
     data_set_id: Optional[int] = None
@@ -132,7 +199,7 @@ def _masked_reduce(loss, valid_count, reduction, as_numpy):
 
 class _NamedTargetStopWordAwareLoss:
 
-    def __init__(self, field, keep_content, weight):
+    def __init__(self, field, keep_content=True, weight=1.):
         self.field, self.keep_content, self.weight = field, keep_content, weight
 
     def apply_weight(self, result):
@@ -200,7 +267,7 @@ class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
 
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
 
-    def __init__(self, field, keep_content, should_penalize_scale=False, weight=1.):
+    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1.):
         super().__init__(field, keep_content, weight)
         self.should_penalize_scale = should_penalize_scale
 
@@ -211,3 +278,83 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
         if self.should_penalize_scale:
             loss = loss + (var_input - var_target) ** 2
         return loss, valid_count
+
+
+class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_cross_entropy(mask, predictions, target)
+
+
+class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordAwareLoss):
+
+    def __init__(self, field, keep_content, weight=1., pos_weight=None):
+        super().__init__(field, keep_content, weight)
+        self.pos_weight = pos_weight
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
+
+
+class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLoss):
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_soft_label_cross_entropy(mask, predictions, target)
+
+
+class NamedTargetSequenceLoss:
+
+    def __init__(self, field, loss, weight=1.):
+        self.field = field
+        self.loss = loss
+        self.weight = weight
+
+    def __call__(self, batch, predictions, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
+        predictions = predictions[self.field]
+        target = batch[self.field]
+
+        result = self.loss(predictions, target, reduction=reduction)
+        if as_numpy:
+            result = result.detach().cpu().numpy()
+
+        if apply_weight:
+            result = self.weight * result
+
+        if return_detailed:
+            batch_predictions = predictions.detach().cpu().numpy()
+            batch_target = target.detach().cpu().numpy()
+            batch_predictions = np.split(batch_predictions, len(batch_predictions))
+            batch_target = np.split(batch_target, len(batch_target))
+            detailed_result = list()
+            for idx, (example_predictions, example_targets) in enumerate(zip(batch_predictions, batch_target)):
+                data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
+                unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
+                detailed_result.append(
+                    DetailedResult(
+                        mask=None,  # convert to bool
+                        prediction=np.squeeze(example_predictions, axis=0),
+                        target=np.squeeze(example_targets, axis=0),
+                        data_set_id=data_set_id,
+                        unique_id=unique_id))
+            return result, detailed_result
+        return result
+
+
+def make_loss_handler(field, which_loss, loss_kwargs=None):
+    which_loss = SwitchRemember(which_loss)
+    if loss_kwargs is None:
+        loss_kwargs = {}
+    if which_loss == 'mse':
+        return NamedTargetStopWordAwareMSE(field, **loss_kwargs)
+    elif which_loss == 'pearson':
+        return NamedTargetStopWordAwarePearsonDistance(field, **loss_kwargs)
+    elif which_loss == 'cross_entropy':
+        return NamedTargetStopWordAwareCrossEntropy(field, **loss_kwargs)
+    elif which_loss == 'binary_cross_entropy':
+        return NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(field, **loss_kwargs)
+    elif which_loss == 'soft_label_cross_entropy':
+        return NamedTargetStopWordAwareSoftLabelCrossEntropy(field, **loss_kwargs)
+    elif which_loss == 'sequence_cross_entropy':
+        return NamedTargetSequenceLoss(field, torch.nn.functional.cross_entropy)
+    else:
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(which_loss.tests))

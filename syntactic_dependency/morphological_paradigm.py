@@ -1,15 +1,20 @@
 import itertools
 import random
-from dataclasses import dataclass
-from typing import Tuple
 
 import numpy as np
 
+from bert_erp_datasets import SyntaxPattern, GeneratedExample
 from .tree_module import DependencyTree, Arc
 from .conll_reader import universal_dependency_reader
 
 
 # based on code in https://github.com/facebookresearch/colorlessgreenRNNs
+
+
+__all__ = [
+    'preprocess_english_morphology', 'collect_paradigms', 'make_token_to_paradigms', 'make_ltm_to_word',
+    'morph_contexts_frequencies', 'extract_dependency_patterns', 'choose_random_forms', 'generate_morph_pattern_test',
+    'alternate_number_morphology', 'get_alternate_number_form', 'plurality']
 
 
 def preprocess_english_morphology(morph):
@@ -46,7 +51,7 @@ def collect_paradigms(path, reader=universal_dependency_reader, min_freq=5, morp
     return dict((k, paradigms[k]) for k in paradigms if paradigms[k] >= min_freq)
 
 
-def token_to_paradigms(paradigms):
+def make_token_to_paradigms(paradigms):
     result = dict()
     for token, lemma, pos, morph in paradigms:
         if token not in result:
@@ -55,7 +60,7 @@ def token_to_paradigms(paradigms):
     return result
 
 
-def ltm_to_word(tok_to_paradigms):
+def make_ltm_to_word(tok_to_paradigms):
     paradigm_lemmas = dict()
     for token in tok_to_paradigms:
         for lemma, tag, morph, freq in tok_to_paradigms[token]:
@@ -77,12 +82,12 @@ def ltm_to_word(tok_to_paradigms):
     return result
 
 
-def safe_log(x, minimum=0.0001):
+def _safe_log(x, minimum=0.0001):
     x = np.where(x < minimum, minimum, x)
     return np.log(x)
 
 
-def cond_entropy(xy):
+def _cond_entropy(xy):
 
     # normalise
     xy = xy / np.sum(xy)
@@ -96,18 +101,18 @@ def cond_entropy(xy):
     # print(y_x)
 
     # Entropies: H(x|y) H(y|x) H(x) H(y)
-    return np.sum(-xy * safe_log(x_y)), np.sum(-xy * safe_log(y_x)), np.sum(-x_ * safe_log(x_)), np.sum(
-        -y_ * safe_log(y_))
+    return np.sum(-xy * _safe_log(x_y)), np.sum(-xy * _safe_log(y_x)), np.sum(-x_ * _safe_log(x_)), np.sum(
+        -y_ * _safe_log(y_))
 
 
-def pos_structure(nodes, arc):
+def _pos_structure(nodes, arc):
     """ Get a sequence of pos tags for nodes which are direct children of the arc head or the arc child
         nodes - the list of nodes of the context Y, between the head and the child (X, Z) of the arc
     """
     return tuple([n.pos for n in nodes if n.head_id in [arc.head.index, arc.child.index]])
 
 
-def inside(tree, a):
+def _inside(tree, a):
     if a.child.index < a.head.index:
         nodes = tree.nodes[a.child.index: a.head.index - 1]
         left = a.child
@@ -119,7 +124,7 @@ def inside(tree, a):
     return nodes, left, right
 
 
-def filtered_features(morphology, feature_keys):
+def _filtered_features(morphology, feature_keys):
     if feature_keys is None:
         return morphology
 
@@ -144,12 +149,12 @@ def morph_contexts_frequencies(trees, feature_keys):
         for a in t.arcs:
             if 3 < a.arc_length() < 15 and t.is_projective_arc(a):
                 # print("\n".join(str(n) for n in t.nodes))
-                nodes, l, r = inside(t, a)
-                substring = (l.pos,) + pos_structure(nodes, a) + (r.pos,)
+                nodes, l, r = _inside(t, a)
+                substring = (l.pos,) + _pos_structure(nodes, a) + (r.pos,)
                 # print(substring)
                 if substring:
-                    l_features = filtered_features(l.morph, feature_keys)
-                    r_features = filtered_features(r.morpy, feature_keys)
+                    l_features = _filtered_features(l.morph, feature_keys)
+                    r_features = _filtered_features(r.morpy, feature_keys)
                     if len(l_features) == 0 or len(r_features) == 0:
                         continue
                     key = l_features, r_features
@@ -169,16 +174,9 @@ def morph_contexts_frequencies(trees, feature_keys):
     return d_left, d_right
 
 
-@dataclass
-class Pattern:
-    arc_direction: str
-    context: Tuple[str, ...]
-    left_value_1: str
-    left_value_2: str
-
-
-def find_good_patterns(arc_direction, context_dict, freq_threshold):
+def _find_good_patterns(arc_direction, context_dict, freq_threshold):
     """
+    :param arc_direction: The arc direction of the context_dict
     :param context_dict: is a dictionary of type { Y context : {(X, Z) : count} }
                          for X Y Z sequences where X and Z could be of any type (tags, morph)
 
@@ -209,7 +207,7 @@ def find_good_patterns(arc_direction, context_dict, freq_threshold):
                 for j, y in enumerate(right_v):
                     a[(i, j)] = d[(x, y)]
 
-            l_r, _, _, _ = cond_entropy(a)
+            l_r, _, _, _ = _cond_entropy(a)
             # mi = l_e - l_r
 
             count_l1 = 0
@@ -222,7 +220,7 @@ def find_good_patterns(arc_direction, context_dict, freq_threshold):
 
             #  print(l_r, r_l, l_e, r_e, mi)
             if l_r < 0.001 and count_l1 > freq_threshold and count_l2 > freq_threshold:
-                patterns.append(Pattern(arc_direction, context, l1, l2))
+                patterns.append(SyntaxPattern(arc_direction, context, l1, l2))
                 # print(context, l_r, mi)
                 # print(l1, l2, count_l1, count_l2)
                 #  for l, r in d:
@@ -231,11 +229,13 @@ def find_good_patterns(arc_direction, context_dict, freq_threshold):
     return patterns
 
 
-def grep_morph_pattern(trees, context, l_values, dep_dir, feature_keys=None):
+def _grep_morph_pattern(trees, context, l_values, dep_dir, feature_keys=None):
     """
+    :param trees: The DependencyTree sequence in which to look for patterns
     :param context: Y
     :param l_values:  l_values are relevant X values
     :param dep_dir:
+    :param feature_keys: The set of features to consider (e.g. Number, Case, ...)
     :return: generator of (context-type, l, r, tree, Y nodes) tuples
     """
     if feature_keys is None:
@@ -248,7 +248,7 @@ def grep_morph_pattern(trees, context, l_values, dep_dir, feature_keys=None):
                     continue
 
                 #  print("\n".join(str(n) for n in t.nodes))
-                nodes, l, r = inside(t, a)
+                nodes, l, r = _inside(t, a)
 
                 if a.dir != dep_dir:
                     continue
@@ -256,9 +256,9 @@ def grep_morph_pattern(trees, context, l_values, dep_dir, feature_keys=None):
                 if not any(m in l.morph for m in l_values):
                     #  print(features(l.morph), l_values)
                     continue
-                if filtered_features(r.morph, feature_keys) != filtered_features(l.morph, feature_keys):
+                if _filtered_features(r.morph, feature_keys) != _filtered_features(l.morph, feature_keys):
                     continue
-                substring = (l.pos,) + pos_structure(nodes, a) + (r.pos,)
+                substring = (l.pos,) + _pos_structure(nodes, a) + (r.pos,)
 
                 if substring == context:
                     #  print(substring, context)
@@ -287,31 +287,31 @@ def extract_dependency_patterns(trees, freq_threshold, feature_keys):
     context_right_dependency_counts = _filter_infrequent(context_right_dependency_counts, filter_threshold)
 
     # print('Finding good patterns')
-    good_patterns_left = find_good_patterns(Arc.DirectionLeft, context_left_dependency_counts, freq_threshold)
-    good_patterns_right = find_good_patterns(Arc.DirectionRight, context_right_dependency_counts, freq_threshold)
+    good_patterns_left = _find_good_patterns(Arc.DirectionLeft, context_left_dependency_counts, freq_threshold)
+    good_patterns_right = _find_good_patterns(Arc.DirectionRight, context_right_dependency_counts, freq_threshold)
 
     # print('Saving patterns and sentences matching them')
 
     return good_patterns_left + good_patterns_right
 
 
-def is_content_word(pos):
+def _is_content_word(pos):
     return pos in ["ADJ", "NOUN", "VERB", "PROPN", "NUM", "ADV"]
 
 
-def generate_context(nodes, paradigms, tokenizer):
+def _generate_context(nodes, paradigms, tokenizer):
     output = []
 
     for i in range(len(nodes)):
         substitutes = []
         n = nodes[i]
         # substituting content words
-        if is_content_word(n.pos):
+        if _is_content_word(n.pos):
             for word in paradigms:
                 if word == n.word:
                     continue
                 # matching capitalization and vowel
-                if not match_features(word, n.word):
+                if not _match_features(word, n.word):
                     continue
 
                 tag_set = set([p[1] for p in paradigms[word]])
@@ -332,17 +332,17 @@ def generate_context(nodes, paradigms, tokenizer):
 def choose_random_forms(ltm_paradigms, tokenizer, gold_pos, morph, n_samples=10, gold_word=None):
     candidates = set()
 
-    #lemma_tag_pairs = ltm_paradigms.keys()
-    #test_lemmas = [l for l, t in lemma_tag_pairs]
+    # lemma_tag_pairs = ltm_paradigms.keys()
+    # test_lemmas = [l for l, t in lemma_tag_pairs]
 
     for lemma in ltm_paradigms:
         poses = list(ltm_paradigms[lemma].keys())
         if len(set(poses)) == 1 and poses.pop() == gold_pos:
             form = ltm_paradigms[lemma][gold_pos][morph]
-            _, morph_alt = alt_numeral_morph(morph)
+            _, morph_alt = alternate_number_morphology(morph)
             form_alt = ltm_paradigms[lemma][gold_pos][morph_alt]
 
-            if not is_good_form(gold_word, form, morph, lemma, gold_pos, tokenizer, ltm_paradigms):
+            if not _is_good_form(gold_word, form, morph, lemma, gold_pos, tokenizer, ltm_paradigms):
                 continue
 
             candidates.add((lemma, form, form_alt))
@@ -353,22 +353,6 @@ def choose_random_forms(ltm_paradigms, tokenizer, gold_pos, morph, n_samples=10,
         return random.sample(candidates, len(candidates))
 
 
-@dataclass
-class GeneratedExample:
-    construction_id: int
-    sentence_id: int
-    right_index: int
-    right_pos: str
-    right_morph: str
-    form: str
-    alternate_form: str
-    lemma: str
-    left_index: int
-    left_pos: str
-    prefix: str
-    generated_context: str
-
-
 def generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, tokenizer, n_sentences=10):
 
     output = []
@@ -377,7 +361,7 @@ def generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, tokeni
     n_vocab_unk = 0
     n_paradigms_unk = 0
     # 'nodes' constitute Y, without X or Z included
-    for context, l, r, t, nodes in grep_morph_pattern(
+    for context, l, r, t, nodes in _grep_morph_pattern(
             trees, pattern.context, [pattern.left_value_1, pattern.left_value_2], pattern.arc_direction):
         # pos_constr = "_".join(n.pos for n in t.nodes[l.index - 1: r.index])
 
@@ -385,21 +369,21 @@ def generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, tokeni
         if not all(_is_token(n, tokenizer) for n in nodes + [l, r]):
             n_vocab_unk += 1
             continue
-        if not is_good_form(r.word, r.word, r.morph, r.lemma, r.pos, tokenizer, ltm_paradigms):
+        if not _is_good_form(r.word, r.word, r.morph, r.lemma, r.pos, tokenizer, ltm_paradigms):
             n_paradigms_unk += 1
             continue
 
-        prefix = " ".join(n.word for n in t.nodes[:r.index])
+        prefix = ' '.join(n.word for n in t.nodes[:r.index])
 
         for i in range(n_sentences):
             # sent_id = 0 - original sentence with good lexical items, other sentences are generated
             if i == 0:
                 new_context = " ".join(n.word for n in t.nodes)
                 form = r.word
-                form_alt = get_alt_form(r.lemma, r.pos, r.morph, ltm_paradigms)
+                form_alt = get_alternate_number_form(r.lemma, r.pos, r.morph, ltm_paradigms)
                 lemma = r.lemma
             else:
-                new_context = generate_context(t.nodes, paradigms, tokenizer)
+                new_context = _generate_context(t.nodes, paradigms, tokenizer)
                 random_forms = choose_random_forms(
                     ltm_paradigms, tokenizer, r.pos, r.morph, n_samples=1, gold_word=r.word)
                 if len(random_forms) > 0:
@@ -409,11 +393,12 @@ def generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, tokeni
                     # original form and its alternation are not found because e.g. one or the other is not in paradigms
                     # (they should anyway be in the vocabulary)
                     lemma, form = r.lemma, r.word
-                    form_alt = get_alt_form(r.lemma, r.pos, r.morph, ltm_paradigms)
+                    form_alt = get_alternate_number_form(r.lemma, r.pos, r.morph, ltm_paradigms)
 
+            number = plurality(r.morph)
             generated_example = GeneratedExample(
-                constr_id, i, r.index - 1, r.pos, r.morph, form, form_alt, lemma, l.index - 1, l.pos, prefix,
-                new_context)
+                pattern, constr_id, i, r.index - 1, r.pos, r.morph, form, number, form_alt, lemma, l.index - 1, l.pos,
+                prefix, new_context)
 
             output.append(generated_example)
 
@@ -423,13 +408,23 @@ def generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, tokeni
     return output
 
 
-def alt_numeral_morph(morph):
-    if "Number=Plur" in morph:
-        morph_alt = morph.replace("Plur", "Sing")
-        return "plur", morph_alt
-    elif "Number=Sing" in morph:
-        morph_alt = morph.replace("Sing", "Plur")
-        return "sing", morph_alt
+def alternate_number_morphology(morphology):
+    if 'Number=Plur' in morphology:
+        morph_alt = morphology.replace('Plur', 'Sing')
+        return 'plur', morph_alt
+    elif 'Number=Sing' in morphology:
+        morph_alt = morphology.replace('Sing', 'Plur')
+        return 'sing', morph_alt
+    return None, morphology
+
+
+def plurality(morphology):
+    if 'Number=Plur' in morphology:
+        return 'plur'
+    elif 'Number=Sing' in morphology:
+        return 'sing'
+    else:
+        return None
 
 
 def _is_token(candidate, tokenizer):
@@ -439,8 +434,8 @@ def _is_token(candidate, tokenizer):
     return True
 
 
-def is_good_form(gold_form, new_form, gold_morph, lemma, pos, tokenizer, ltm_paradigms):
-    _, alt_morph = alt_numeral_morph(gold_morph)
+def _is_good_form(gold_form, new_form, gold_morph, lemma, pos, tokenizer, ltm_paradigms):
+    _, alt_morph = alternate_number_morphology(gold_morph)
     if not _is_token(new_form, tokenizer):
         return False
     alt_form = ltm_paradigms[lemma][pos][alt_morph]
@@ -449,21 +444,21 @@ def is_good_form(gold_form, new_form, gold_morph, lemma, pos, tokenizer, ltm_par
     if gold_form is None:
         print(gold_form, gold_morph)
         return True
-    if not match_features(new_form, gold_form):
+    if not _match_features(new_form, gold_form):
         return False
-    if not match_features(alt_form, gold_form):
+    if not _match_features(alt_form, gold_form):
         return False
     return True
 
 
-def is_vowel(c):
+def _is_vowel(c):
     return c in ['a', 'o', 'u', 'e', 'i', 'A', 'O', 'U', 'E', 'I', 'è']
 
 
-def match_features(w1, w2):
-    return w1[0].isupper() == w2[0].isupper() and is_vowel(w1[0]) == is_vowel(w2[0])
+def _match_features(w1, w2):
+    return w1[0].isupper() == w2[0].isupper() and _is_vowel(w1[0]) == _is_vowel(w2[0])
 
 
-def get_alt_form(lemma, pos, morph, ltm_paradigms):
-    _, alt_morph = alt_numeral_morph(morph)
+def get_alternate_number_form(lemma, pos, morph, ltm_paradigms):
+    _, alt_morph = alternate_number_morphology(morph)
     return ltm_paradigms[lemma][pos][alt_morph]
