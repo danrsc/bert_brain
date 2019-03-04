@@ -228,7 +228,13 @@ def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words,
             example_is_begin_word_pieces.append(0 if is_continue_word_piece else 1)
             example_type_ids.append(type_id)
             # we follow the BERT paper and always use the first word-piece as the labeled one
-            example_data_ids.append(data_offset + idx_group if data_offset >= 0 and idx_token == idx_data else -1)
+            data_id = -1
+            if idx_token == idx_data:
+                if callable(data_offset):
+                    data_id = data_offset(idx_group)
+                elif data_offset >= 0:
+                    data_id = data_offset + idx_group
+            example_data_ids.append(data_id)
 
     _append_special_token('[SEP]')
 

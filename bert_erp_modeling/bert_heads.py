@@ -1,8 +1,12 @@
 from collections import OrderedDict
+import logging
+
 import numpy as np
 import torch
 from torch import nn
 from pytorch_pretrained_bert.modeling import PreTrainedBertModel, BertModel
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ['BertMultiHead']
@@ -10,8 +14,9 @@ __all__ = ['BertMultiHead']
 
 class KeyedLinear(torch.nn.Module):
 
-    def __init__(self, input_size, prediction_key_to_shape):
+    def __init__(self, is_sequence, input_size, prediction_key_to_shape):
         super(KeyedLinear, self).__init__()
+        self.is_sequence = is_sequence
         self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
         self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
         self.linear = nn.Linear(input_size, sum(self.splits))
@@ -19,16 +24,21 @@ class KeyedLinear(torch.nn.Module):
     def forward(self, x):
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
-        predictions = OrderedDict(
-            (k, p.view(p.size()[:2] + self.prediction_key_to_shape[k]))
-            for k, p in zip(self.prediction_key_to_shape, predictions))
-        return predictions
+        result = OrderedDict()
+        assert(len(self.prediction_key_to_shape) == len(predictions))
+        for k, p in zip(self.prediction_key_to_shape, predictions):
+            if self.is_sequence:
+                p = p.view(p.size()[:2] + self.prediction_key_to_shape[k])
+            else:
+                p = p.view(p.size()[:1] + self.prediction_key_to_shape[k])
+            result[k] = p
+        return result
 
 
 class BertMultiHead(PreTrainedBertModel):
 
     @staticmethod
-    def _setup_linear_layer(hidden_size, prediction_key_to_shape, input_key_to_shape):
+    def _setup_linear_layer(hidden_size, prediction_key_to_shape, input_key_to_shape, which):
         linear = None
         if prediction_key_to_shape is not None and len(prediction_key_to_shape) > 0:
             if input_key_to_shape is not None:
@@ -37,7 +47,12 @@ class BertMultiHead(PreTrainedBertModel):
             else:
                 input_count = 0
 
-            linear = KeyedLinear(hidden_size + input_count, prediction_key_to_shape)
+            logger.info('{} head active'.format(which))
+            linear = KeyedLinear(which == 'token', hidden_size + input_count, prediction_key_to_shape)
+        else:
+            logger.info('{} head inactive'.format(which))
+            if input_key_to_shape is not None and len(input_key_to_shape) > 0:
+                logger.warning('input_key_to_shape is not None, but {} prediction is inactive'.format(which))
         return input_key_to_shape, linear
 
     def __init__(
@@ -49,7 +64,7 @@ class BertMultiHead(PreTrainedBertModel):
             pooled_input_key_to_shape=None):
 
         if (token_prediction_key_to_shape is None or len(token_prediction_key_to_shape) == 0) and (
-                pooled_prediction_key_to_shape is None or len(pooled_prediction_key_to_shape)):
+                pooled_prediction_key_to_shape is None or len(pooled_prediction_key_to_shape) == 0):
             raise ValueError('At least one of token_prediction_key_to_shape and '
                              'pooled_prediction_key_to_shape must be '
                              'non-empty')
@@ -58,9 +73,9 @@ class BertMultiHead(PreTrainedBertModel):
         self.bert = BertModel(config)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.token_level_input_key_to_shape, self.token_linear = BertMultiHead._setup_linear_layer(
-            config.hidden_size, token_prediction_key_to_shape, token_level_input_key_to_shape)
+            config.hidden_size, token_prediction_key_to_shape, token_level_input_key_to_shape, 'token')
         self.pooled_input_key_to_shape, self.pooled_linear = BertMultiHead._setup_linear_layer(
-            config.hidden_size, pooled_prediction_key_to_shape, pooled_input_key_to_shape)
+            config.hidden_size, pooled_prediction_key_to_shape, pooled_input_key_to_shape, 'pooled')
         self.apply(self.init_bert_weights)
 
     def forward(self, batch):

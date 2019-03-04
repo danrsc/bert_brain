@@ -18,7 +18,7 @@ class Paths:
     default_relative_english_web_universal_dependencies_v_1_2_path = os.path.join(
         'universal-dependencies-1.2', 'UD_English')
     default_relative_english_web_universal_dependencies_v_2_3_path = os.path.join(
-        'universal-dependencies-1.2', 'ud-treebanks-v2.3', 'UD_English-EWT')
+        'universal-dependencies-2.3', 'ud-treebanks-v2.3', 'UD_English-EWT')
     default_relative_proto_roles_english_web_path = os.path.join(
         'protoroles_eng_udewt', 'protoroles_eng_ud1.2_11082016.tsv')
     default_relative_proto_roles_prop_bank_path = os.path.join(

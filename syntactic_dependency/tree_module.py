@@ -83,7 +83,7 @@ class DependencyTree(object):
             sentence_conll_rows: Sequence[ConllRow],
             root_index: int,
             offset: int,
-            text: Optional[str] = None) -> __class__:
+            text: Optional[str] = None) -> 'DependencyTree':
         nodes = list()
         fused_nodes = list()
 
@@ -167,22 +167,22 @@ class DependencyTree(object):
             self.fused_nodes[i] = (start, end, token)
 
     def subtree(self, head):
-        elements = set()
+        elements = dict()
         queue = Queue()
         queue.put(head)
         #  head_ = Node(head.index, head.word, head.pos + "X")
-        elements.add(head)
+        elements[head.index] = head
         visited = set()
         while not queue.empty():
             next_node = queue.get()
-            if next_node in visited:
+            if next_node.index in visited:
                 continue
-            visited.add(next_node)
+            visited.add(next_node.index)
             for child in self.children(next_node):
-                elements.add(child)
+                elements[child.index] = child
                 queue.put(child)
 
-        return sorted(elements, key=lambda element: int(element.index))
+        return [elements[i] for i in sorted(elements)]
 
     def is_projective_arc(self, arc):
         st = self.subtree(arc.head)

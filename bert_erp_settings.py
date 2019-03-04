@@ -42,11 +42,11 @@ def _default_task_settings():
                 PreprocessLog(),
                 preprocess_standardize)),
         DataLoader.number_dataset: TaskSettings(
-            critic_type='sequence_cross_entropy')
+            critic_type='sequence_binary_cross_entropy')
     }
 
 
-def _default_token_level_additional_fields():
+def _default_additional_fields():
     return {'input_lengths', 'input_probs'}
 
 
@@ -88,7 +88,7 @@ class Settings:
     non_response_outputs: set = field(default_factory=set)
 
     # fields which should be concatenated with the output of BERT before the head is applied
-    additional_token_level_input_fields: set = field(default_factory=_default_token_level_additional_fields)
+    additional_input_fields: set = field(default_factory=_default_additional_fields)
 
     save_checkpoints_steps: int = 1000
 

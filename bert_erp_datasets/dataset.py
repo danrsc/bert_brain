@@ -53,6 +53,15 @@ def _filled_values(indices, values, sequence_length, fill_with):
     return vals
 
 
+def _at_most_one_value(indices, values, fill_with):
+    valid_indices = indices[indices >= 0]
+    if len(valid_indices) == 0:
+        return np.full(values.shape[1:], fill_with)
+    if len(valid_indices) > 1:
+        raise ValueError('Too many non-zero indices')
+    return values[valid_indices[0]]
+
+
 def collate_fn(batch):
     if isinstance(batch[0], OrderedDict):
         return OrderedDict((k, collate_fn([d[k] for d in batch])) for k in batch[0])
@@ -175,9 +184,6 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                         else:
                             field_spec = FieldSpec()
 
-                        if not field_spec.is_sequence:
-                            raise ValueError('response_data fields must be sequences')
-
                         # make sure it doesn't conflict with a field we have already seen from a different data-set
                         if key in field_specs:
                             # for now, we don't allow different data-sets to use the same field
@@ -188,10 +194,15 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                         else:
                             field_specs[key] = field_spec
 
-                    response_data[key].append(
-                        _filled_values(
-                            example_values[data_index_field],
-                            current.data[key], max_sequence_length, field_specs[key].fill_value))
+                    if field_specs[key].is_sequence:
+                        response_data[key].append(
+                            _filled_values(
+                                example_values[data_index_field],
+                                current.data[key], max_sequence_length, field_specs[key].fill_value))
+                    else:
+                        response_data[key].append(
+                            _at_most_one_value(
+                                example_values[data_index_field], current.data[key], field_specs[key].fill_value))
 
                 # remember the tokens
                 self._data_id_to_tokens[(data_set_id, example_values[id_field])] = example_values[token_field]
@@ -199,9 +210,13 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             if len(examples) > 0:
                 for key in response_data:
                     # add a dummy row to use as a no-labels value (when the current example is for a different dataset)
-                    response_data[key].append(
-                        _filled_values(np.array([-1]), current.data[key], max_sequence_length,
-                                       field_specs[key].fill_value))
+                    if field_specs[key].is_sequence:
+                        response_data[key].append(
+                            _filled_values(np.array([-1]), current.data[key], max_sequence_length,
+                                           field_specs[key].fill_value))
+                    else:
+                        response_data[key].append(
+                            _at_most_one_value(np.array([-1]), current.data[key], field_specs[key].fill_value))
                     response_data[key] = torch.tensor(response_data[key], dtype=field_specs[key].tensor_dtype)
 
             self._num_examples[data_key] = len(examples)
@@ -252,6 +267,9 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                     if self._is_sequence[field]:
                         return size[2:]
                     return size[1:]
+
+    def is_sequence(self, field):
+        return self._is_sequence[field]
 
     def __getitem__(self, item):
         result = OrderedDict((k, self._example_tensors[k][item]) for k in self._example_tensors)

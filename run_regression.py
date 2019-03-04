@@ -26,6 +26,7 @@ from dataclasses import replace, dataclass, asdict as dataclass_as_dict
 from typing import Sequence, List
 import hashlib
 from tqdm import tqdm, trange
+from tqdm_logging import replace_root_logger_handler
 
 import numpy as np
 import torch
@@ -42,31 +43,13 @@ from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 
 
-class TqdmHandler(logging.StreamHandler):
-
-    def __init__(self):
-        logging.StreamHandler.__init__(self)
-
-    def emit(self, record):
-        msg = self.format(record)
-        tqdm.write(msg)
-
-
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.WARNING)
-logger = logging.getLogger(__name__)
-logging_handler = TqdmHandler()
-logging_handler.setFormatter(
-    logging.Formatter(
-        fmt='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-        datefmt='%m/%d/%Y %H:%M:%S'))
-logger.addHandler(logging_handler)
-
-
 __all__ = [
     'OutputResult', 'write_predictions', 'task_hash', 'named_variations', 'TaskResult', 'TaskResults', 'evaluate',
     'run_variation', 'SwitchRemember', 'iterate_powerset']
+
+
+replace_root_logger_handler()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,14 +78,24 @@ def write_predictions(output_path, all_results, data_set):
         for detailed_result in all_results[key]:
             tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
             data_key = data_set.data_set_key_for_id(detailed_result.data_set_id)
+            is_sequence = data_set.is_sequence(key)
             num_tokens = _num_tokens(tokens)
+            mask = [bool(x) for x in detailed_result.mask[:num_tokens]] \
+                if detailed_result.mask is not None else None
+            # need to handle multivariate here somehow...maybe not use json?
+            if is_sequence:
+                prediction = [x.item() for x in detailed_result.prediction[:num_tokens]]
+                target = [x.item() for x in detailed_result.target[:num_tokens]]
+            else:
+                prediction = detailed_result.prediction.item()
+                target = detailed_result.target.item()
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
                 data_key,
                 tokens[:num_tokens],
-                [bool(x) for x in detailed_result.mask[:num_tokens]],
-                [float(x) for x in detailed_result.prediction[:num_tokens]],
-                [float(x) for x in detailed_result.target[:num_tokens]])))
+                mask,
+                prediction,
+                target)))
     with open(output_path, "w") as writer:
         writer.write(json.dumps(output_results, indent=4) + "\n")
 
@@ -331,6 +324,7 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
         settings.gradient_accumulation_steps * settings.num_train_epochs)
 
     token_level_prediction_shapes = OrderedDict()
+    pooled_prediction_shapes = OrderedDict()
 
     loss_example_counts = dict()
     loss_handlers = list()
@@ -351,8 +345,13 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
                 if data_key is not None and data_key in settings.task_settings:
                     critic_type = settings.task_settings[data_key].critic_type
                     critic_kwargs = settings.task_settings[data_key].critic_kwargs
-            loss_handlers.append(make_loss_handler(k, critic_type, critic_kwargs))
-            token_level_prediction_shapes[k] = train_data_set.value_shape(k)
+            handler = make_loss_handler(k, critic_type, critic_kwargs)
+            loss_handlers.append(handler)
+            prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
+            if train_data_set.is_sequence(k):
+                token_level_prediction_shapes[k] = prediction_shape
+            else:
+                pooled_prediction_shapes[k] = prediction_shape
 
     loss_weights = _loss_weights(loss_example_counts)
     for loss_handler in loss_handlers:
@@ -360,15 +359,23 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
             loss_handler.weight = loss_weights[loss_handler.field]
 
     token_level_input_key_to_shape = OrderedDict()
+    pooled_input_key_to_shape = OrderedDict()
+
     for k in train_data_set.fields:
-        if k in settings.additional_token_level_input_fields:
-            token_level_input_key_to_shape[k] = train_data_set.value_shape(k)
+        if k in settings.additional_input_fields:
+            if train_data_set.is_sequence(k):
+                token_level_input_key_to_shape[k] = train_data_set.value_shape(k)
+            else:
+                pooled_input_key_to_shape[k] = train_data_set.value_shape(k)
 
     # Prepare model
     model = BertMultiHead.from_pretrained(
         settings.bert_model,
         token_prediction_key_to_shape=token_level_prediction_shapes,
-        token_level_input_key_to_shape=token_level_input_key_to_shape)
+        token_level_input_key_to_shape=token_level_input_key_to_shape,
+        pooled_prediction_key_to_shape=pooled_prediction_shapes,
+        pooled_input_key_to_shape=pooled_input_key_to_shape)
+
     if settings.fp16:
         model.half()
     model.to(device)
@@ -545,6 +552,12 @@ def named_variations(name):
         auxiliary_loss_tasks = {'input_head_location'}
         num_runs = 100
         min_memory = 4 * 1024 ** 3
+    elif name == 'number_agreement':
+        training_variations = [('nbr_agree',)]
+        settings = Settings(
+            task_data_keys=(DataLoader.number_dataset,),)
+        num_runs = 10
+        min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 
@@ -571,7 +584,7 @@ def main():
 
     args = parser.parse_args()
 
-    logger.setLevel(args.log_level.upper())
+    logging.getLogger().setLevel(level=args.log_level.upper())
 
     if args.clean:
         while True:

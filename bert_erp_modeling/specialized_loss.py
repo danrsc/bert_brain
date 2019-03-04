@@ -140,8 +140,11 @@ def masked_soft_label_cross_entropy(mask, input, target):
     # set up 1s in the prediction where the mask is False;
     # this will mean that log_softmax does not give an nan in case the predictions are
     # strange where they are meaningless
-    safer_input = torch.ones_like(input)
-    safer_input.masked_scatter_(mask.view(mask.size() + (1,)), input)
+    if mask is not None:
+        safer_input = torch.ones_like(input)
+        safer_input.masked_scatter_(mask.view(mask.size() + (1,)), input)
+    else:
+        safer_input = input
 
     softmax = torch.nn.functional.log_softmax(safer_input, dim=-1)
     terms = -softmax * target
@@ -194,6 +197,8 @@ def _masked_reduce(loss, valid_count, reduction, as_numpy):
         if reduction == 'mean':
             return loss / valid_count
         return loss
+    if reduction != 'none':
+        raise ValueError('Unknown value for reduction: {}'.format(reduction))
     return loss, valid_count
 
 
@@ -258,6 +263,9 @@ class _NamedTargetStopWordAwareLoss:
     def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
+    def shape_adjust(self, shape):
+        return shape
+
 
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
 
@@ -282,13 +290,20 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
 
 class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
 
+    def __init__(self, field, num_classes, keep_content=True, weight=1.):
+        self.num_classes = num_classes
+        super().__init__(field, keep_content, weight)
+
     def _masked_loss(self, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
+
+    def shape_adjust(self, shape):
+        return shape + (self.num_classes,)
 
 
 class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordAwareLoss):
 
-    def __init__(self, field, keep_content, weight=1., pos_weight=None):
+    def __init__(self, field, keep_content=True, weight=1., pos_weight=None):
         super().__init__(field, keep_content, weight)
         self.pos_weight = pos_weight
 
@@ -302,18 +317,18 @@ class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLos
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class NamedTargetSequenceLoss:
+class _NamedTargetSequenceLoss:
 
-    def __init__(self, field, loss, weight=1.):
+    def __init__(self, field, weight=1.):
         self.field = field
-        self.loss = loss
         self.weight = weight
 
     def __call__(self, batch, predictions, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
         predictions = predictions[self.field]
         target = batch[self.field]
 
-        result = self.loss(predictions, target, reduction=reduction)
+        result = self._loss(predictions, target, reduction)
+
         if as_numpy:
             result = result.detach().cpu().numpy()
 
@@ -331,13 +346,59 @@ class NamedTargetSequenceLoss:
                 unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
-                        mask=None,  # convert to bool
+                        mask=None,
                         prediction=np.squeeze(example_predictions, axis=0),
                         target=np.squeeze(example_targets, axis=0),
                         data_set_id=data_set_id,
                         unique_id=unique_id))
             return result, detailed_result
         return result
+
+    def _loss(self, predictions, target, reduction):
+        raise NotImplementedError('{} does not implement _loss'.format(type(self)))
+
+    def shape_adjust(self, shape):
+        return shape
+
+
+class NamedTargetSequenceLoss(_NamedTargetSequenceLoss):
+
+    def __init__(self, field, loss, weight=1.):
+        super().__init__(field, weight)
+        self._loss_fn = loss
+
+    def _loss(self, predictions, target, reduction):
+        try:
+            return self._loss_fn(predictions, target, reduction=reduction)
+        except ValueError as ex:
+            if str(ex).startswith('mean is not'):
+                return self._loss_fn(predictions, target, reduction='elementwise_mean')
+            else:
+                raise
+
+
+class NamedTargetSequenceCrossEntropy(NamedTargetSequenceLoss):
+
+    def __init__(self, field, num_classes, weight=1.):
+        self.num_classes = num_classes
+        super().__init__(field, torch.nn.functional.cross_entropy, weight)
+
+    def shape_adjust(self, shape):
+        return shape + (self.num_classes,)
+
+
+class NamedTargetSequenceSoftLabelCrossEntropy(_NamedTargetSequenceLoss):
+
+    def _loss(self, predictions, target, reduction):
+        loss, valid_count = masked_soft_label_cross_entropy(None, predictions, target)
+        if reduction == 'mean' or reduction == 'sum':
+            loss = loss.sum()
+            if reduction == 'mean':
+                return loss / valid_count
+            return loss
+        if reduction != 'none':
+            raise ValueError('Unknown value for reduction: {}'.format(reduction))
+        return loss
 
 
 def make_loss_handler(field, which_loss, loss_kwargs=None):
@@ -355,6 +416,10 @@ def make_loss_handler(field, which_loss, loss_kwargs=None):
     elif which_loss == 'soft_label_cross_entropy':
         return NamedTargetStopWordAwareSoftLabelCrossEntropy(field, **loss_kwargs)
     elif which_loss == 'sequence_cross_entropy':
-        return NamedTargetSequenceLoss(field, torch.nn.functional.cross_entropy)
+        return NamedTargetSequenceCrossEntropy(field, **loss_kwargs)
+    elif which_loss == 'sequence_binary_cross_entropy':
+        return NamedTargetSequenceLoss(field, torch.nn.functional.binary_cross_entropy_with_logits, **loss_kwargs)
+    elif which_loss == 'sequence_soft_label_cross_entropy':
+        return NamedTargetSequenceSoftLabelCrossEntropy(field, **loss_kwargs)
     else:
         raise ValueError('Unknown value for which_loss. Known values are: {}'.format(which_loss.tests))
