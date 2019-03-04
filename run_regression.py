@@ -23,7 +23,7 @@ import json
 import os
 import random
 from dataclasses import replace, dataclass, asdict as dataclass_as_dict
-from typing import Sequence, List
+from typing import Sequence, List, Mapping, Any
 import hashlib
 from tqdm import tqdm, trange
 from tqdm_logging import replace_root_logger_handler
@@ -55,6 +55,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class OutputResult:
     name: str
+    critic_type: str
+    critic_kwargs: Mapping[str, Any]
     data_key: str
     tokens: List[str]
     mask: List[int]
@@ -69,7 +71,7 @@ def _num_tokens(tokens):
     return len(tokens)
 
 
-def write_predictions(output_path, all_results, data_set):
+def write_predictions(output_path, all_results, data_set, settings):
     """Write final predictions to the json file."""
     logger.info("Writing predictions to: %s" % output_path)
 
@@ -78,6 +80,17 @@ def write_predictions(output_path, all_results, data_set):
         for detailed_result in all_results[key]:
             tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
             data_key = data_set.data_set_key_for_id(detailed_result.data_set_id)
+
+            critic_type = 'mse'
+            critic_kwargs = None
+            if key in settings.task_settings:
+                critic_type = settings.task_settings[key].critic_type
+                critic_kwargs = settings.task_settings[key].critic_kwargs
+            else:
+                if data_key is not None and data_key in settings.task_settings:
+                    critic_type = settings.task_settings[data_key].critic_type
+                    critic_kwargs = settings.task_settings[data_key].critic_kwargs
+
             is_sequence = data_set.is_sequence(key)
             num_tokens = _num_tokens(tokens)
             mask = [bool(x) for x in detailed_result.mask[:num_tokens]] \
@@ -91,6 +104,8 @@ def write_predictions(output_path, all_results, data_set):
                 target = detailed_result.target.item()
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
+                critic_type,
+                critic_kwargs,
                 data_key,
                 tokens[:num_tokens],
                 mask,
@@ -514,8 +529,8 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     else:
         all_test = {}
 
-    write_predictions(output_validation_path, all_validation, validation_data_set)
-    write_predictions(output_test_path, all_test, test_data_set)
+    write_predictions(output_validation_path, all_validation, validation_data_set, settings)
+    write_predictions(output_test_path, all_test, test_data_set, settings)
 
 
 def iterate_powerset(items):
@@ -553,7 +568,7 @@ def named_variations(name):
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'number_agreement':
-        training_variations = [('nbr_agree',)]
+        training_variations = [('nbr_agree',), erp_tasks + ('nbr_agree',), erp_tasks]
         settings = Settings(
             task_data_keys=(DataLoader.number_dataset,),)
         num_runs = 10
