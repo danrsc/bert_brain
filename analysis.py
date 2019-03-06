@@ -281,11 +281,12 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
         cross_entropy = np.nanmean(cross_entropy, axis=0)
 
         indicator_valid = np.logical_not(np.isnan(target))
-
-        target_positive = np.logical_and(np.greater(target, 0), indicator_valid)
-        target_negative = np.logical_and(np.equal(target, 0), indicator_valid)
-        predictions_positive = np.logical_and(np.greater_equal(predictions, 0), indicator_valid)
-        predictions_negative = np.logical_and(np.less(predictions, 0), indicator_valid)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            target_positive = np.logical_and(np.greater(target, 0), indicator_valid)
+            target_negative = np.logical_and(np.equal(target, 0), indicator_valid)
+            predictions_positive = np.logical_and(np.greater_equal(predictions, 0), indicator_valid)
+            predictions_negative = np.logical_and(np.less(predictions, 0), indicator_valid)
 
         true_positive = np.logical_and(predictions_positive, target_positive)
         true_negative = np.logical_and(predictions_negative, target_negative)
