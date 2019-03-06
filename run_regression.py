@@ -87,9 +87,10 @@ def write_predictions(output_path, all_results, data_set, settings):
                 critic_type = settings.task_settings[key].critic_type
                 critic_kwargs = settings.task_settings[key].critic_kwargs
             else:
-                if data_key is not None and data_key in settings.task_settings:
-                    critic_type = settings.task_settings[data_key].critic_type
-                    critic_kwargs = settings.task_settings[data_key].critic_kwargs
+                task_owner_data_key = data_set.data_set_key_for_field(key)
+                if task_owner_data_key is not None and task_owner_data_key in settings.task_settings:
+                    critic_type = settings.task_settings[task_owner_data_key].critic_type
+                    critic_kwargs = settings.task_settings[task_owner_data_key].critic_kwargs
 
             is_sequence = data_set.is_sequence(key)
             num_tokens = _num_tokens(tokens)
@@ -343,6 +344,11 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
 
     loss_example_counts = dict()
     loss_handlers = list()
+
+    for k in settings.loss_tasks:
+        if k not in train_data_set.fields:
+            raise ValueError('loss_task is not present as a field: {}'.format(k))
+
     for k in train_data_set.fields:
         if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
             data_key = train_data_set.data_set_key_for_field(k)
@@ -570,8 +576,8 @@ def named_variations(name):
     elif name == 'number_agreement':
         training_variations = [('nbr_agree',), erp_tasks + ('nbr_agree',), erp_tasks]
         settings = Settings(
-            task_data_keys=(DataLoader.number_dataset,),)
-        num_runs = 10
+            task_data_keys=(DataLoader.number_dataset, DataLoader.ucl))
+        num_runs = 1
         min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

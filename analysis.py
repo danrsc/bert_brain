@@ -2,18 +2,92 @@ import os
 import json
 import warnings
 from functools import partial
+from collections import OrderedDict
+import dataclasses
 
 import numpy as np
 from scipy.misc import logsumexp
 
 from run_regression import task_hash
 from bert_erp_common import SwitchRemember
+from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
-output_order = ('mse', 'pove', 'povu', 'variance', 'r_seq', 'xent', 'acc', 'macc', 'poma', 'prec', 'rec', 'f1')
+output_order = (
+    'mse',
+    'pove',
+    'povu',
+    'variance',
+    'r_seq',     # avg (over batch) of sequence correlation values (i.e. correlation within a sequence)
+    'xent',
+    'acc',
+    'macc',      # mode accuracy - the accuracy one would get if one picked the mode
+    'poma',      # proportion of mode accuracy; < 1 is bad
+    'prec',
+    'rec',
+    'f1')
 
 
-def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs):
+class Aggregator:
+    def __init__(self):
+        self._field_values = None
+        self._counts = None
+
+    def update(self, result):
+        if self._field_values is None:
+            self._field_values = OrderedDict()
+            self._counts = OrderedDict()
+            if dataclasses.is_dataclass(result):
+                for field in dataclasses.fields(result):
+                    self._field_values[field.name] = list()
+                    self._counts[field.name] = list()
+            else:
+                for field in result:
+                    self._field_values[field] = list()
+                    self._counts[field] = list()
+
+        if dataclasses.is_dataclass(result):
+            result = dataclasses.asdict(result)
+        for field in result:
+            if field not in self._field_values:
+                raise ValueError('Unexpected field in result: {}'.format(field))
+            if result[field] is None:
+                self._counts[field].append(0)
+            elif np.isscalar(result[field]):
+                self._field_values[field].append(result[field])
+                self._counts[field].append(1)
+            else:
+                self._field_values[field].extend(result[field])
+                self._counts[field].append(len(result[field]))
+
+    def __contains__(self, item):
+        return item in self._field_values
+
+    def value_dict(self, names=None, fn=None, value_on_key_error=None):
+        if names is None:
+            if fn is None:
+                return OrderedDict(self._field_values)
+            return OrderedDict((k, fn(self._field_values[k])) for k in self._field_values)
+        if isinstance(names, str):
+            names = [names]
+        result = OrderedDict()
+        for name in names:
+            if value_on_key_error is not None and name not in self._field_values:
+                result[name] = value_on_key_error
+            else:
+                result[name] = fn(self._field_values[name]) if fn is not None else self._field_values[name]
+        return result
+
+    def values(self, name, fn=None):
+        if fn is None:
+            return self._field_values[name]
+        return fn(self._field_values[name])
+
+    def counts(self, name=None):
+        return self._counts[name]
+
+
+def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
     output_dir = os.path.join(paths.base_path, 'bert', variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     losses = dict()
@@ -27,56 +101,39 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
             if name not in training_variation and name not in aux_loss:
                 continue
             if name not in run_aggregated:
-                run_aggregated[name] = (list(), list(), list())
+                run_aggregated[name] = Aggregator()
             if name not in losses:
                 losses[name] = output_result['critic_type']
             else:
                 assert(losses[name] == output_result['critic_type'])
-            if np.isscalar(output_result['target']):
-                run_aggregated[name][0].append(output_result['prediction'])
-                run_aggregated[name][1].append(output_result['target'])
-            else:
-                run_aggregated[name][0].extend(output_result['prediction'])
-                run_aggregated[name][1].extend(output_result['target'])
-            if output_result['mask'] is not None:
-                if np.isscalar(output_result['mask']):
-                    run_aggregated[name][2].append(output_result['mask'])
-                else:
-                    run_aggregated[name][2].extend(output_result['mask'])
+            run_aggregated[name].update(output_result)
         for name in run_aggregated:
-            predictions = np.array(run_aggregated[name][0])
-            target = np.array(run_aggregated[name][1])
-            if len(run_aggregated[name][2]) == 0:
-                mask = None
-            else:
-                assert(len(run_aggregated[name][2]) == len(run_aggregated[name][1]))
-                mask = np.array(run_aggregated[name][2])
             handler = make_prediction_handler(losses[name])
-            result_dict = handler(mask, predictions, target)
+            result_dict = handler(run_aggregated[name])
             if name not in aggregated:
-                aggregated[name] = dict()
-            for metric in result_dict:
-                if metric not in aggregated[name]:
-                    aggregated[name][metric] = list()
-                aggregated[name][metric].append(result_dict[metric])
+                aggregated[name] = Aggregator()
+            aggregated[name].update(result_dict)
 
     metrics = list()
     for metric in output_order:
         if any(metric in aggregated[name] for name in aggregated):
             metrics.append(metric)
 
-    header_format = '{name:8}'
-    row_format = '{name:8}'
+    text_grid = TextGrid()
+    text_grid.append_value('name', column_padding=2)
     for metric in metrics:
-        header_format = header_format + '  {' + metric + ':>10}'
-        row_format = row_format + '  {' + metric + ':>10.6}'
+        text_grid.append_value(metric, line_style=TextWrapStyle.right_justify, column_padding=2)
+    text_grid.next_row()
+    value_format = '{' + ':.{}f'.format(field_precision) + '}'
+    for name in aggregated:
+        text_grid.append_value(name, column_padding=2)
+        for metric in metrics:
+            value = np.nanmean(aggregated[name].values(metric)) if metric in aggregated[name] else np.nan
+            text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
+        text_grid.next_row()
 
     print('Variation: {}'.format(', '.join(sorted(training_variation))))
-    print(header_format.format(name='name', **dict((m, m) for m in metrics)))
-    for name in aggregated:
-        print(row_format.format(
-            name=name, **dict(
-                (m, np.nanmean(aggregated[name][m]) if m in aggregated[name] else np.nan) for m in metrics)))
+    write_text_grid_to_console(text_grid, width='tight')
     print('')
     print('')
 
@@ -104,16 +161,25 @@ def sentence_predictions(paths, variation_set_name, training_variation, aux_loss
     return result
 
 
-def nan_pearson(x, y, axis=1, keepdims=False):
+def nan_pearson(x, y, axis=0, keepdims=False):
     if not np.array_equal(x.shape, y.shape):
         raise ValueError('x and y must be the same shape')
+    if np.isscalar(x):
+        raise ValueError('x and y must not be scalar')
     if np.prod(x.shape) == 0:
-        return np.nan
-    x = x - np.nanmean(x, axis=axis, keepdims=True)
-    y = y - np.nanmean(y, axis=axis, keepdims=True)
+        result = np.full_like(x, np.nan)
+        if x.shape[axis] < 1:
+            print(x.shape)
+            raise ValueError('x and y must have at least 2 values')
+        result = np.take(result, [0], axis=axis)
+        if not keepdims:
+            result = np.squeeze(result, axis=axis)
+        return result
     with warnings.catch_warnings():
-        # ddof < 1 for slice
+        # suppress ddof < 1 for slice
         warnings.filterwarnings('ignore', category=RuntimeWarning)
+        x = x - np.nanmean(x, axis=axis, keepdims=True)
+        y = y - np.nanmean(y, axis=axis, keepdims=True)
         std_x = np.nanstd(x, axis=axis, keepdims=True, ddof=1)
         std_y = np.nanstd(y, axis=axis, keepdims=True, ddof=1)
     total = np.nansum(
@@ -129,16 +195,37 @@ def nan_pearson(x, y, axis=1, keepdims=False):
     return result
 
 
-def regression_handler(mask, predictions, target):
-    masked_target = np.where(mask, target, np.nan) if mask is not None else target
-    variance = np.nanvar(masked_target)
-    mse = np.nanmean(np.square(predictions - masked_target))
+def regression_handler(aggregator):
+
+    target = np.array(aggregator.values('target'))
+    predictions = np.array(aggregator.values('prediction'))
+    mask = np.array(aggregator.values('mask'))
+
+    target_counts = np.array(aggregator.counts('target'))
+    prediction_counts = np.array(aggregator.counts('prediction'))
+    assert(np.array_equal(target_counts, prediction_counts))
+
+    splits = np.cumsum(target_counts)
+
+    seq_r = list()
+    for seq_target, seq_predictions in zip(
+            np.split(target, splits[:-1]), np.split(predictions, splits[:-1])):
+        seq_r.append(nan_pearson(seq_target, seq_predictions))
+
+    if len(mask) > 0:
+        assert(len(mask) == len(target))
+        masked_target = np.where(mask, target, np.nan)
+    else:
+        masked_target = target
+
+    variance = np.nanvar(masked_target, axis=0)
+    mse = np.nanmean(np.square(predictions - masked_target), axis=0)
     return dict(
         mse=mse,
         pove=1 - (mse / variance),
         povu=mse / variance,
         variance=variance,
-        r_seq=np.nanmean(nan_pearson(predictions, masked_target), axis=0))
+        r_seq=np.nanmean(seq_r, axis=0))
 
 
 def bincount_axis(x, weights=None, minlength=None, axis=-1):
@@ -172,9 +259,15 @@ def bincount_axis(x, weights=None, minlength=None, axis=-1):
     return np.transpose(x, transpose_axes)
 
 
-def class_handler(mask, predictions, target, pos_weight=None, is_binary=False):
+def class_handler(aggregator, pos_weight=None, is_binary=False):
 
-    target = np.where(mask, target, np.nan) if mask is not None else target
+    target = np.array(aggregator.values('target'))
+    predictions = np.array(aggregator.values('prediction'))
+    mask = np.array(aggregator.values('mask'))
+
+    if len(mask) != 0:
+        assert(len(mask) == len(target))
+        target = np.where(mask, target, np.nan)
 
     if is_binary:
         max_val = np.maximum(-predictions, 0)
@@ -201,17 +294,36 @@ def class_handler(mask, predictions, target, pos_weight=None, is_binary=False):
 
         precision = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0))
         # nothing was classified as positive, define this to be precision 0.
-        precision = np.where(np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0) == 0, 0., precision)
+        # where does something weird to scalar values...so we handle it separately
+        if np.isscalar(precision):
+            if np.isnan(precision):
+                precision = np.array([0.])[0]
+        else:
+            precision = np.where(np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0) == 0, 0., precision)
         recall = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0))
-        # there are no real positive examples, define this to be recall 1.
-        recall = np.where(np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0) == 0, 1., recall)
+        # either there are no real positive examples (define this to be recall 1),
+        # or the predictions are nan (define this to be recall 0).
+        if np.isscalar(recall):
+            if np.isnan(recall):
+                if np.sum(predictions_positive, axis=0) + np.sum(predictions_negative, axis=0) == 0:
+                    recall = np.array([0.])[0]
+                else:
+                    recall = np.array([1.])[0]
+        else:
+            recall = np.where(np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0) == 0, 1., recall)
+            nan_prediction = np.sum(predictions_positive, axis=0) + np.sum(predictions_negative, axis=0) == 0
+            recall = np.where(nan_prediction, 0., recall)
         accuracy = (np.sum(true_positive, axis=0) + np.sum(true_negative, axis=0)) / np.sum(indicator_valid, axis=0)
         pos_acc = np.sum(target_positive, axis=0) / np.sum(indicator_valid, axis=0)
         neg_acc = np.sum(target_negative, axis=0) / np.sum(indicator_valid, axis=0)
         positive_better = np.sum(np.greater_equal(pos_acc, neg_acc)) > np.sum(np.less(pos_acc, neg_acc))
         mode_accuracy = pos_acc if positive_better else neg_acc
         f1 = 2 * precision * recall / (precision + recall)
-        f1 = np.where(precision + recall == 0, 0, f1)
+        if np.isscalar(f1):
+            if precision + recall == 0:
+                f1 = 0
+        else:
+            f1 = np.where(precision + recall == 0, 0, f1)
 
         poma = accuracy / mode_accuracy
 
