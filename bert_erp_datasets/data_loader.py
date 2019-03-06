@@ -12,7 +12,7 @@ from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, 
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
 from .harry_potter import harry_potter_data
-from .number_dataset import number_agreement_data
+from .colorless_green import number_agreement_data
 
 
 __all__ = ['DataLoader']
