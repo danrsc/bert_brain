@@ -21,7 +21,9 @@ __all__ = [
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
     'NamedTargetStopWordAwareCrossEntropy',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
-    'NamedTargetSequenceLoss',
+    'NamedTargetSequenceBinaryCrossEntropyWithLogits',
+    'NamedTargetSequenceCrossEntropy',
+    'NamedTargetSequenceSoftLabelCrossEntropy',
     'make_loss_handler']
 
 
@@ -202,10 +204,10 @@ def _masked_reduce(loss, valid_count, reduction, as_numpy):
     return loss, valid_count
 
 
-class _NamedTargetStopWordAwareLoss:
+class _NamedTargetMaskedLoss:
 
-    def __init__(self, field, keep_content=True, weight=1.):
-        self.field, self.keep_content, self.weight = field, keep_content, weight
+    def __init__(self, field, weight=1.):
+        self.field, self.weight = field, weight
 
     def apply_weight(self, result):
         is_tuple = isinstance(result, tuple)
@@ -223,8 +225,7 @@ class _NamedTargetStopWordAwareLoss:
     def __call__(self, batch, predictions, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
         predictions = predictions[self.field]
         target = batch[self.field]
-        mask = stop_word_and_target_not_nan_mask(
-            self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
+        mask = self._get_mask(batch, predictions, target)
 
         try:
             result, valid_count = self._masked_loss(mask, predictions, target)
@@ -260,11 +261,28 @@ class _NamedTargetStopWordAwareLoss:
             return result, detailed_result
         return result
 
+    def _get_mask(self, batch, predictions, target):
+        return logical_not(torch.isnan(target))
+
     def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
     def shape_adjust(self, shape):
         return shape
+
+
+class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
+
+    def __init__(self, field, keep_content=True, weight=1.):
+        super().__init__(field, weight)
+        self.keep_content = keep_content
+
+    def _get_mask(self, batch, predictions, target):
+        return stop_word_and_target_not_nan_mask(
+            self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
+
+    def _masked_loss(self, mask, predictions, target):
+        raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
 
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
@@ -317,88 +335,33 @@ class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLos
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class _NamedTargetSequenceLoss:
-
-    def __init__(self, field, weight=1.):
-        self.field = field
-        self.weight = weight
-
-    def __call__(self, batch, predictions, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
-        predictions = predictions[self.field]
-        target = batch[self.field]
-
-        result = self._loss(predictions, target, reduction)
-
-        if as_numpy:
-            result = result.detach().cpu().numpy()
-
-        if apply_weight:
-            result = self.weight * result
-
-        if return_detailed:
-            batch_predictions = predictions.detach().cpu().numpy()
-            batch_target = target.detach().cpu().numpy()
-            batch_predictions = np.split(batch_predictions, len(batch_predictions))
-            batch_target = np.split(batch_target, len(batch_target))
-            detailed_result = list()
-            for idx, (example_predictions, example_targets) in enumerate(zip(batch_predictions, batch_target)):
-                data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
-                unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
-                detailed_result.append(
-                    DetailedResult(
-                        mask=None,
-                        prediction=np.squeeze(example_predictions, axis=0),
-                        target=np.squeeze(example_targets, axis=0),
-                        data_set_id=data_set_id,
-                        unique_id=unique_id))
-            return result, detailed_result
-        return result
-
-    def _loss(self, predictions, target, reduction):
-        raise NotImplementedError('{} does not implement _loss'.format(type(self)))
-
-    def shape_adjust(self, shape):
-        return shape
-
-
-class NamedTargetSequenceLoss(_NamedTargetSequenceLoss):
-
-    def __init__(self, field, loss, weight=1.):
-        super().__init__(field, weight)
-        self._loss_fn = loss
-
-    def _loss(self, predictions, target, reduction):
-        try:
-            return self._loss_fn(predictions, target, reduction=reduction)
-        except ValueError as ex:
-            if str(ex).startswith('mean is not'):
-                return self._loss_fn(predictions, target, reduction='elementwise_mean')
-            else:
-                raise
-
-
-class NamedTargetSequenceCrossEntropy(NamedTargetSequenceLoss):
+class NamedTargetSequenceCrossEntropy(_NamedTargetMaskedLoss):
 
     def __init__(self, field, num_classes, weight=1.):
         self.num_classes = num_classes
-        super().__init__(field, torch.nn.functional.cross_entropy, weight)
+        super().__init__(field, weight)
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_cross_entropy(mask, predictions, target)
 
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
 
-class NamedTargetSequenceSoftLabelCrossEntropy(_NamedTargetSequenceLoss):
+class NamedTargetSequenceSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
 
-    def _loss(self, predictions, target, reduction):
-        loss, valid_count = masked_soft_label_cross_entropy(None, predictions, target)
-        if reduction == 'mean' or reduction == 'sum':
-            loss = loss.sum()
-            if reduction == 'mean':
-                return loss / valid_count
-            return loss
-        if reduction != 'none':
-            raise ValueError('Unknown value for reduction: {}'.format(reduction))
-        return loss
+    def _masked_loss(self, mask, predictions, target):
+        return masked_soft_label_cross_entropy(mask, predictions, target)
+
+
+class NamedTargetSequenceBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
+
+    def __init__(self, field, weight=1., pos_weight=None):
+        super().__init__(field, weight)
+        self.pos_weight = pos_weight
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
 
 def make_loss_handler(field, which_loss, loss_kwargs=None):
@@ -418,7 +381,7 @@ def make_loss_handler(field, which_loss, loss_kwargs=None):
     elif which_loss == 'sequence_cross_entropy':
         return NamedTargetSequenceCrossEntropy(field, **loss_kwargs)
     elif which_loss == 'sequence_binary_cross_entropy':
-        return NamedTargetSequenceLoss(field, torch.nn.functional.binary_cross_entropy_with_logits, **loss_kwargs)
+        return NamedTargetSequenceBinaryCrossEntropyWithLogits(field, **loss_kwargs)
     elif which_loss == 'sequence_soft_label_cross_entropy':
         return NamedTargetSequenceSoftLabelCrossEntropy(field, **loss_kwargs)
     else:

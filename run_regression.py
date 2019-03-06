@@ -94,15 +94,18 @@ def write_predictions(output_path, all_results, data_set, settings):
 
             is_sequence = data_set.is_sequence(key)
             num_tokens = _num_tokens(tokens)
-            mask = [bool(x) for x in detailed_result.mask[:num_tokens]] \
-                if detailed_result.mask is not None else None
+            mask = None
             # need to handle multivariate here somehow...maybe not use json?
             if is_sequence:
                 prediction = [x.item() for x in detailed_result.prediction[:num_tokens]]
                 target = [x.item() for x in detailed_result.target[:num_tokens]]
+                if detailed_result.mask is not None:
+                    mask = [x.item() for x in detailed_result.target[:num_tokens]]
             else:
                 prediction = detailed_result.prediction.item()
                 target = detailed_result.target.item()
+                if detailed_result.mask is not None:
+                    mask = detailed_result.target.item()
             output_results.append(dataclass_as_dict(OutputResult(
                 key,
                 critic_type,
