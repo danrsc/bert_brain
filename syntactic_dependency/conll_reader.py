@@ -111,6 +111,11 @@ class ConllReader:
         if len(block) > 0 or text is not None:
             yield block, text
 
+    def iterate_sentences_chain_streams(self, streams_or_paths, morphology_preprocess_fn=None):
+        for stream_or_path in streams_or_paths:
+            for result in self.iterate_sentences(stream_or_path, morphology_preprocess_fn=morphology_preprocess_fn):
+                yield result
+
     def iterate_sentences(self, stream_or_path, morphology_preprocess_fn=None):
         if isinstance(stream_or_path, str):
             with open(stream_or_path, 'rt') as stream:

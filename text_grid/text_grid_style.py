@@ -61,6 +61,7 @@ class TextGridStyle:
         if (default_value is None and local_value is None) or local_value == default_value:
             if self.parent_style is None:
                 return local_value
+            # noinspection PyProtectedMember
             return self.parent_style._get_style(style_name)
         return local_value
 

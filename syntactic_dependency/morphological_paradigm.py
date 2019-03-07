@@ -1,9 +1,12 @@
 import itertools
 import random
+from collections import OrderedDict
+from dataclasses import dataclass
+import dataclasses
+from typing import Tuple
 
 import numpy as np
 
-from bert_erp_datasets import SyntaxPattern, GeneratedExample
 from .tree_module import DependencyTree, Arc
 from .conll_reader import universal_dependency_reader
 
@@ -14,7 +17,88 @@ from .conll_reader import universal_dependency_reader
 __all__ = [
     'preprocess_english_morphology', 'collect_paradigms', 'make_token_to_paradigms', 'make_ltm_to_word',
     'morph_contexts_frequencies', 'extract_dependency_patterns', 'choose_random_forms', 'generate_morph_pattern_test',
-    'alternate_number_morphology', 'get_alternate_number_form', 'plurality']
+    'alternate_number_morphology', 'get_alternate_number_form', 'plurality', 'SyntaxPattern', 'GeneratedExample']
+
+
+@dataclass
+class SyntaxPattern:
+    arc_direction: str
+    context: Tuple[str, ...]
+    left_value_1: str
+    left_value_2: str
+
+    def delimited(self, field_delimiter='!', context_delimiter='_'):
+        d = dataclasses.asdict(self, dict_factory=OrderedDict)
+        result = list()
+        for field in d:
+            if field == 'context':
+                result.append(context_delimiter.join(self.context))
+            else:
+                result.append('{}'.format(d[field]))
+        return field_delimiter.join(result)
+
+    @classmethod
+    def from_delimited(cls, delimited, field_delimiter='!', context_delimiter='_'):
+        fields = dataclasses.fields(cls)
+        values = delimited.split(field_delimiter)
+        if len(values) != len(fields):
+            raise ValueError('Number of fields in input ({}) does not match number of fields in {} ({})'.format(
+                len(values), cls, len(fields)))
+        d = dict()
+        for field, str_value in zip(fields, values):
+            if field.name == 'context':
+                d[field.name] = str_value.split(context_delimiter)
+            else:
+                d[field.name] = field.type(str_value)
+        return cls(**d)
+
+
+@dataclass
+class GeneratedExample:
+    pattern: SyntaxPattern
+    construction_id: int
+    sentence_id: int
+    right_index: int
+    right_pos: str
+    right_morph: str
+    form: str
+    number: str
+    alternate_form: str
+    lemma: str
+    left_index: int
+    left_pos: str
+    prefix: str
+    generated_context: str
+
+    def delimited(self, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
+        d = dataclasses.asdict(self, dict_factory=OrderedDict)
+        result = list()
+        for field in d:
+            if field == 'pattern':
+                result.append(self.pattern.delimited(pattern_field_delimiter, pattern_context_delimiter))
+            else:
+                result.append('{}'.format(d[field]))
+        return field_delimiter.join(result)
+
+    @classmethod
+    def from_delimited(
+            cls, delimited, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
+        fields = dataclasses.fields(cls)
+        values = delimited.split(field_delimiter)
+        if len(values) != len(fields):
+            raise ValueError('Number of fields in input ({}) does not match number of fields in {} ({})'.format(
+                len(values), cls, len(fields)))
+        d = dict()
+        for field, str_value in zip(fields, values):
+            if field.name == 'pattern':
+                d[field.name] = field.type.from_delimited(str_value, pattern_field_delimiter, pattern_context_delimiter)
+            else:
+                d[field.name] = field.type(str_value)
+        return cls(**d)
+
+    @property
+    def agreement_tuple(self):
+        return self.generated_context.split(), self.form, self.alternate_form, self.right_index
 
 
 def preprocess_english_morphology(morph):
@@ -38,16 +122,18 @@ def _sort_morphology(morph):
 
 def collect_paradigms(path, reader=universal_dependency_reader, min_freq=5, morphology_preprocess_fn=None):
     paradigms = dict()
-    with open(path, 'rt') as stream:
-        for sentence, text in reader.iterate_sentences(stream, morphology_preprocess_fn=morphology_preprocess_fn):
-            tree = DependencyTree.from_conll_rows(sentence, reader.root_index, reader.offset, text)
-            tree.remerge_segmented_morphemes()  # probably not necessary for English?
-            for node in tree.nodes:
-                key = node.word, node.lemma, node.pos, _sort_morphology(node.morph)
-                if key in paradigms:
-                    paradigms[key] += 1
-                else:
-                    paradigms[key] = 1
+    if isinstance(path, str):
+        path = [path]
+    for sentence, text in reader.iterate_sentences_chain_streams(
+            path, morphology_preprocess_fn=morphology_preprocess_fn):
+        tree = DependencyTree.from_conll_rows(sentence, reader.root_index, reader.offset, text)
+        tree.remerge_segmented_morphemes()  # probably not necessary for English?
+        for node in tree.nodes:
+            key = node.word, node.lemma, node.pos, _sort_morphology(node.morph)
+            if key in paradigms:
+                paradigms[key] += 1
+            else:
+                paradigms[key] = 1
     return dict((k, paradigms[k]) for k in paradigms if paradigms[k] >= min_freq)
 
 

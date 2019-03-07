@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Optional
+import dataclasses
+from typing import Optional, Any
+from collections import OrderedDict
 
 import numpy as np
 import torch
-
-from bert_erp_common import SwitchRemember
 
 
 __all__ = [
@@ -24,6 +24,8 @@ __all__ = [
     'NamedTargetSequenceBinaryCrossEntropyWithLogits',
     'NamedTargetSequenceCrossEntropy',
     'NamedTargetSequenceSoftLabelCrossEntropy',
+    'CriticMapping',
+    'CriticKeys',
     'make_loss_handler']
 
 
@@ -138,6 +140,8 @@ def masked_soft_label_cross_entropy(mask, input, target):
         valid_count = mask.sum().item()
         if valid_count == 0:
             raise NoValidInputs()
+    else:
+        valid_count = None
 
     # set up 1s in the prediction where the mask is False;
     # this will mean that log_softmax does not give an nan in case the predictions are
@@ -364,25 +368,26 @@ class NamedTargetSequenceBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
 
+@dataclass(frozen=True)
+class CriticMapping:
+    mse: Any = NamedTargetStopWordAwareMSE
+    pearson: Any = NamedTargetStopWordAwarePearsonDistance
+    cross_entropy: Any = NamedTargetStopWordAwareCrossEntropy
+    binary_cross_entropy: Any = NamedTargetStopWordAwareBinaryCrossEntropyWithLogits
+    soft_label_cross_entropy: Any = NamedTargetStopWordAwareSoftLabelCrossEntropy
+    sequence_cross_entropy: Any = NamedTargetSequenceCrossEntropy
+    sequence_binary_cross_entropy: Any = NamedTargetSequenceBinaryCrossEntropyWithLogits
+    sequence_soft_label_cross_entropy: Any = NamedTargetSequenceSoftLabelCrossEntropy
+
+
+CriticKeys = CriticMapping(**dict((f.name, f.name) for f in dataclasses.fields(CriticMapping)))
+_critic_type_dict = dataclasses.asdict(CriticMapping(), dict_factory=OrderedDict)
+
+
 def make_loss_handler(field, which_loss, loss_kwargs=None):
-    which_loss = SwitchRemember(which_loss)
+    if which_loss not in _critic_type_dict:
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(_critic_type_dict.keys()))
+    factory = _critic_type_dict[which_loss]
     if loss_kwargs is None:
         loss_kwargs = {}
-    if which_loss == 'mse':
-        return NamedTargetStopWordAwareMSE(field, **loss_kwargs)
-    elif which_loss == 'pearson':
-        return NamedTargetStopWordAwarePearsonDistance(field, **loss_kwargs)
-    elif which_loss == 'cross_entropy':
-        return NamedTargetStopWordAwareCrossEntropy(field, **loss_kwargs)
-    elif which_loss == 'binary_cross_entropy':
-        return NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(field, **loss_kwargs)
-    elif which_loss == 'soft_label_cross_entropy':
-        return NamedTargetStopWordAwareSoftLabelCrossEntropy(field, **loss_kwargs)
-    elif which_loss == 'sequence_cross_entropy':
-        return NamedTargetSequenceCrossEntropy(field, **loss_kwargs)
-    elif which_loss == 'sequence_binary_cross_entropy':
-        return NamedTargetSequenceBinaryCrossEntropyWithLogits(field, **loss_kwargs)
-    elif which_loss == 'sequence_soft_label_cross_entropy':
-        return NamedTargetSequenceSoftLabelCrossEntropy(field, **loss_kwargs)
-    else:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(which_loss.tests))
+    return factory(field, **loss_kwargs)

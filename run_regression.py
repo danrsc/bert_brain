@@ -37,8 +37,7 @@ from pytorch_pretrained_bert.optimization import BertAdam
 
 from bert_erp_common import SwitchRemember
 from bert_erp_modeling import BertMultiHead, make_loss_handler
-from bert_erp_datasets import \
-    DataLoader, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
+from bert_erp_datasets import DataKeys, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 
@@ -276,7 +275,7 @@ def run_variation(
         temp_paths = Paths()
         data_loader_ = temp_paths.make_data_loader(
             # bert_pre_trained_model_name=settings.bert_model,
-            data_key_kwarg_dict={DataLoader.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye')})
+            data_key_kwarg_dict={DataKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye')})
         hash_ = task_hash(loss_tasks)
         model_path_ = os.path.join(temp_paths.model_path, 'bert', set_name, hash_)
         base_path_ = os.path.join(temp_paths.base_path, 'bert', set_name, hash_)
@@ -556,31 +555,32 @@ def named_variations(name):
 
     if name == 'erp':
         training_variations = list(iterate_powerset(erp_tasks))
-        settings = Settings(task_data_keys=(DataLoader.ucl,))
+        settings = Settings(task_data_keys=(DataKeys.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'erp_joint':
         training_variations = [erp_tasks]
-        settings = Settings(task_data_keys=(DataLoader.ucl,))
+        settings = Settings(task_data_keys=(DataKeys.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
-        settings = Settings(task_data_keys=(DataLoader.natural_stories, DataLoader.ucl))
+        settings = Settings(task_data_keys=(DataKeys.natural_stories, DataKeys.ucl))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
         settings = Settings(
-            task_data_keys=(DataLoader.natural_stories, DataLoader.ucl))
+            task_data_keys=(DataKeys.natural_stories, DataKeys.ucl))
         auxiliary_loss_tasks = {'input_head_location'}
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'number_agreement':
-        training_variations = [('nbr_agree',), erp_tasks + ('nbr_agree',), erp_tasks]
+        agr = ('colorless', 'linzen_agree')
+        training_variations = [agr, erp_tasks + agr, erp_tasks]
         settings = Settings(
-            task_data_keys=(DataLoader.number_dataset, DataLoader.ucl))
-        num_runs = 1
+            task_data_keys=(DataKeys.colorless_green, DataKeys.linzen_agreement, DataKeys.ucl))
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

@@ -1,92 +1,17 @@
 import os
-from collections import OrderedDict
 from dataclasses import dataclass
-import dataclasses
 from typing import Tuple
 
 import numpy as np
 
+from bert_erp_common import zip_equal
 from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData, FieldSpec
+from syntactic_dependency import preprocess_english_morphology, collect_paradigms, extract_dependency_patterns, \
+    generate_morph_pattern_test, DependencyTree, universal_dependency_reader, make_token_to_paradigms, \
+    make_ltm_to_word, GeneratedExample
 
 
-__all__ = ['SyntaxPattern', 'GeneratedExample', 'number_agreement_data']
-
-
-@dataclass
-class SyntaxPattern:
-    arc_direction: str
-    context: Tuple[str, ...]
-    left_value_1: str
-    left_value_2: str
-
-    def delimited(self, field_delimiter='!', context_delimiter='_'):
-        d = dataclasses.asdict(self, dict_factory=OrderedDict)
-        result = list()
-        for field in d:
-            if field == 'context':
-                result.append(context_delimiter.join(self.context))
-            else:
-                result.append('{}'.format(d[field]))
-        return field_delimiter.join(result)
-
-    @classmethod
-    def from_delimited(cls, delimited, field_delimiter='!', context_delimiter='_'):
-        fields = dataclasses.fields(cls)
-        values = delimited.split(field_delimiter)
-        if len(values) != len(fields):
-            raise ValueError('Number of fields in input ({}) does not match number of fields in {} ({})'.format(
-                len(values), cls, len(fields)))
-        d = dict()
-        for field, str_value in zip(fields, values):
-            if field.name == 'context':
-                d[field.name] = str_value.split(context_delimiter)
-            else:
-                d[field.name] = field.type(str_value)
-        return cls(**d)
-
-
-@dataclass
-class GeneratedExample:
-    pattern: SyntaxPattern
-    construction_id: int
-    sentence_id: int
-    right_index: int
-    right_pos: str
-    right_morph: str
-    form: str
-    number: str
-    alternate_form: str
-    lemma: str
-    left_index: int
-    left_pos: str
-    prefix: str
-    generated_context: str
-
-    def delimited(self, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
-        d = dataclasses.asdict(self, dict_factory=OrderedDict)
-        result = list()
-        for field in d:
-            if field == 'pattern':
-                result.append(self.pattern.delimited(pattern_field_delimiter, pattern_context_delimiter))
-            else:
-                result.append('{}'.format(d[field]))
-        return field_delimiter.join(result)
-
-    @classmethod
-    def from_delimited(
-            cls, delimited, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
-        fields = dataclasses.fields(cls)
-        values = delimited.split(field_delimiter)
-        if len(values) != len(fields):
-            raise ValueError('Number of fields in input ({}) does not match number of fields in {} ({})'.format(
-                len(values), cls, len(fields)))
-        d = dict()
-        for field, str_value in zip(fields, values):
-            if field.name == 'pattern':
-                d[field.name] = field.type.from_delimited(str_value, pattern_field_delimiter, pattern_context_delimiter)
-            else:
-                d[field.name] = field.type(str_value)
-        return cls(**d)
+__all__ = ['colorless_green_agreement_data', 'linzen_agreement_data']
 
 
 def _iterate_delimited(path, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
@@ -99,34 +24,114 @@ def _iterate_delimited(path, field_delimiter='\t', pattern_field_delimiter='!', 
                 line, field_delimiter, pattern_field_delimiter, pattern_context_delimiter)
 
 
-def number_agreement_data(spacy_tokenize_model, bert_tokenizer, path):
+@dataclass
+class _LinzenExample:
+    words: Tuple[str, ...]
+    index_target: int
+    correct_form: str
+    incorrect_form: str
+    num_attractors: int
+
+    @property
+    def agreement_tuple(self):
+        return self.words, self.correct_form, self.incorrect_form, self.index_target
+
+
+def _iterate_linzen(directory_path):
+    with open(os.path.join(directory_path, 'subj_agr_filtered.text'), 'rt') as sentence_file:
+        with open(os.path.join(directory_path, 'subj_agr_filtered.gold'), 'rt') as gold_file:
+            for sentence, gold in zip_equal(sentence_file, gold_file):
+                index_target, correct_form, incorrect_form, num_attractors = gold.split('\t')
+                yield _LinzenExample(
+                    sentence.split()[:-1],  # remove <eos>
+                    int(index_target),
+                    correct_form,
+                    incorrect_form,
+                    int(num_attractors))
+
+
+def generate_examples(english_web_path, bert_tokenizer):
+
+    conll_reader = universal_dependency_reader
+
+    if isinstance(english_web_path, str):
+        english_web_path = [english_web_path]
+
+    paradigms = collect_paradigms(english_web_path, morphology_preprocess_fn=preprocess_english_morphology)
+
+    trees = [
+        DependencyTree.from_conll_rows(sentence_rows, conll_reader.root_index, conll_reader.offset, text)
+        for sentence_rows, text in conll_reader.iterate_sentences_chain_streams(
+            english_web_path,
+            morphology_preprocess_fn=preprocess_english_morphology)]
+
+    syntax_patterns = extract_dependency_patterns(trees, freq_threshold=5, feature_keys={'Number'})
+
+    paradigms = make_token_to_paradigms(paradigms)
+
+    ltm_paradigms = make_ltm_to_word(paradigms)
+
+    examples = list()
+    for pattern in syntax_patterns:
+        examples.extend(generate_morph_pattern_test(trees, pattern, ltm_paradigms, paradigms, bert_tokenizer))
+
+    return examples
+
+
+def _agreement_data(spacy_tokenize_model, bert_tokenizer, examples):
     class_correct = 1
     class_incorrect = 0
     classes = list()
     input_examples = list()
 
-    for example in _iterate_delimited(os.path.join(path, 'generated.txt')):  # temporary; should use conll splits
-        words = example.generated_context.split()
+    for example in examples:
+        words, correct_form, incorrect_form, index_target = example.agreement_tuple
+        words = list(words)
 
         # the generated example actually doesn't use the test item (the form field); it is a different random word
         # until we put the test item in there
-        words[example.right_index] = example.form
+        words[index_target] = correct_form
 
         input_example = bert_tokenize_with_spacy_meta(
             spacy_tokenize_model, bert_tokenizer, len(input_examples), words,
-            data_offset=lambda idx_word: len(input_examples) if idx_word == example.right_index else -1)
+            data_offset=lambda idx_word: len(input_examples) if idx_word == index_target else -1)
         classes.append(class_correct)
         input_examples.append(input_example)
 
         # switch to the wrong number-agreement
-        words[example.right_index] = example.alternate_form
+        words[index_target] = incorrect_form
 
         input_example = bert_tokenize_with_spacy_meta(
             spacy_tokenize_model, bert_tokenizer, len(input_examples), words,
-            data_offset=lambda idx_word: len(input_examples) if idx_word == example.right_index else -1)
+            data_offset=lambda idx_word: len(input_examples) if idx_word == index_target else -1)
         classes.append(class_incorrect)
         input_examples.append(input_example)
 
-    classes = {'nbr_agree': np.array(classes, dtype=np.float)}
-    return RawData(input_examples, classes, validation_proportion_of_train=0.1, field_specs={
-        'nbr_agree': FieldSpec(is_sequence=False)})
+    return input_examples, classes
+
+
+def colorless_green_agreement_data(spacy_tokenize_model, bert_tokenizer, path):
+
+    english_web_paths = [
+        os.path.join(path, 'en_ewt-ud-train.conllu'),
+        os.path.join(path, 'en_ewt-ud-dev.conllu'),
+        os.path.join(path, 'en_ewt-ud-test.conllu')]
+
+    examples, classes = _agreement_data(
+        spacy_tokenize_model, bert_tokenizer, generate_examples(english_web_paths, bert_tokenizer))
+
+    classes = {'colorless': np.array(classes, dtype=np.float64)}
+
+    return RawData(
+        examples, classes,
+        validation_proportion_of_train=0.1, field_specs={'colorless': FieldSpec(is_sequence=False)})
+
+
+def linzen_agreement_data(spacy_tokenize_model, bert_tokenizer, path):
+
+    examples, classes = _agreement_data(spacy_tokenize_model, bert_tokenizer, _iterate_linzen(path))
+
+    classes = {'linzen_agree': np.array(classes, dtype=np.float)}
+    return RawData(
+        examples, classes,
+        validation_proportion_of_train=0.1, field_specs={'linzen_agree': FieldSpec(is_sequence=False)})

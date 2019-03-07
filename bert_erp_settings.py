@@ -2,8 +2,9 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional
 
 import numpy as np
-from bert_erp_datasets import DataLoader, PreprocessMany, PreprocessStandardize, PreprocessLog, PreprocessPCA, \
-    PreprocessMakeBinary, PreprocessNanMean, PreprocessClip
+from bert_erp_datasets import DataLoader, DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
+    PreprocessPCA, PreprocessMakeBinary, PreprocessNanMean, PreprocessClip
+from bert_erp_modeling import CriticKeys
 
 
 __all__ = ['TaskSettings', 'Settings']
@@ -30,19 +31,21 @@ def _default_task_settings():
     preprocess_standardize = PreprocessStandardize(stop_mode='content')
 
     return {
-        DataLoader.ucl: TaskSettings(
-            critic_type='mse',
+        DataKeys.ucl: TaskSettings(
+            critic_type=CriticKeys.mse,
             preprocessor=PreprocessMany(
                 PreprocessLog(data_key_whitelist=ucl_log_keys),
                 preprocess_standardize)),
-        DataLoader.natural_stories: TaskSettings(
-            critic_type='mse',
+        DataKeys.natural_stories: TaskSettings(
+            critic_type=CriticKeys.mse,
             preprocessor=PreprocessMany(
                 PreprocessClip(maximum=3000, value_beyond_max=np.nan),
                 PreprocessLog(),
                 preprocess_standardize)),
-        DataLoader.number_dataset: TaskSettings(
-            critic_type='sequence_binary_cross_entropy')
+        DataKeys.colorless_green: TaskSettings(
+            critic_type=CriticKeys.sequence_binary_cross_entropy),
+        DataKeys.linzen_agreement: TaskSettings(
+            critic_type=CriticKeys.sequence_binary_cross_entropy)
     }
 
 
@@ -56,7 +59,7 @@ class Settings:
     visualize_mode: str = None
 
     # which data to load
-    task_data_keys: Optional[Sequence[str]] = (DataLoader.ucl,)
+    task_data_keys: Optional[Sequence[str]] = (DataKeys.ucl,)
 
     # task specific settings, see TaskSettings
     task_settings: MutableMapping[str, TaskSettings] = field(default_factory=_default_task_settings)

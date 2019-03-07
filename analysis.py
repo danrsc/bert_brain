@@ -9,7 +9,7 @@ import numpy as np
 from scipy.misc import logsumexp
 
 from run_regression import task_hash
-from bert_erp_common import SwitchRemember
+from bert_erp_modeling import CriticMapping
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
@@ -293,7 +293,9 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
         false_positive = np.logical_and(predictions_positive, target_negative)
         false_negative = np.logical_and(predictions_negative, target_positive)
 
-        precision = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0))
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            precision = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0))
         # nothing was classified as positive, define this to be precision 0.
         # where does something weird to scalar values...so we handle it separately
         if np.isscalar(precision):
@@ -301,7 +303,9 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
                 precision = np.array([0.])[0]
         else:
             precision = np.where(np.sum(true_positive, axis=0) + np.sum(false_positive, axis=0) == 0, 0., precision)
-        recall = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0))
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            recall = np.sum(true_positive, axis=0) / (np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0))
         # either there are no real positive examples (define this to be recall 1),
         # or the predictions are nan (define this to be recall 0).
         if np.isscalar(recall):
@@ -315,11 +319,15 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
             nan_prediction = np.sum(predictions_positive, axis=0) + np.sum(predictions_negative, axis=0) == 0
             recall = np.where(nan_prediction, 0., recall)
         accuracy = (np.sum(true_positive, axis=0) + np.sum(true_negative, axis=0)) / np.sum(indicator_valid, axis=0)
-        pos_acc = np.sum(target_positive, axis=0) / np.sum(indicator_valid, axis=0)
-        neg_acc = np.sum(target_negative, axis=0) / np.sum(indicator_valid, axis=0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            pos_acc = np.sum(target_positive, axis=0) / np.sum(indicator_valid, axis=0)
+            neg_acc = np.sum(target_negative, axis=0) / np.sum(indicator_valid, axis=0)
         positive_better = np.sum(np.greater_equal(pos_acc, neg_acc)) > np.sum(np.less(pos_acc, neg_acc))
         mode_accuracy = pos_acc if positive_better else neg_acc
-        f1 = 2 * precision * recall / (precision + recall)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            f1 = 2 * precision * recall / (precision + recall)
         if np.isscalar(f1):
             if precision + recall == 0:
                 f1 = 0
@@ -383,25 +391,32 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
         return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma)
 
 
+def _ensure_complete_asdict(critic_mapping):
+    d = dataclasses.asdict(critic_mapping, dict_factory=OrderedDict)
+    unspecified = [f for f in d if d[f] is None]
+    if len(unspecified) > 0:
+        raise ValueError('Unspecified critic handlers: {}'.format(unspecified))
+    return d
+
+
+_prediction_handlers = _ensure_complete_asdict(dataclasses.replace(
+    CriticMapping(**dict((f.name, None) for f in dataclasses.fields(CriticMapping))),
+    mse=regression_handler,
+    pearson=regression_handler,
+    cross_entropy=class_handler,
+    binary_cross_entropy=(class_handler, dict(is_binary=True)),
+    soft_label_cross_entropy=class_handler,
+    sequence_cross_entropy=class_handler,
+    sequence_binary_cross_entropy=(class_handler, dict(is_binary=True)),
+    sequence_soft_label_cross_entropy=class_handler))
+
+
 def make_prediction_handler(which_loss, loss_kwargs=None):
-    which_loss = SwitchRemember(which_loss)
-    if loss_kwargs is None:
-        loss_kwargs = {}
-    if which_loss == 'mse':
-        return partial(regression_handler, **loss_kwargs)
-    elif which_loss == 'pearson':
-        return partial(regression_handler, **loss_kwargs)
-    elif which_loss == 'cross_entropy':
-        return partial(class_handler, **loss_kwargs)
-    elif which_loss == 'binary_cross_entropy':
-        return partial(class_handler, is_binary=True, **loss_kwargs)
-    elif which_loss == 'soft_label_cross_entropy':
-        return partial(class_handler, **loss_kwargs)
-    elif which_loss == 'sequence_cross_entropy':
-        return partial(class_handler, **loss_kwargs)
-    elif which_loss == 'sequence_binary_cross_entropy':
-        return partial(class_handler, is_binary=True, **loss_kwargs)
-    elif which_loss == 'sequence_soft_label_cross_entropy':
-        return partial(class_handler, **loss_kwargs)
-    else:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(which_loss.tests))
+    if which_loss not in _prediction_handlers:
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(_prediction_handlers.keys()))
+    factory = _prediction_handlers[which_loss]
+    loss_kwargs = {} if loss_kwargs is None else dict(loss_kwargs)
+    if isinstance(factory, tuple):
+        factory, factory_kwargs = factory
+        loss_kwargs.update(factory_kwargs)
+    return partial(factory, **loss_kwargs)

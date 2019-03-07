@@ -95,7 +95,10 @@ def group_by_cum_lengths(cum_lengths, tokens):
 def group_word_pieces(bert_tokens):
     group = list()
     for t in bert_tokens:
-        if not t.startswith('##'):
+        s = t
+        if isinstance(t, tuple):  # unk
+            s = t[0]
+        if not s.startswith('##'):
             if len(group) > 0:
                 yield group
             group = list()
@@ -104,13 +107,26 @@ def group_word_pieces(bert_tokens):
         yield group
 
 
-def align_spacy_meta(spacy_tokens, bert_tokens):
+def align_spacy_meta(spacy_tokens, bert_tokens, word, bert_tokenizer):
     # create character-level is-stop
     char_to_spacy_token = list()
 
     for idx_token, token in enumerate(spacy_tokens):
         for _ in token.text:
             char_to_spacy_token.append(idx_token)
+
+    if any(t == '[UNK]' for t in bert_tokens):
+        resolved_unk_tokens = list()
+        basic_tokens = bert_tokenizer.basic_tokenizer.tokenize(word)
+        for basic_token in basic_tokens:
+            sub_tokens = bert_tokenizer.wordpiece_tokenizer.tokenize(basic_token)
+            # it appears that ['UNK'] should only be returned when it is the only thing returned
+            if any(t == '[UNK]' for t in sub_tokens):
+                assert(len(sub_tokens) == 1)
+                resolved_unk_tokens.append((sub_tokens[0], basic_token))
+            else:
+                resolved_unk_tokens.extend(sub_tokens)
+        bert_tokens = resolved_unk_tokens
 
     char = 0
     result = list()
@@ -119,6 +135,8 @@ def align_spacy_meta(spacy_tokens, bert_tokens):
         length = 0
         all_punctuation = True
         for t in bert_group:
+            if isinstance(t, tuple):
+                _, t = t  # [UNK] - use the original for alignment
             if t.startswith('##'):
                 t = t[2:]
             length += len(t)
@@ -138,9 +156,13 @@ def align_spacy_meta(spacy_tokens, bert_tokens):
         spacy_token = spacy_tokens[majority_idx]
         if all_punctuation and not all(c in punctuation for c in spacy_token.text):
             spacy_token = None  # this spacy_token is going to be assigned to a different bert_token
-        result.append((bert_group[0], length, spacy_token))
-        for t in bert_group[1:]:
-            result.append((t, 0, None))
+        for idx, t in enumerate(bert_group):
+            if isinstance(t, tuple):
+                t, _ = t  # [UNK], use the [UNK} now that alignment is complete
+            if idx == 0:
+                result.append((t, length, spacy_token))
+            else:
+                result.append((t, 0, None))
 
     return result
 
@@ -204,8 +226,8 @@ def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words,
     _append_special_token('[CLS]')
 
     bert_token_groups_with_spacy = list()
-    for spacy_token_group, bert_token_group in zip(spacy_token_groups, bert_token_groups):
-        bert_token_groups_with_spacy.append(align_spacy_meta(spacy_token_group, bert_token_group))
+    for spacy_token_group, bert_token_group, word in zip(spacy_token_groups, bert_token_groups, words):
+        bert_token_groups_with_spacy.append(align_spacy_meta(spacy_token_group, bert_token_group, word, bert_tokenizer))
 
     for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
         idx_data = get_data_token_index(bert_tokens_with_spacy)

@@ -12,10 +12,10 @@ from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, 
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
 from .harry_potter import harry_potter_data
-from .colorless_green import number_agreement_data
+from .colorless_green import colorless_green_agreement_data, linzen_agreement_data
 
 
-__all__ = ['DataLoader']
+__all__ = ['DataLoader', 'DataKeys']
 
 
 def _save_to_cache(cache_path, data, kwargs):
@@ -260,19 +260,24 @@ def _populate_default_field_specs(raw_data):
             raw_data.field_specs[field] = default_field_specs[field]
 
 
+@dataclasses.dataclass(frozen=True)
+class _DataKeys:
+    geco: str = 'geco'
+    bnc: str = 'bnc'
+    harry_potter: str = 'harry_potter'
+    ucl: str = 'ucl'
+    dundee: str = 'dundee'
+    proto_roles_english_web: str = 'proto_roles_english_web'
+    proto_roles_prop_bank: str = 'proto_roles_prop_bank'
+    natural_stories: str = 'natural_stories'
+    colorless_green: str = 'colorless_green'
+    linzen_agreement: str = 'linzen_agreement'
+
+
+DataKeys = _DataKeys()
+
+
 class DataLoader(object):
-
-    geco = 'geco'
-    bnc = 'bnc'
-    harry_potter = 'harry_potter'
-    ucl = 'ucl'
-    dundee = 'dundee'
-    proto_roles_english_web = 'proto_roles_english_web'
-    proto_roles_prop_bank = 'proto_roles_prop_bank'
-    natural_stories = 'natural_stories'
-    number_dataset = 'number_dataset'
-
-    all_keys = geco, bnc, harry_potter, ucl, dundee, proto_roles_english_web, proto_roles_prop_bank, natural_stories
 
     def __init__(
             self,
@@ -290,7 +295,7 @@ class DataLoader(object):
             ontonotes_path,
             proto_roles_prop_bank_path,
             natural_stories_path,
-            number_dataset_path,
+            linzen_agreement_path,
             data_key_kwarg_dict=None):
         """
         This object knows how to load data, and stores settings that should be invariant across calls to load
@@ -321,11 +326,11 @@ class DataLoader(object):
          self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
          self.english_web_universal_dependencies_v_1_2_path, self.english_web_universal_dependencies_v_2_3_path,
          self.proto_roles_english_web_path, self.ontonotes_path, self.proto_roles_prop_bank_path,
-         self.natural_stories_path, self.number_dataset_path, self.data_key_kwarg_dict) = (
+         self.natural_stories_path, self.linzen_agreement_path, self.data_key_kwarg_dict) = (
             bert_pre_trained_model_name, cache_path, geco_path, bnc_root, harry_potter_path,
             frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
             english_web_universal_dependencies_v_2_3_path, proto_roles_english_web_path, ontonotes_path,
-            proto_roles_prop_bank_path, natural_stories_path, number_dataset_path, data_key_kwarg_dict)
+            proto_roles_prop_bank_path, natural_stories_path, linzen_agreement_path, data_key_kwarg_dict)
 
     def make_bert_tokenizer(self):
         return BertTokenizer.from_pretrained(self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
@@ -362,19 +367,23 @@ class DataLoader(object):
                 # elif key == DataLoader.bnc:
                 #     result[key] = bnc_data(
                 #         self.bnc_root, numerical_tokens, start_tokens, quick_for_test=quick_for_test, **kwargs)
-                if key == DataLoader.ucl:
+                if key == DataKeys.ucl:
                     result[key] = ucl_data(
                         spacy_tokenizer_model, bert_tokenizer, self.frank_2013_eye_path,
                         self.frank_2015_erp_path, **kwargs)
-                elif key == DataLoader.natural_stories:
+                elif key == DataKeys.natural_stories:
                     result[key] = natural_stories_data(
                         spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
-                elif key == DataLoader.harry_potter:
+                elif key == DataKeys.harry_potter:
                     result[key] = harry_potter_data(
                         spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
-                elif key == DataLoader.number_dataset:
-                    result[key] = number_agreement_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.number_dataset_path, **kwargs)
+                elif key == DataKeys.colorless_green:
+                    result[key] = colorless_green_agreement_data(
+                        spacy_tokenizer_model, bert_tokenizer,
+                        self.english_web_universal_dependencies_v_2_3_path, **kwargs)
+                elif key == DataKeys.linzen_agreement:
+                    result[key] = linzen_agreement_data(
+                        spacy_tokenizer_model, bert_tokenizer, self.linzen_agreement_path, **kwargs)
                 # elif key == DataLoader.dundee:
                 #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
                 # elif key == DataLoader.proto_roles_english_web:

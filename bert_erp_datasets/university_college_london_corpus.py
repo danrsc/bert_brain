@@ -348,8 +348,8 @@ def ucl_data(spacy_tokenize_model, bert_tokenizer, frank_2013_eye_path, frank_20
         def _num_samples(data_dict):
             if data_dict is None:
                 return 0
-            for k in data_dict:
-                return len(data_dict[k])
+            for k_ in data_dict:
+                return len(data_dict[k_])
 
         axis_0_size = max(_num_samples(eye), _num_samples(erp))
 
