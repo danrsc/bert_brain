@@ -19,11 +19,10 @@ import argparse
 from collections import OrderedDict
 import itertools
 import logging
-import json
 import os
 import random
-from dataclasses import replace, dataclass, asdict as dataclass_as_dict
-from typing import Sequence, List, Mapping, Any
+from dataclasses import replace, dataclass
+from typing import Sequence
 import hashlib
 from tqdm import tqdm, trange
 from tqdm_logging import replace_root_logger_handler
@@ -41,82 +40,16 @@ from bert_erp_modeling import BertMultiHead, make_loss_handler
 from bert_erp_datasets import DataKeys, DataPreparer, PreparedDataDataset, collate_fn, max_example_sequence_length
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
+from result_output import write_predictions
 
 
 __all__ = [
-    'OutputResult', 'write_predictions', 'task_hash', 'named_variations', 'TaskResult', 'TaskResults', 'evaluate',
+    'task_hash', 'named_variations', 'TaskResult', 'TaskResults', 'evaluate',
     'run_variation', 'SwitchRemember', 'iterate_powerset']
 
 
 replace_root_logger_handler()
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class OutputResult:
-    name: str
-    critic_type: str
-    critic_kwargs: Mapping[str, Any]
-    data_key: str
-    tokens: List[str]
-    mask: List[int]
-    prediction: List[float]
-    target: List[float]
-
-
-def _num_tokens(tokens):
-    for idx, token in enumerate(tokens):
-        if token == '[PAD]':
-            return idx
-    return len(tokens)
-
-
-def write_predictions(output_path, all_results, data_set, settings):
-    """Write final predictions to the json file."""
-    logger.info("Writing predictions to: %s" % output_path)
-
-    output_results = list()
-    for key in all_results:
-        for detailed_result in all_results[key]:
-            tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
-            data_key = data_set.data_set_key_for_id(detailed_result.data_set_id)
-
-            critic_type = 'mse'
-            critic_kwargs = None
-            if key in settings.task_settings:
-                critic_type = settings.task_settings[key].critic_type
-                critic_kwargs = settings.task_settings[key].critic_kwargs
-            else:
-                task_owner_data_key = data_set.data_set_key_for_field(key)
-                if task_owner_data_key is not None and task_owner_data_key in settings.task_settings:
-                    critic_type = settings.task_settings[task_owner_data_key].critic_type
-                    critic_kwargs = settings.task_settings[task_owner_data_key].critic_kwargs
-
-            is_sequence = data_set.is_sequence(key)
-            num_tokens = _num_tokens(tokens)
-            mask = None
-            # need to handle multivariate here somehow...maybe not use json?
-            if is_sequence:
-                prediction = [x.item() for x in detailed_result.prediction[:num_tokens]]
-                target = [x.item() for x in detailed_result.target[:num_tokens]]
-                if detailed_result.mask is not None:
-                    mask = [x.item() for x in detailed_result.mask[:num_tokens]]
-            else:
-                prediction = detailed_result.prediction.item()
-                target = detailed_result.target.item()
-                if detailed_result.mask is not None:
-                    mask = detailed_result.mask.item()
-            output_results.append(dataclass_as_dict(OutputResult(
-                key,
-                critic_type,
-                critic_kwargs,
-                data_key,
-                tokens[:num_tokens],
-                mask,
-                prediction,
-                target)))
-    with open(output_path, "w") as writer:
-        writer.write(json.dumps(output_results, indent=4) + "\n")
 
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -322,14 +255,14 @@ def _run_variation_index(settings: Settings, result_path: str, index_run: int, d
 
     output_dir = os.path.join(result_path, 'run_{}'.format(index_run))
 
-    output_validation_path = os.path.join(output_dir, 'output_validation.json')
-    output_test_path = os.path.join(output_dir, 'output_test.json')
+    output_validation_path = os.path.join(output_dir, 'output_validation.npz')
+    output_test_path = os.path.join(output_dir, 'output_test.npz')
     if os.path.exists(output_validation_path) and os.path.exists(output_test_path):
         return
 
     seed = _seed(settings.seed, index_run, n_gpu)
 
-    data_preparer = DataPreparer(seed, settings.get_data_preprocessors())
+    data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions())
     data = data_preparer.prepare(data)
 
     max_sequence_length = max_example_sequence_length(data)
@@ -481,6 +414,8 @@ def _run_variation_index(settings: Settings, result_path: str, index_run: int, d
                     global_step,
                     train_result)
 
+            del loss_dict
+
             if loss is not None:
                 logger.info('train: {}'.format(loss.item() / len(batch['unique_id'])))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
@@ -492,24 +427,31 @@ def _run_variation_index(settings: Settings, result_path: str, index_run: int, d
                 if settings.gradient_accumulation_steps > 1:
                     loss = loss / settings.gradient_accumulation_steps
                 loss.backward()
-                if (step + 1) % settings.gradient_accumulation_steps == 0:
-                    if settings.fp16 or settings.optimize_on_cpu:
-                        if settings.fp16 and settings.loss_scale != 1.0:
-                            # scale down gradients for fp16 training
-                            for param in model.parameters():
-                                param.grad.data = param.grad.data / settings.loss_scale
-                        is_nan = set_optimizer_params_grad(param_optimizer, model.named_parameters(), test_nan=True)
-                        if is_nan:
-                            logger.info("FP16 TRAINING: Nan in gradients, reducing loss scaling")
-                            settings.loss_scale = settings.loss_scale / 2
-                            model.zero_grad()
-                            continue
-                        optimizer.step()
-                        copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
-                    else:
-                        optimizer.step()
-                    model.zero_grad()
-                    global_step += 1
+
+            if (step + 1) % settings.gradient_accumulation_steps == 0:
+                if settings.fp16 or settings.optimize_on_cpu:
+                    if settings.fp16 and settings.loss_scale != 1.0:
+                        # scale down gradients for fp16 training
+                        for param in model.parameters():
+                            param.grad.data = param.grad.data / settings.loss_scale
+                    is_nan = set_optimizer_params_grad(param_optimizer, model.named_parameters(), test_nan=True)
+                    if is_nan:
+                        logger.info("FP16 TRAINING: Nan in gradients, reducing loss scaling")
+                        settings.loss_scale = settings.loss_scale / 2
+                        model.zero_grad()
+                        continue
+                    optimizer.step()
+                    copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
+                else:
+                    optimizer.step()
+                model.zero_grad()
+                global_step += 1
+
+            # we're being super aggressive about releasing memory here because
+            # we're right on the edge of fitting in gpu
+            del loss
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if len(validation_data_set) > 0:
             evaluate(settings, model, loss_handlers, device, global_step, validation_results, validation_data_set)

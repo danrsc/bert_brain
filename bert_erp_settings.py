@@ -25,7 +25,7 @@ class TaskSettings:
     split_function: Optional[Callable] = None
 
 
-def _harry_potter_meg_critic_and_preprocess():
+def _harry_potter_meg_task_settings():
 
     # return (
     #     CriticKeys.soft_label_cross_entropy,
@@ -35,9 +35,9 @@ def _harry_potter_meg_critic_and_preprocess():
     #         PreprocessDiscretize(bins=np.exp(np.linspace(-0.2, 1., 5))),  # bins=np.arange(6) - 2.5
     #         PreprocessNanMean()))
 
-    return (
+    return TaskSettings(
         CriticKeys.mse,
-        PreprocessMany(
+        preprocessor=PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
             PreprocessStandardize(average_axis=None, stop_mode='content')))
@@ -62,7 +62,7 @@ def _default_task_settings():
                 PreprocessClip(maximum=3000, value_beyond_max=np.nan),
                 PreprocessLog(),
                 preprocess_standardize)),
-        DataKeys.harry_potter_meg: _harry_potter_meg_critic_and_preprocess(),
+        DataKeys.harry_potter_meg: _harry_potter_meg_task_settings(),
         DataKeys.harry_potter_fmri: TaskSettings(
             critic_type=CriticKeys.mse,
             preprocessor=PreprocessMany(
@@ -156,6 +156,15 @@ class Settings:
         for key in self.task_settings:
             if self.task_settings[key].preprocessor is not None:
                 result[key] = self.task_settings[key].preprocessor
+        if len(result) == 0:
+            return None
+        return result
+
+    def get_split_functions(self):
+        result = dict()
+        for key in self.task_settings:
+            if self.task_settings[key].split_function is not None:
+                result[key] = self.task_settings[key].split_function
         if len(result) == 0:
             return None
         return result

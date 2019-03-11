@@ -701,11 +701,12 @@ class PreparedData:
 
 class DataPreparer(object):
 
-    def __init__(self, seed, preprocess_dict):
+    def __init__(self, seed, preprocess_dict, split_function_dict):
         self._seed = seed
         self._random_state = dict()
         self._prepared_cache = dict()
-        self._preprocess_dict = dict(preprocess_dict)
+        self._preprocess_dict = dict(preprocess_dict) if preprocess_dict is not None else None
+        self._split_function_dict = dict(split_function_dict) if split_function_dict is not None else None
 
     def prepare(self, raw_data_dict):
         result = OrderedDict()
@@ -720,10 +721,11 @@ class DataPreparer(object):
                     raw_data_dict[k].test_input_examples,
                     FrozenCopyOfDict(raw_data_dict[k].response_data),
                     field_specs=raw_data_dict[k].field_specs)
-            elif raw_data_dict[k].split_function is not None:
+            elif (self._split_function_dict is not None
+                    and k in self._split_function_dict and self._split_function_dict[k] is not None):
                 if k not in self._random_state:
                     self._random_state[k] = np.random.RandomState(self._seed)
-                train_input_examples, validation_input_examples, test_input_examples = raw_data_dict[k].split_function(
+                train_input_examples, validation_input_examples, test_input_examples = self._split_function_dict[k](
                     raw_data_dict[k], self._random_state[k])
                 result[k] = PreparedData(
                     train_input_examples, validation_input_examples, test_input_examples,
@@ -746,7 +748,7 @@ class DataPreparer(object):
                 result[k] = loaded_data_tuple
 
         for k in result:
-            if k in self._preprocess_dict:
+            if self._preprocess_dict is not None and k in self._preprocess_dict:
                 if raw_data_dict[k].is_pre_split:
                     if k not in self._prepared_cache:
                         self._prepared_cache[k] = self._preprocess_dict[k](result[k], metadata[k])

@@ -4,7 +4,7 @@ import logging
 import numpy as np
 import torch
 from torch import nn
-from pytorch_pretrained_bert.modeling import PreTrainedBertModel, BertModel
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class GroupPool(torch.nn.Module):
         return pooled, groups
 
 
-class BertMultiHead(PreTrainedBertModel):
+class BertMultiHead(BertPreTrainedModel):
 
     @staticmethod
     def _setup_linear_layer(hidden_size, prediction_key_to_shape, input_key_to_shape, which):
