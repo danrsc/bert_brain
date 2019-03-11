@@ -27,6 +27,7 @@ from typing import Sequence, List, Mapping, Any
 import hashlib
 from tqdm import tqdm, trange
 from tqdm_logging import replace_root_logger_handler
+import gc
 
 import numpy as np
 import torch
@@ -277,23 +278,23 @@ def run_variation(
             # bert_pre_trained_model_name=settings.bert_model,
             data_key_kwarg_dict={DataKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye')})
         hash_ = task_hash(loss_tasks)
-        model_path_ = os.path.join(temp_paths.model_path, 'bert', set_name, hash_)
-        base_path_ = os.path.join(temp_paths.base_path, 'bert', set_name, hash_)
+        model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
+        result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
 
         if not os.path.exists(model_path_):
             os.makedirs(model_path_)
-        if not os.path.exists(base_path_):
-            os.makedirs(base_path_)
+        if not os.path.exists(result_path_):
+            os.makedirs(result_path_)
 
-        return data_loader_, base_path_, model_path_
+        return data_loader_, result_path_, model_path_
 
-    data_loader, base_path, model_path = io_setup()
+    data_loader, result_path, model_path = io_setup()
     loss_tasks = set(loss_tasks)
     loss_tasks.update(auxiliary_loss_tasks)
     settings = replace(settings, loss_tasks=loss_tasks)
     data = data_loader.load(settings.task_data_keys, force_cache_miss=force_cache_miss)
     for index_run in trange(num_runs, desc='Run'):
-        _run_variation_index(settings, base_path, index_run, data, n_gpu, device)
+        _run_variation_index(settings, result_path, index_run, data, n_gpu, device)
 
 
 def _seed(seed, index_run, n_gpu):
@@ -317,9 +318,9 @@ def _loss_weights(loss_count_dict):
     return dict(zip(keys, [w.item() for w in loss_weights]))
 
 
-def _run_variation_index(settings: Settings, base_path: str, index_run: int, data, n_gpu: int, device):
+def _run_variation_index(settings: Settings, result_path: str, index_run: int, data, n_gpu: int, device):
 
-    output_dir = os.path.join(base_path, 'run_{}'.format(index_run))
+    output_dir = os.path.join(result_path, 'run_{}'.format(index_run))
 
     output_validation_path = os.path.join(output_dir, 'output_validation.json')
     output_test_path = os.path.join(output_dir, 'output_test.json')
@@ -540,6 +541,10 @@ def _run_variation_index(settings: Settings, base_path: str, index_run: int, dat
     write_predictions(output_validation_path, all_validation, validation_data_set, settings)
     write_predictions(output_test_path, all_test, test_data_set, settings)
 
+    # clean up after we're done to try to release CUDA resources to other people when there are no more tasks
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 def iterate_powerset(items):
     for sub_set in itertools.chain.from_iterable(
@@ -603,6 +608,8 @@ def main():
     parser.add_argument('--log_level', action='store', required=False, default='WARNING',
                         help='Sets the log-level. Defaults to WARNING')
 
+    parser.add_argument('--no_cuda', action='store_true', required=False, help='If specified, model will be run on CPU')
+
     parser.add_argument(
         '--name', action='store', required=False, default='erp', help='Which set to run')
 
@@ -620,15 +627,17 @@ def main():
                 break
 
         paths_ = Paths()
-        model_path = os.path.join(paths_.model_path, 'bert', args.name)
-        base_path = os.path.join(paths_.base_path, 'bert', args.name)
+        model_path = os.path.join(paths_.model_path, args.name)
+        result_path = os.path.join(paths_.result_path, args.name)
         if os.path.exists(model_path):
             rmtree(model_path)
-        if os.path.exists(base_path):
-            rmtree(base_path)
+        if os.path.exists(result_path):
+            rmtree(result_path)
         sys.exit(0)
 
     training_variations_, settings_, num_runs_, min_memory_, aux_loss_tasks = named_variations(args.name)
+    if args.no_cuda:
+        settings_.no_cuda = True
     for training_variation in training_variations_:
         run_variation(args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss)
 

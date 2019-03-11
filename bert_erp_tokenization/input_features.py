@@ -54,3 +54,4 @@ class RawData:
     test_proportion: float = 0.0
     validation_proportion_of_train: float = 0.1
     field_specs: Optional[Mapping[str, FieldSpec]] = None
+    metadata: Optional[Mapping[str, np.array]] = False

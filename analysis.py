@@ -391,16 +391,7 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
         return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma)
 
 
-def _ensure_complete_asdict(critic_mapping):
-    d = dataclasses.asdict(critic_mapping, dict_factory=OrderedDict)
-    unspecified = [f for f in d if d[f] is None]
-    if len(unspecified) > 0:
-        raise ValueError('Unspecified critic handlers: {}'.format(unspecified))
-    return d
-
-
-_prediction_handlers = _ensure_complete_asdict(dataclasses.replace(
-    CriticMapping(**dict((f.name, None) for f in dataclasses.fields(CriticMapping))),
+_prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=regression_handler,
     pearson=regression_handler,
     cross_entropy=class_handler,
@@ -408,7 +399,7 @@ _prediction_handlers = _ensure_complete_asdict(dataclasses.replace(
     soft_label_cross_entropy=class_handler,
     sequence_cross_entropy=class_handler,
     sequence_binary_cross_entropy=(class_handler, dict(is_binary=True)),
-    sequence_soft_label_cross_entropy=class_handler))
+    sequence_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None):

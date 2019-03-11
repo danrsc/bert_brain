@@ -11,7 +11,7 @@ class Paths:
     default_relative_cache_path = 'bert_cache'
     default_relative_geco_path = os.path.join('geco', 'MonolingualReadingData.csv')
     default_relative_bnc_root = os.path.join('british_national_corpus', '2553', 'download', 'Texts')
-    default_relative_harry_potter_path = 'harry_potter_pca.npz'
+    default_relative_harry_potter_path = 'harry_potter'
     default_relative_frank_2015_erp_path = os.path.join('frank_2015_erp', 'stimuli_erp.mat')
     default_relative_frank_2013_eye_path = 'frank_2013_eye'
     default_relative_dundee_path = 'dundee'
@@ -28,8 +28,9 @@ class Paths:
     default_relative_linzen_agreement_path = 'linzen_agreement'
 
     pre_trained_base_path: str = '/share/volume0/drschwar/BERT'
-    base_path: str = '/share/volume0/drschwar/ulmfit_data/'
-    model_path: str = '/share/volume0/drschwar/bert_erp/'
+    result_path: str = '/share/volume0/drschwar/bert_erp/results/'
+    data_set_base_path: str = '/share/volume0/drschwar/data_sets/'
+    model_path: str = '/share/volume0/drschwar/bert_erp/models/'
 
     pre_trained_path: Optional[str] = None
     cache_path: Optional[str] = None
@@ -51,37 +52,39 @@ class Paths:
         if self.pre_trained_path is None:
             self.pre_trained_path = os.path.join(self.pre_trained_base_path, Paths.default_relative_pre_trained_path)
         if self.cache_path is None:
-            self.cache_path = os.path.join(self.base_path, Paths.default_relative_cache_path)
+            self.cache_path = os.path.join(self.data_set_base_path, Paths.default_relative_cache_path)
         if self.geco_path is None:
-            self.geco_path = os.path.join(self.base_path, Paths.default_relative_geco_path)
+            self.geco_path = os.path.join(self.data_set_base_path, Paths.default_relative_geco_path)
         if self.bnc_root is None:
-            self.bnc_root = os.path.join(self.base_path, Paths.default_relative_bnc_root)
+            self.bnc_root = os.path.join(self.data_set_base_path, Paths.default_relative_bnc_root)
         if self.harry_potter_path is None:
-            self.harry_potter_path = os.path.join(self.base_path, Paths.default_relative_harry_potter_path)
+            self.harry_potter_path = os.path.join(self.data_set_base_path, Paths.default_relative_harry_potter_path)
         if self.frank_2015_erp_path is None:
-            self.frank_2015_erp_path = os.path.join(self.base_path, Paths.default_relative_frank_2015_erp_path)
+            self.frank_2015_erp_path = os.path.join(self.data_set_base_path, Paths.default_relative_frank_2015_erp_path)
         if self.frank_2013_eye_path is None:
-            self.frank_2013_eye_path = os.path.join(self.base_path, Paths.default_relative_frank_2013_eye_path)
+            self.frank_2013_eye_path = os.path.join(self.data_set_base_path, Paths.default_relative_frank_2013_eye_path)
         if self.dundee_path is None:
-            self.dundee_path = os.path.join(self.base_path, Paths.default_relative_dundee_path)
+            self.dundee_path = os.path.join(self.data_set_base_path, Paths.default_relative_dundee_path)
         if self.english_web_universal_dependencies_v_1_2_path is None:
             self.english_web_universal_dependencies_v_1_2_path = os.path.join(
-                self.base_path, Paths.default_relative_english_web_universal_dependencies_v_1_2_path)
+                self.data_set_base_path, Paths.default_relative_english_web_universal_dependencies_v_1_2_path)
         if self.english_web_universal_dependencies_v_2_3_path is None:
             self.english_web_universal_dependencies_v_2_3_path = os.path.join(
-                self.base_path, Paths.default_relative_english_web_universal_dependencies_v_2_3_path)
+                self.data_set_base_path, Paths.default_relative_english_web_universal_dependencies_v_2_3_path)
         if self.proto_roles_english_web_path is None:
             self.proto_roles_english_web_path = os.path.join(
-                self.base_path, Paths.default_relative_proto_roles_english_web_path)
+                self.data_set_base_path, Paths.default_relative_proto_roles_english_web_path)
         if self.proto_roles_prop_bank_path is None:
             self.proto_roles_prop_bank_path = os.path.join(
-                self.base_path, Paths.default_relative_proto_roles_prop_bank_path)
+                self.data_set_base_path, Paths.default_relative_proto_roles_prop_bank_path)
         if self.ontonotes_path is None:
-            self.ontonotes_path = os.path.join(self.base_path, Paths.default_relative_ontonotes_path)
+            self.ontonotes_path = os.path.join(self.data_set_base_path, Paths.default_relative_ontonotes_path)
         if self.natural_stories_path is None:
-            self.natural_stories_path = os.path.join(self.base_path, Paths.default_relative_natural_stories_path)
+            self.natural_stories_path = os.path.join(
+                self.data_set_base_path, Paths.default_relative_natural_stories_path)
         if self.linzen_agreement_path is None:
-            self.linzen_agreement_path = os.path.join(self.base_path, Paths.default_relative_linzen_agreement_path)
+            self.linzen_agreement_path = os.path.join(
+                self.data_set_base_path, Paths.default_relative_linzen_agreement_path)
 
     def make_data_loader(
             self, bert_pre_trained_model_name='bert-base-uncased', data_key_kwarg_dict=None):

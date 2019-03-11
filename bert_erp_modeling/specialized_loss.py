@@ -370,18 +370,25 @@ class NamedTargetSequenceBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
 
 @dataclass(frozen=True)
 class CriticMapping:
-    mse: Any = NamedTargetStopWordAwareMSE
-    pearson: Any = NamedTargetStopWordAwarePearsonDistance
-    cross_entropy: Any = NamedTargetStopWordAwareCrossEntropy
-    binary_cross_entropy: Any = NamedTargetStopWordAwareBinaryCrossEntropyWithLogits
-    soft_label_cross_entropy: Any = NamedTargetStopWordAwareSoftLabelCrossEntropy
-    sequence_cross_entropy: Any = NamedTargetSequenceCrossEntropy
-    sequence_binary_cross_entropy: Any = NamedTargetSequenceBinaryCrossEntropyWithLogits
-    sequence_soft_label_cross_entropy: Any = NamedTargetSequenceSoftLabelCrossEntropy
+    # this metadata trick allows us to give the canonical value along with the field definition
+    # while not specifying a default (so we force all versions of the mapping to instantiate all the fields)
+    mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareMSE))
+    pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwarePearsonDistance))
+    cross_entropy: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareCrossEntropy))
+    binary_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetStopWordAwareBinaryCrossEntropyWithLogits))
+    soft_label_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
+    sequence_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSequenceCrossEntropy))
+    sequence_binary_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSequenceBinaryCrossEntropyWithLogits))
+    sequence_soft_label_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSequenceSoftLabelCrossEntropy))
 
 
 CriticKeys = CriticMapping(**dict((f.name, f.name) for f in dataclasses.fields(CriticMapping)))
-_critic_type_dict = dataclasses.asdict(CriticMapping(), dict_factory=OrderedDict)
+_critic_type_dict = OrderedDict((f.name, f.metadata['hidden_value']) for f in dataclasses.fields(CriticMapping))
 
 
 def make_loss_handler(field, which_loss, loss_kwargs=None):

@@ -113,12 +113,20 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             for key in current.data:
                 response_data[key] = list()
 
+            fields_as_none = set()
+
             for index_example, f in enumerate(examples):
                 if index_example == 0:
                     fields = [field.name for field in dataclasses.fields(f)]
                     for field in fields:
 
                         if current.field_specs[field].tensor_dtype == str:
+                            continue
+
+                        # this is an optional field; we know that the field is either always None for a given dataset
+                        # or it is always not None for a given dataset (but we will validate this below)
+                        if getattr(f, field) is None:
+                            fields_as_none.add(field)
                             continue
 
                         if field not in self._example_tensors:
@@ -170,6 +178,11 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                     if field_specs[field].is_sequence:
                         example_value = _pad(example_value, max_sequence_length, field_specs[field].fill_value)
                     self._example_tensors[field].append(example_value)
+
+                for field in fields_as_none:
+                    if field in example_values and example_values[field] is not None:
+                        raise ValueError('Fields must always be set to None in a given dataset '
+                                         'if they are ever None in that dataset')
 
                 # response data is side-information that is indexed into by the example, so it is treated differently
                 for key in current.data:

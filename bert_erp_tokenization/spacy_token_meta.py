@@ -254,6 +254,10 @@ def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words,
             if idx_token == idx_data:
                 if callable(data_offset):
                     data_id = data_offset(idx_group)
+                elif not np.isscalar(data_offset):
+                    if len(data_offset) != len(words):
+                        raise ValueError('If data_offset is a sequence, it must have the same length as words')
+                    data_id = data_offset[idx_group]
                 elif data_offset >= 0:
                     data_id = data_offset + idx_group
             example_data_ids.append(data_id)

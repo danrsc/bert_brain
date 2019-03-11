@@ -3,7 +3,8 @@ from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional
 
 import numpy as np
 from bert_erp_datasets import DataLoader, DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessMakeBinary, PreprocessNanMean, PreprocessClip
+    PreprocessPCA, PreprocessMakeBinary, PreprocessNanMean, PreprocessClip, PreprocessDiscretize, PreprocessDetrend, \
+    PreprocessGaussianBlur, harry_potter_split_by_run
 from bert_erp_modeling import CriticKeys
 
 
@@ -21,6 +22,25 @@ class TaskSettings:
     #     'train_content': training is done on content, both results reported
     #     'report_content': training is done on content, only content results reported
     stop_word_mode: Optional[str] = 'train_content'
+    split_function: Optional[Callable] = None
+
+
+def _harry_potter_meg_critic_and_preprocess():
+
+    # return (
+    #     CriticKeys.soft_label_cross_entropy,
+    #     PreprocessMany(
+    #         #  preprocess_detrend,
+    #         #  partial(preprocess_standardize, average_axis=None),
+    #         PreprocessDiscretize(bins=np.exp(np.linspace(-0.2, 1., 5))),  # bins=np.arange(6) - 2.5
+    #         PreprocessNanMean()))
+
+    return (
+        CriticKeys.mse,
+        PreprocessMany(
+            PreprocessStandardize(average_axis=None, stop_mode='content'),
+            PreprocessPCA(stop_mode='content'),
+            PreprocessStandardize(average_axis=None, stop_mode='content')))
 
 
 def _default_task_settings():
@@ -42,6 +62,13 @@ def _default_task_settings():
                 PreprocessClip(maximum=3000, value_beyond_max=np.nan),
                 PreprocessLog(),
                 preprocess_standardize)),
+        DataKeys.harry_potter_meg: _harry_potter_meg_critic_and_preprocess(),
+        DataKeys.harry_potter_fmri: TaskSettings(
+            critic_type=CriticKeys.mse,
+            preprocessor=PreprocessMany(
+                PreprocessStandardize(average_axis=None, metadata_response_group_by='example_run'),
+                PreprocessDetrend(stop_mode=None, metadata_response_group_by='example_run')),
+            split_function=harry_potter_split_by_run),
         DataKeys.colorless_green: TaskSettings(
             critic_type=CriticKeys.sequence_binary_cross_entropy),
         DataKeys.linzen_agreement: TaskSettings(

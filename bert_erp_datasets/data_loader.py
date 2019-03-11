@@ -11,7 +11,7 @@ from pytorch_pretrained_bert import BertTokenizer
 from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, FieldSpec
 from .university_college_london_corpus import ucl_data
 from .natural_stories import natural_stories_data
-from .harry_potter import harry_potter_data
+from .harry_potter import harry_potter_meg_data, harry_potter_fmri_data
 from .colorless_green import colorless_green_agreement_data, linzen_agreement_data
 
 
@@ -41,16 +41,30 @@ def _save_to_cache(cache_path, data, kwargs):
 
     result = dict((k, list()) for k in dataclasses.asdict(all_examples[0]))
     result['__lengths__'] = list()
+    fields_as_none = set()
+    fields_with_value = set()
     for example in all_examples:
         ex = dataclasses.asdict(example)
+        has_tokens = False
         for k in ex:
+            if ex[k] is not None:
+                if k in fields_as_none:
+                    raise ValueError('A field must always be empty if it is ever empty')
+                fields_with_value.add(k)
+            else:
+                if k in fields_with_value:
+                    raise ValueError('A field must always have a value if it ever has a value')
+                fields_as_none.add(k)
+                continue
             if data.field_specs is not None and k in data.field_specs and not data.field_specs[k].is_sequence:
                 result[k].append(ex[k])
             elif k == 'tokens':
+                has_tokens = True
                 result['__lengths__'].append(len(ex[k]))
                 result[k].extend(ex[k])
             else:
                 result[k].extend(ex[k])
+        assert has_tokens
 
     for k in result:
         result[k] = np.array(result[k])
@@ -60,6 +74,9 @@ def _save_to_cache(cache_path, data, kwargs):
 
     for k in data.response_data:
         result['__response_data__{}'.format(k)] = data.response_data[k]
+
+    for k in data.metadata:
+        result['__metadata__{}'.format(k)] = data.metadata[k]
 
     if data.field_specs is not None:
         for k in data.field_specs:
@@ -128,6 +145,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     key_prefixes = [
         '__kwarg__',
         '__response_data__',
+        '__metadata__',
         '__field_spec_tensor_dtype__',
         '__field_spec_fill_value__',
         '__field_spec_is_sequence__']
@@ -222,7 +240,8 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         is_pre_split=loaded['__is_pre_split__'].item(),
         test_proportion=loaded['__test_proportion__'].item(),
         validation_proportion_of_train=loaded['__validation_proportion_of_train__'].item(),
-        field_specs=field_specs)
+        field_specs=field_specs,
+        metadata=prefix_results['__metadata__'] if len(prefix_results['__metadata__']) > 0 else None)
 
 
 def _populate_default_field_specs(raw_data):
@@ -250,7 +269,8 @@ def _populate_default_field_specs(raw_data):
         'input_head_tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
         'input_head_token_ids': FieldSpec(tensor_dtype=torch.long),
         'input_type_ids': FieldSpec(tensor_dtype=torch.long),
-        'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long)
+        'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long),
+        'index_in_image': FieldSpec(fill_value=-1, tensor_dtype=torch.long)
     }
 
     if raw_data.field_specs is None:
@@ -262,19 +282,20 @@ def _populate_default_field_specs(raw_data):
 
 @dataclasses.dataclass(frozen=True)
 class _DataKeys:
-    geco: str = 'geco'
-    bnc: str = 'bnc'
-    harry_potter: str = 'harry_potter'
-    ucl: str = 'ucl'
-    dundee: str = 'dundee'
-    proto_roles_english_web: str = 'proto_roles_english_web'
-    proto_roles_prop_bank: str = 'proto_roles_prop_bank'
-    natural_stories: str = 'natural_stories'
-    colorless_green: str = 'colorless_green'
-    linzen_agreement: str = 'linzen_agreement'
+    geco: str
+    bnc: str
+    harry_potter_meg: str
+    harry_potter_fmri: str
+    ucl: str
+    dundee: str
+    proto_roles_english_web: str
+    proto_roles_prop_bank: str
+    natural_stories: str
+    colorless_green: str
+    linzen_agreement: str
 
 
-DataKeys = _DataKeys()
+DataKeys = _DataKeys(**dict((f.name, f.name) for f in dataclasses.fields(_DataKeys)))
 
 
 class DataLoader(object):
@@ -374,8 +395,11 @@ class DataLoader(object):
                 elif key == DataKeys.natural_stories:
                     result[key] = natural_stories_data(
                         spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
-                elif key == DataKeys.harry_potter:
-                    result[key] = harry_potter_data(
+                elif key == DataKeys.harry_potter_meg:
+                    result[key] = harry_potter_meg_data(
+                        spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
+                elif key == DataKeys.harry_potter_fmri:
+                    result[key] = harry_potter_fmri_data(
                         spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
                 elif key == DataKeys.colorless_green:
                     result[key] = colorless_green_agreement_data(
