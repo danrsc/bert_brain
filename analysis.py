@@ -1,5 +1,4 @@
 import os
-import json
 import warnings
 from functools import partial
 from collections import OrderedDict
@@ -10,6 +9,7 @@ from scipy.misc import logsumexp
 
 from run_regression import task_hash
 from bert_erp_modeling import CriticMapping
+from result_output import read_predictions
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
@@ -88,25 +88,25 @@ class Aggregator:
 
 
 def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
-    output_dir = os.path.join(paths.base_path, 'bert', variation_set_name, task_hash(set(training_variation)))
+    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     losses = dict()
     for index_run in range(num_runs):
         run_aggregated = dict()
-        validation_json_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.json')
-        with open(validation_json_path, 'rt') as validation_json_file:
-            output_results = json.load(validation_json_file)
-        for output_result in output_results:
-            name = output_result['name']
+        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+        output_results_by_name = read_predictions(validation_npz_path)
+        for name in output_results_by_name:
             if name not in training_variation and name not in aux_loss:
                 continue
-            if name not in run_aggregated:
-                run_aggregated[name] = Aggregator()
-            if name not in losses:
-                losses[name] = output_result['critic_type']
-            else:
-                assert(losses[name] == output_result['critic_type'])
-            run_aggregated[name].update(output_result)
+            output_results = output_results_by_name[name]
+            for output_result in output_results:
+                if name not in run_aggregated:
+                    run_aggregated[name] = Aggregator()
+                if name not in losses:
+                    losses[name] = output_result.critic_type
+                else:
+                    assert(losses[name] == output_result.critic_type)
+                run_aggregated[name].update(output_result)
         for name in run_aggregated:
             handler = make_prediction_handler(losses[name])
             result_dict = handler(run_aggregated[name])
@@ -139,17 +139,16 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
 
 
 def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
-    output_dir = os.path.join(paths.base_path, 'bert', variation_set_name, task_hash(set(training_variation)))
+    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     result = dict()
     for index_run in range(num_runs):
-        validation_json_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.json')
-        with open(validation_json_path, 'rt') as validation_json_file:
-            output_results = json.load(validation_json_file)
+        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+        output_results = np.load(validation_npz_path)
         for output_result in output_results:
-            name = output_result['name']
+            name = output_result.name
             if name not in training_variation and name not in aux_loss:
                 continue
-            data_key, unique_id = output_result['data_key'], output_result['unique_id']
+            data_key, unique_id = output_result.data_key, output_result.unique_id
             if data_key not in result:
                 result[data_key] = dict()
             if unique_id not in result[data_key]:

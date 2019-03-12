@@ -398,6 +398,12 @@ def _run_variation_index(settings: Settings, result_path: str, index_run: int, d
             predictions = model(batch)
             loss_dict = OrderedDict(
                 (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
+            batch_size = len(batch['unique_id'])
+
+            # free up memory
+            del predictions
+            del batch
+
             loss = None
             for data_key in loss_dict:
                 weight, data_loss = loss_dict[data_key]
@@ -417,7 +423,7 @@ def _run_variation_index(settings: Settings, result_path: str, index_run: int, d
             del loss_dict
 
             if loss is not None:
-                logger.info('train: {}'.format(loss.item() / len(batch['unique_id'])))
+                logger.info('train: {}'.format(loss.item() / batch_size))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.fp16 and settings.loss_scale != 1.0:

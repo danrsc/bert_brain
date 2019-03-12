@@ -17,6 +17,7 @@ class OutputResult:
     name: str
     critic_type: str
     critic_kwargs: Mapping[str, Any]
+    unique_id: int
     data_key: str
     tokens: Sequence[str]
     mask: Sequence[bool]
@@ -32,7 +33,8 @@ def _num_tokens(tokens):
 
 
 def write_predictions(output_path, all_results, data_set, settings):
-    """Write final predictions to the json file."""
+
+    """Write final predictions to an output file."""
     logger.info("Writing predictions to: %s" % output_path)
 
     output_dict = dict()
@@ -56,18 +58,20 @@ def write_predictions(output_path, all_results, data_set, settings):
         masks = list()
         lengths = list()
         data_keys = list()
+        unique_ids = list()
         tokens = list()
 
         for detailed_result in all_results[key]:
             current_tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
             num_tokens = _num_tokens(current_tokens)
             tokens.extend(current_tokens[:num_tokens])
+            unique_ids.append(detailed_result.unique_id)
             data_keys.append(data_set.data_set_key_for_id(detailed_result.data_set_id))
             if is_sequence:
-                predictions.append(np.expand_dims(detailed_result.prediction[:num_tokens], 0))
-                targets.append(np.expand_dims(detailed_result.target[:num_tokens], 0))
+                predictions.append(detailed_result.prediction[:num_tokens])
+                targets.append(detailed_result.target[:num_tokens])
                 if detailed_result.mask is not None:
-                    masks.append(np.expand_dims(detailed_result.mask[:num_tokens], 0))
+                    masks.append(detailed_result.mask[:num_tokens])
                 else:
                     masks.append(None)
                 lengths.append(num_tokens)
@@ -85,8 +89,10 @@ def write_predictions(output_path, all_results, data_set, settings):
         output_dict['masks_{}'.format(key)] = np.concatenate(masks) if masks[0] is not None else None
         output_dict['lengths_{}'.format(key)] = np.array(lengths)
         output_dict['data_keys_{}'.format(key)] = np.array(data_keys)
+        output_dict['unique_ids_{}'.format(key)] = np.array(unique_ids)
         output_dict['tokens_{}'.format(key)] = np.array(tokens)
         output_dict['critic_{}'.format(key)] = critic_type
+        output_dict['is_sequence_{}'.format(key)] = is_sequence
         if critic_kwargs is not None:
             for critic_key in critic_kwargs:
                 output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_kwargs[critic_key]
@@ -106,8 +112,10 @@ def read_predictions(output_path):
         masks = npz['masks_{}'.format(key)]
         lengths = npz['lengths_{}'.format(key)]
         data_keys = npz['data_keys_{}'.format(key)]
+        unique_ids = npz['unique_ids_{}'.format(key)]
         tokens = npz['tokens_{}'.format(key)]
         critic_type = npz['critic_{}'.format(key)].item()
+        is_sequence = npz['is_sequence_{}'.format(key)].item()
         critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
         critic_kwargs = dict()
         for npz_key in npz.keys():
@@ -117,10 +125,17 @@ def read_predictions(output_path):
             critic_kwargs = None
 
         splits = np.cumsum(lengths)[:-1]
-        predictions = [np.squeeze(a, axis=0) for a in np.split(predictions, splits)]
-        target = [np.squeeze(a, axis=0) for a in np.split(target, splits)]
-        masks = [np.squeeze(a, axis=0) for a in np.split(masks, splits)] if masks is not None else None
+        predictions = np.split(predictions, splits)
+        target = np.split(target, splits)
+        if not is_sequence:
+            predictions = [np.squeeze(p, axis=0) for p in predictions]
+            target = [np.squeeze(t, axis=0) for t in target]
+        if masks is not None:
+            masks = np.split(masks, splits)
+            if not is_sequence:
+                masks = [np.squeeze(m, axis=0) for m in masks]
         data_keys = [k.item() for k in data_keys]
+        unique_ids = [u.item() for u in unique_ids]
         tokens = np.split(tokens, splits)
         tokens = [[t.item() for t in s] for s in tokens]
 
@@ -128,7 +143,7 @@ def read_predictions(output_path):
         for idx in range(len(tokens)):
             results.append(OutputResult(
                 key, critic_type, critic_kwargs,
-                data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx]))
+                unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx]))
 
         result[key] = results
 
