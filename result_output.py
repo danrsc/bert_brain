@@ -67,6 +67,7 @@ def write_predictions(output_path, all_results, data_set, settings):
             tokens.extend(current_tokens[:num_tokens])
             unique_ids.append(detailed_result.unique_id)
             data_keys.append(data_set.data_set_key_for_id(detailed_result.data_set_id))
+            lengths.append(num_tokens)
             if is_sequence:
                 predictions.append(detailed_result.prediction[:num_tokens])
                 targets.append(detailed_result.target[:num_tokens])
@@ -74,12 +75,10 @@ def write_predictions(output_path, all_results, data_set, settings):
                     masks.append(detailed_result.mask[:num_tokens])
                 else:
                     masks.append(None)
-                lengths.append(num_tokens)
             else:
                 predictions.append(np.expand_dims(detailed_result.prediction, 0))
                 targets.append(np.expand_dims(detailed_result.target, 0))
                 masks.append(np.expand_dims(detailed_result.mask, 0) if detailed_result.mask is not None else None)
-                lengths.append(1)
 
         if any(m is None for m in masks) and any(m is not None for m in masks):
             raise ValueError('Unable to write a mixture of None and non-None masks')
@@ -125,15 +124,11 @@ def read_predictions(output_path):
             critic_kwargs = None
 
         splits = np.cumsum(lengths)[:-1]
-        predictions = np.split(predictions, splits)
-        target = np.split(target, splits)
-        if not is_sequence:
-            predictions = [np.squeeze(p, axis=0) for p in predictions]
-            target = [np.squeeze(t, axis=0) for t in target]
-        if masks is not None:
-            masks = np.split(masks, splits)
-            if not is_sequence:
-                masks = [np.squeeze(m, axis=0) for m in masks]
+        if is_sequence:
+            predictions = np.split(predictions, splits)
+            target = np.split(target, splits)
+            if masks is not None:
+                masks = np.split(masks, splits)
         data_keys = [k.item() for k in data_keys]
         unique_ids = [u.item() for u in unique_ids]
         tokens = np.split(tokens, splits)

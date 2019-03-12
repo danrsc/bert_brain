@@ -7,24 +7,24 @@ import dataclasses
 import numpy as np
 from scipy.misc import logsumexp
 
-from run_regression import task_hash
+from run_variations import task_hash
 from bert_erp_modeling import CriticMapping
 from result_output import read_predictions
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
 output_order = (
-    'mse',
-    'pove',
-    'povu',
+    'mse',       # mean squared error
+    'pove',      # proportion of variance explained
+    'povu',      # proportion of variance unexplained
     'variance',
     'r_seq',     # avg (over batch) of sequence correlation values (i.e. correlation within a sequence)
-    'xent',
-    'acc',
+    'xent',      # cross entropy
+    'acc',       # accuracy
     'macc',      # mode accuracy - the accuracy one would get if one picked the mode
     'poma',      # proportion of mode accuracy; < 1 is bad
-    'prec',
-    'rec',
+    'prec',      # precision
+    'rec',       # recall
     'f1')
 
 
