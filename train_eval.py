@@ -1,5 +1,4 @@
 import gc
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
@@ -10,7 +9,7 @@ from pytorch_pretrained_bert import BertAdam
 from torch.utils.data import SequentialSampler, DistributedSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
 
-from bert_erp_datasets import collate_fn, DataPreparer, max_example_sequence_length, PreparedDataDataset
+from bert_erp_datasets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
 from bert_erp_modeling import make_loss_handler, BertMultiHead
 from bert_erp_settings import Settings
 from result_output import write_predictions
@@ -128,15 +127,7 @@ def _loss_weights(loss_count_dict):
     return dict(zip(keys, [w.item() for w in loss_weights]))
 
 
-def train(settings: Settings, output_dir, seed, data, n_gpu, device):
-
-    output_validation_path = os.path.join(output_dir, 'output_validation.npz')
-    output_test_path = os.path.join(output_dir, 'output_test.npz')
-    if os.path.exists(output_validation_path) and os.path.exists(output_test_path):
-        return
-
-    data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions())
-    data = data_preparer.prepare(data)
+def train(settings: Settings, output_validation_path, output_test_path, data: PreparedData, n_gpu, device):
 
     max_sequence_length = max_example_sequence_length(data)
 
@@ -339,9 +330,6 @@ def train(settings: Settings, output_dir, seed, data, n_gpu, device):
     logger.info("  Num orig examples = %d", len(validation_data_set))
     logger.info("  Num split examples = %d", len(validation_data_set))
     logger.info("  Batch size = %d", settings.predict_batch_size)
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
 
     if len(validation_data_set) > 0:
         all_validation = evaluate(

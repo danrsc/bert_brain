@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 from bert_erp_common import SwitchRemember
-from bert_erp_datasets import DataKeys
+from bert_erp_datasets import DataKeys, DataPreparer
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 from train_eval import train
@@ -95,9 +95,7 @@ def run_variation(
 
     def io_setup():
         temp_paths = Paths()
-        data_loader_ = temp_paths.make_data_loader(
-            # bert_pre_trained_model_name=settings.bert_model,
-            data_key_kwarg_dict={DataKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye')})
+        data_loader_ = temp_paths.make_data_loader(data_key_kwarg_dict=settings.data_key_kwargs)
         hash_ = task_hash(loss_tasks)
         model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
         result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
@@ -115,9 +113,22 @@ def run_variation(
     settings = replace(settings, loss_tasks=loss_tasks)
     data = data_loader.load(settings.task_data_keys, force_cache_miss=force_cache_miss)
     for index_run in trange(num_runs, desc='Run'):
+
         output_dir = os.path.join(result_path, 'run_{}'.format(index_run))
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        output_validation_path = os.path.join(output_dir, 'output_validation.npz')
+        output_test_path = os.path.join(output_dir, 'output_test.npz')
+        if os.path.exists(output_validation_path) and os.path.exists(output_test_path):
+            continue
+
         seed = _seed(settings.seed, index_run, n_gpu)
-        train(settings, output_dir, seed, data, n_gpu, device)
+        data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions())
+        data = data_preparer.prepare(data)
+
+        train(settings, output_validation_path, output_test_path, data, n_gpu, device)
 
 
 def iterate_powerset(items):
@@ -159,6 +170,13 @@ def named_variations(name):
         training_variations = [agr, erp_tasks + agr, erp_tasks]
         settings = Settings(
             task_data_keys=(DataKeys.colorless_green, DataKeys.linzen_agreement, DataKeys.ucl))
+        num_runs = 10
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri':
+        training_variations = [('hp_fmri_I',)]
+        settings = Settings(
+            task_data_keys=(DataKeys.harry_potter_fmri,))
+        settings.data_key_kwargs[DataKeys.harry_potter_fmri] = dict(subjects='I')
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     else:

@@ -10,7 +10,7 @@ from pytorch_pretrained_bert import BertTokenizer
 
 from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, FieldSpec
 from .university_college_london_corpus import ucl_data
-from .natural_stories import natural_stories_data
+from .natural_stories import natural_stories_reaction_times
 from .harry_potter import harry_potter_meg_data, harry_potter_fmri_data
 from .colorless_green import colorless_green_agreement_data, linzen_agreement_data
 
@@ -393,7 +393,7 @@ class DataLoader(object):
                         spacy_tokenizer_model, bert_tokenizer, self.frank_2013_eye_path,
                         self.frank_2015_erp_path, **kwargs)
                 elif key == DataKeys.natural_stories:
-                    result[key] = natural_stories_data(
+                    result[key] = natural_stories_reaction_times(
                         spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
                 elif key == DataKeys.harry_potter_meg:
                     result[key] = harry_potter_meg_data(

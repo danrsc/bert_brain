@@ -1,9 +1,11 @@
 import inspect
 from itertools import zip_longest
 from _collections_abc import Mapping
+import re
 
 
-__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'FrozenCopyOfDict', 'SwitchRemember']
+__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'FrozenCopyOfDict', 'SwitchRemember',
+           'camel_to_snake']
 
 
 def zip_equal(*it):
@@ -107,3 +109,9 @@ class SwitchRemember:
     def __eq__(self, test):
         self._tests.add(test)
         return self.var == test
+
+
+def camel_to_snake(s):
+    # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()

@@ -76,6 +76,12 @@ def _default_task_settings():
     }
 
 
+def _default_data_key_kwargs():
+    return {
+        DataKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye'),
+        DataKeys.harry_potter_fmri: dict(subjects='I')}
+
+
 def _default_additional_fields():
     return {'input_lengths', 'input_probs'}
 
@@ -87,6 +93,9 @@ class Settings:
 
     # which data to load
     task_data_keys: Optional[Sequence[str]] = (DataKeys.ucl,)
+
+    # keyword args for loading data
+    data_key_kwargs: Optional[Mapping[str, Mapping[str, Any]]] = field(default_factory=_default_data_key_kwargs)
 
     # task specific settings, see TaskSettings
     task_settings: MutableMapping[str, TaskSettings] = field(default_factory=_default_task_settings)

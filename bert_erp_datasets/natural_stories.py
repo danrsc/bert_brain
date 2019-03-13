@@ -2,14 +2,16 @@ import os
 import itertools
 import csv
 from dataclasses import dataclass
+from collections import OrderedDict
 import dataclasses
 import numpy as np
-
+from scipy.io import loadmat
 
 from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData, make_tokenizer_model
+from .praat_textgrid import PraatTextGrid
 
 
-__all__ = ['read_natural_stories', 'natural_stories_data', 'read_natural_story_codings']
+__all__ = ['read_natural_stories', 'natural_stories_reaction_times', 'read_natural_story_codings']
 
 
 @dataclass
@@ -318,7 +320,142 @@ def read_natural_stories(spacy_tokenize_model, bert_tokenizer, directory_path):
     return examples, {'ns_spr': reaction_times}
 
 
-def natural_stories_data(spacy_tokenize_model, bert_tokenizer, path):
+def _natural_stories_audio_times(path):
+
+    result = dict()
+    mins = dict()
+    maxes = dict()
+
+    for file in os.listdir(path):
+        if os.path.splitext(file)[1] != 'TextGrid':
+            continue
+        with open(os.path.join(path, file), 'rt') as text_grid_file:
+            text_grid = PraatTextGrid(text_grid_file)
+
+        for tier in text_grid:
+            if tier.tier_name() != 'words':
+                continue
+            for word in tier:
+                if len(word.transcript) == 0:
+                    continue
+                # ignore everything in the text except the token id, use the canonical form from _read_story_sentences
+                index_last_slash = word.transcript.rfind('/')
+                if index_last_slash < 0:
+                    raise ValueError('Unable to find key: {}'.format(word.transcript))
+                token_id = word.transcript[(index_last_slash + 1):]
+                # zone is the story identifier
+                zone, item = [int(p) for p in token_id.split('.')[:2]]
+                if zone not in mins:
+                    mins[zone] = word.min_max()[0]
+                    maxes[zone] = word.min_max()[1]
+                    result[zone] = list()
+                else:
+                    mins[zone] = min(mins[zone], word.min_max()[0])
+                    maxes[zone] = max(maxes[zone], word.min_max()[1])
+                result[zone].append((item,) + word.min_max())
+
+    return OrderedDict((key, result[key]) for key in sorted(result)), mins, maxes
+
+
+def natural_stories_froi(spacy_tokenize_model, bert_tokenizer, path, froi_subjects=None):
+    froi_path = os.path.join(path, 'fROI')
+    suffix = '_language_fROIs.mat'
+    if froi_subjects is None:
+        froi_subjects = list()
+        for name in os.listdir(froi_path):
+            if name.endswith(suffix):
+                froi_subjects.append(name[:-len(suffix)])
+    elif isinstance(froi_subjects, str):
+        froi_subjects = [froi_subjects]
+
+    audio_times, mins, maxes = _natural_stories_audio_times(os.path.join(path, 'audio_alignments'))
+
+    story_to_zone = dict(
+        (s, i + 1) for i, s in enumerate(
+            ['Boar', 'Aqua', 'Matchstick', 'KingOfBirds', 'Elvis',
+             'MrSticky', 'HighSchool', 'Roswell', 'Tulips', 'Tourette']))
+
+    collated_data = dict()
+    zone_to_num_images = dict()
+    num_rois = None
+
+    for subject in froi_subjects:
+        collated_data[subject] = dict()
+        subject_path = os.path.join(froi_path, subject + suffix)
+        data = loadmat(subject_path)
+        data = data['data']['stories'][0, 0]
+        stories = data.dtype.fields.keys()
+
+        for story in stories:
+            if story == 'Tree':
+                # not part of the natural stories corpus
+                continue
+            # (roi, image)
+            # Note that these time-series begin with 16s (8 time points) of fixation,
+            # and end with either 16 or 32s (8 or 16 time points) of fixation
+            story_data = data[story][0, 0].T  # after transpose, this is (images, rois)
+            if num_rois is None:
+                num_rois = story_data.shape[1]
+            elif num_rois != story_data.shape[1]:
+                raise ValueError('Inconsistent number of rois')
+            zone = story_to_zone[story]
+            num_expected_story_images = int(np.ceil((maxes[zone] - mins[zone]) / 2.))  # 2 seconds per image
+            start_image_padding = 8
+            end_image_padding = 8
+            if start_image_padding + end_image_padding + num_expected_story_images < story_data.shape[0]:
+                end_image_padding += 8
+            if start_image_padding + end_image_padding + num_expected_story_images != story_data.shape[0]:
+                raise ValueError('Unable to compute alignment')
+            collated_data[subject][zone] = story_data[start_image_padding:-end_image_padding]
+            if zone in zone_to_num_images:
+                if zone_to_num_images[zone] != collated_data[subject][zone].shape[0]:
+                    raise ValueError('Inconsistent number of images across subjects')
+            else:
+                zone_to_num_images[zone] = collated_data[subject][zone].shape[0]
+
+    # transform collated data into an (image, subject, roi) array
+    data = np.full((sum(zone_to_num_images[z] for z in zone_to_num_images), len(collated_data), num_rois), np.nan)
+    subjects = sorted(collated_data)
+    zones = sorted(zone_to_num_images)
+    data_offset = 0
+    for zone in zones:
+        for index_subject, subject in enumerate(subjects):
+            if zone in collated_data[subject]:
+                data[data_offset:(data_offset + zone_to_num_images[zone]), index_subject] = collated_data[subject][zone]
+        data_offset += zone_to_num_images[zone]
+
+    hemisphere_rois = [
+        'posterior temporal',
+        'anterior temporal',
+        'inferior frontal gyrus',
+        'inferior frontal gyrus, pars orbitalis',  # note that these are purposefully a single entry
+        'middle frontal gyrus',
+        'angular gyrus']
+    rois = ['LH' + roi for roi in hemisphere_rois] + ['RH' + roi for roi in hemisphere_rois]
+
+    if len(rois) != num_rois:
+        raise ValueError('Unexpected number of rois')
+
+    key_to_index_image = dict()
+    data_offset = 0
+    for zone in zones:
+        for item, min_time, max_time in audio_times[zone]:
+            key_to_index_image[item, zone] = int(np.ceil(max_time / 2.)) + data_offset
+        data_offset += zone_to_num_images[zone]
+
+    examples = list()
+    for unique_id, sentence_word_records in enumerate(_read_story_sentences(path)):
+        input_features = bert_tokenize_with_spacy_meta(
+            spacy_tokenize_model, bert_tokenizer, unique_id,
+            [r.word for r in sentence_word_records],
+            data_offset=lambda idx_word: key_to_index_image[
+                sentence_word_records[idx_word].item, sentence_word_records[idx_word].zone])
+        examples.append(input_features)
+
+    return examples, {'ns_froi': data}
+
+
+def natural_stories_reaction_times(spacy_tokenize_model, bert_tokenizer, path):
     examples, data = read_natural_stories(spacy_tokenize_model, bert_tokenizer, path)
     return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
 

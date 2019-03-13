@@ -326,7 +326,7 @@ def harry_potter_fmri_data(spacy_tokenize_model, bert_tokenizer, path, subjects=
         if smooth_factor is not None:
             subject_data = gaussian_filter1d(
                 subject_data, sigma=smooth_factor, axis=1, order=0, mode='reflect', truncate=4.0)
-        masked_data[subject] = subject_data[:, spatial_masks[subject]]
+        masked_data['hp_fmri_{}'.format(subject)] = subject_data[:, spatial_masks[subject]]
     data = masked_data
 
     examples = list()
