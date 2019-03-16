@@ -40,11 +40,11 @@ def logical_not(t):
     return t ^ 1
 
 
-def masked_squared_error(mask, input, target):
+def masked_squared_error(mask, predictions, target):
     valid_count = mask.sum().item()
     if valid_count == 0:
         raise NoValidInputs()
-    sq_err = (torch.masked_select(input, mask) - torch.masked_select(target, mask)) ** 2
+    sq_err = (torch.masked_select(predictions, mask) - torch.masked_select(target, mask)) ** 2
     result = torch.zeros_like(target)
     result.masked_scatter_(mask, sq_err)
     return result, valid_count
@@ -57,7 +57,7 @@ def _values_or_zeros(mask, source):
     return result
 
 
-def masked_pearsons_distance(mask, input, target, sequence_axis=1):
+def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
     valid_counts_per_example = mask.sum(dim=sequence_axis, keepdim=True)
     # wherever valid_counts_per_example is less than 2, we need to set the mask to False
     indicator_valid_example = valid_counts_per_example > 1
@@ -73,19 +73,19 @@ def masked_pearsons_distance(mask, input, target, sequence_axis=1):
     # this way of computing is more numerically stable then some alternatives
 
     # replace masked values with zero
-    input = _values_or_zeros(mask, input)
+    predictions = _values_or_zeros(mask, predictions)
     target = _values_or_zeros(mask, target)
 
     # compute the mean
-    mean_input = input.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
-    mean_target = input.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
+    mean_input = predictions.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
+    mean_target = predictions.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
 
     # remove the mean, and re-mask
-    input = _values_or_zeros(mask, input - mean_input)
+    predictions = _values_or_zeros(mask, predictions - mean_input)
     target = _values_or_zeros(mask, target - mean_target)
 
     # compute the variance
-    var_input = (input ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
+    var_input = (predictions ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
     var_target = (target ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
 
     # min_value is an epsilon to avoid divide-by-zero, and to prevent sqrt from blowing up numerically
@@ -94,11 +94,11 @@ def masked_pearsons_distance(mask, input, target, sequence_axis=1):
     var_target = torch.max(var_target, min_value)
 
     # scale by the std
-    input = input / torch.sqrt(var_input)
+    predictions = predictions / torch.sqrt(var_input)
     target = target / torch.sqrt(var_target)
 
     # now r is straightforward to compute
-    r = (input * target).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
+    r = (predictions * target).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
 
     # convert to distance
     distance = 1 - r
@@ -106,35 +106,38 @@ def masked_pearsons_distance(mask, input, target, sequence_axis=1):
     return distance, valid_count, var_input, var_target, mean_input, mean_target
 
 
-def masked_cross_entropy(mask, input, target):
+def masked_cross_entropy(mask, predictions, target):
 
     valid_count = mask.sum().item()
     if valid_count == 0:
         raise NoValidInputs()
-    input = input.view(np.prod(input.size()[:-1]), input.size()[-1])
+    predictions = predictions.view(np.prod(predictions.size()[:-1]), predictions.size()[-1])
     target = target.view(-1)
     flat_mask = mask.view(-1)
     valid_indices = torch.nonzero(flat_mask)
-    input = input[valid_indices]
+    predictions = predictions[valid_indices]
     target = target[valid_indices]
-    loss = torch.nn.functional.cross_entropy(input, target, reduction='none')
+    loss = torch.nn.functional.cross_entropy(predictions, target, reduction='none')
     result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
     result.masked_scatter_(mask, loss)
     return result, valid_count
 
 
-def masked_binary_cross_entropy_with_logits(mask, input, target, pos_weight=None):
+def masked_binary_cross_entropy_with_logits(mask, predictions, target, pos_weight=None):
     valid_count = mask.sum().item()
     if valid_count == 0:
         raise NoValidInputs()
     loss = torch.nn.functional.binary_cross_entropy_with_logits(
-        torch.masked_select(input, mask), torch.masked_select(target, mask), reduction='none', pos_weight=pos_weight)
+        torch.masked_select(predictions, mask),
+        torch.masked_select(target, mask),
+        reduction='none',
+        pos_weight=pos_weight)
     result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
     result.masked_scatter_(mask, loss)
     return result, valid_count
 
 
-def masked_soft_label_cross_entropy(mask, input, target):
+def masked_soft_label_cross_entropy(mask, predictions, target):
     # note we just assume that the target values sum to 1 along axis=-1
     if mask is not None:
         valid_count = mask.sum().item()
@@ -147,10 +150,10 @@ def masked_soft_label_cross_entropy(mask, input, target):
     # this will mean that log_softmax does not give an nan in case the predictions are
     # strange where they are meaningless
     if mask is not None:
-        safer_input = torch.ones_like(input)
-        safer_input.masked_scatter_(mask.view(mask.size() + (1,)), input)
+        safer_input = torch.ones_like(predictions)
+        safer_input.masked_scatter_(mask.view(mask.size() + (1,)), predictions)
     else:
-        safer_input = input
+        safer_input = predictions
 
     softmax = torch.nn.functional.log_softmax(safer_input, dim=-1)
     terms = -softmax * target
@@ -283,7 +286,7 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
 
     def _get_mask(self, batch, predictions, target):
         return stop_word_and_target_not_nan_mask(
-            self.keep_content, target, batch['input_is_stop'], batch['input_is_begin_word_pieces'])
+            self.keep_content, target, batch['is_stop'], batch['is_begin_word_pieces'])
 
     def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))

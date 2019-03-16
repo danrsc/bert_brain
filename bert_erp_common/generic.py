@@ -1,11 +1,9 @@
 import inspect
 from itertools import zip_longest
-from _collections_abc import Mapping
 import re
 
 
-__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'FrozenCopyOfDict', 'SwitchRemember',
-           'camel_to_snake']
+__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'SwitchRemember', 'camel_to_snake']
 
 
 def zip_equal(*it):
@@ -69,31 +67,6 @@ def get_keyword_properties(instance, just_names=False):
         return [k for k in init_kwargs if k in property_names]
 
     return [(k, getattr(instance, k)) for k in init_kwargs if k in property_names]
-
-
-class FrozenCopyOfDict(Mapping):
-
-    def __init__(self, mapping):
-        if isinstance(mapping, FrozenCopyOfDict):
-            self._dict = type(mapping._dict)(mapping._dict)
-        else:
-            self._dict = type(mapping)(mapping)
-
-    def __getitem__(self, item):
-        return self._dict[item]
-
-    def __iter__(self):
-        return iter(self._dict)
-
-    def __len__(self):
-        return len(self._dict)
-
-    @staticmethod
-    def replace(instance, mapping):
-        result = FrozenCopyOfDict(instance)
-        for k in mapping:
-            result._dict[k] = mapping[k]
-        return result
 
 
 class SwitchRemember:

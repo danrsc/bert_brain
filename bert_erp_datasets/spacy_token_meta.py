@@ -1,7 +1,14 @@
 from string import punctuation
+from typing import Union, Sequence
+from types import MappingProxyType
+
 import numpy as np
+
 import spacy
+from spacy.language import Language as SpacyLanguage
 from spacy.symbols import ORTH
+
+from pytorch_pretrained_bert import BertTokenizer
 
 from .input_features import InputFeatures
 
@@ -181,7 +188,39 @@ def _get_syntactic_head_group(spacy_token, bert_token_groups):
     return None
 
 
-def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words, data_offset, type_id=0):
+def bert_tokenize_with_spacy_meta(
+        spacy_model: SpacyLanguage,
+        bert_tokenizer: BertTokenizer,
+        unique_id: int,
+        words: Sequence[str],
+        data_key: Union[str, Sequence[str]],
+        data_ids: Sequence[int],
+        type_id: int = 0,
+        is_apply_data_offset_entire_group: bool = False) -> InputFeatures:
+    """
+    Uses spacy to get information such as part of speech, probability of word, etc. and aligns the tokenization from
+    spacy with the bert tokenization.
+    Args:
+        spacy_model: The spacy model to use for spacy tokenization, part of speech analysis, etc. Generally from
+            make_tokenizer_model()
+        bert_tokenizer: The bert tokenizer to use. Usually from data_loader.make_bert_tokenizer()
+        unique_id: The unique id for this example
+        words: The words in this example. Generally a sentence, but it doesn't have to be.
+        data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
+        data_ids: Sequence[Int]. Describes an indices into a separate data array for each word. For example, if the
+            first word in words corresponds to fMRI image 17 in a separate data array, and the second word corresponds
+            to image 19, then this parameter could start with [17, 19, ...].
+        type_id: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
+            like question answering where type_id=0 is the question and type_id=1 is the answer.
+        is_apply_data_offset_entire_group: If a word is broken into multiple tokens, generally a single token is
+            heuristically chosen as the 'main' token corresponding to that word. The data_id it is assigned is given
+            by data offset, while all the tokens that are not the main token in the group are assigned -1. If this
+            parameter is set to True, then all of the multiple tokens corresponding to a word are assigned the same
+            data_id, and none are set to -1. This can be a better option for fMRI where the predictions are not at
+            the word level, but rather at the level of an image containing multiple words.
+    Returns:
+        An InputFeatures instance
+    """
 
     sent = ''
     cum_lengths = list()
@@ -251,30 +290,32 @@ def bert_tokenize_with_spacy_meta(spacy_model, bert_tokenizer, unique_id, words,
             example_type_ids.append(type_id)
             # we follow the BERT paper and always use the first word-piece as the labeled one
             data_id = -1
-            if idx_token == idx_data:
-                if callable(data_offset):
-                    data_id = data_offset(idx_group)
-                elif not np.isscalar(data_offset):
-                    if len(data_offset) != len(words):
-                        raise ValueError('If data_offset is a sequence, it must have the same length as words')
-                    data_id = data_offset[idx_group]
-                elif data_offset >= 0:
-                    data_id = data_offset + idx_group
+            if idx_token == idx_data or is_apply_data_offset_entire_group:
+                data_id = data_ids[idx_group]
             example_data_ids.append(data_id)
 
     _append_special_token('[SEP]')
 
+    if isinstance(data_key, str):
+        data_key = [data_key]
+
+    def _readonly(arr):
+        arr.setflags(write=False)
+        return arr
+
+    example_data_ids = _readonly(np.array(example_data_ids))
+
     return InputFeatures(
         unique_id=unique_id,
-        tokens=example_tokens,
-        input_ids=np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens)),
-        input_mask=np.array(example_mask),
-        input_is_stop=np.array(example_is_stop),
-        input_is_begin_word_pieces=np.array(example_is_begin_word_pieces),
-        input_lengths=np.array(example_lengths),
-        input_probs=np.array(example_probs),
-        input_head_location=np.array(example_head_location),
-        input_head_tokens=example_token_head,
-        input_head_token_ids=np.array(bert_tokenizer.convert_tokens_to_ids(example_token_head)),
-        input_type_ids=np.array(example_type_ids),
-        data_ids=np.array(example_data_ids))
+        tokens=tuple(example_tokens),
+        token_ids=_readonly(np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens))),
+        mask=_readonly(np.array(example_mask)),
+        is_stop=_readonly(np.array(example_is_stop)),
+        is_begin_word_pieces=_readonly(np.array(example_is_begin_word_pieces)),
+        token_lengths=_readonly(np.array(example_lengths)),
+        token_probabilities=_readonly(np.array(example_probs)),
+        type_ids=_readonly(np.array(example_type_ids)),
+        head_location=_readonly(np.array(example_head_location)),
+        head_tokens=tuple(example_token_head),
+        head_token_ids=_readonly(np.array(bert_tokenizer.convert_tokens_to_ids(example_token_head))),
+        data_ids=MappingProxyType(dict((k, example_data_ids) for k in data_key)))

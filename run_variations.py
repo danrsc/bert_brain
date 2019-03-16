@@ -33,7 +33,7 @@ from bert_erp_common import SwitchRemember
 from bert_erp_datasets import DataKeys, DataPreparer
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
-from train_eval import train
+from train_eval import train, make_datasets
 
 __all__ = ['task_hash', 'named_variations', 'run_variation', 'iterate_powerset']
 
@@ -125,10 +125,10 @@ def run_variation(
             continue
 
         seed = _seed(settings.seed, index_run, n_gpu)
-        data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions())
-        data = data_preparer.prepare(data)
+        data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions(index_run))
+        train_data, validation_data, test_data = make_datasets(data_preparer.prepare(data))
 
-        train(settings, output_validation_path, output_test_path, data, n_gpu, device)
+        train(settings, output_validation_path, output_test_path, train_data, validation_data, test_data, n_gpu, device)
 
 
 def iterate_powerset(items):

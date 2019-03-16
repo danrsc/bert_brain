@@ -1,6 +1,7 @@
 import gc
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Sequence, Union, Optional, Mapping
 import logging
 
 import numpy as np
@@ -18,7 +19,7 @@ from result_output import write_predictions
 logger = logging.getLogger(__name__)
 
 
-__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults']
+__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'make_datasets']
 
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -127,12 +128,28 @@ def _loss_weights(loss_count_dict):
     return dict(zip(keys, [w.item() for w in loss_weights]))
 
 
-def train(settings: Settings, output_validation_path, output_test_path, data: PreparedData, n_gpu, device):
-
+def make_datasets(data: Mapping[str, PreparedData], which: Optional[Union[str, Sequence[str]]] = None):
+    if which is None:
+        which = ['train', 'validation', 'test']
     max_sequence_length = max_example_sequence_length(data)
+    is_single = isinstance(which, str)
+    if is_single:
+        which = [which]
+    result = [PreparedDataDataset(max_sequence_length, data, which=w) for w in which]
+    if is_single:
+        result = result[0]
+    return result
 
-    train_data_set = PreparedDataDataset(max_sequence_length, data, which='train')
-    validation_data_set = PreparedDataDataset(max_sequence_length, data, which='validation')
+
+def train(
+        settings: Settings,
+        output_validation_path: str,
+        output_test_path: str,
+        train_data_set: PreparedDataDataset,
+        validation_data_set: PreparedDataDataset,
+        test_data_set: Optional[PreparedDataDataset],
+        n_gpu: int,
+        device):
 
     num_train_steps = int(
         len(train_data_set) /
@@ -159,13 +176,13 @@ def train(settings: Settings, output_validation_path, output_test_path, data: Pr
                     loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
             critic_type = 'mse'
             critic_kwargs = None
-            if k in settings.task_settings:
-                critic_type = settings.task_settings[k].critic_type
-                critic_kwargs = settings.task_settings[k].critic_kwargs
+            if k in settings.critics:
+                critic_type = settings.critics[k].critic_type
+                critic_kwargs = settings.critics[k].critic_kwargs
             else:
-                if data_key is not None and data_key in settings.task_settings:
-                    critic_type = settings.task_settings[data_key].critic_type
-                    critic_kwargs = settings.task_settings[data_key].critic_kwargs
+                if data_key is not None and data_key in settings.critics:
+                    critic_type = settings.critics[data_key].critic_type
+                    critic_kwargs = settings.critics[data_key].critic_kwargs
             handler = make_loss_handler(k, critic_type, critic_kwargs)
             loss_handlers.append(handler)
             prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
@@ -337,8 +354,6 @@ def train(settings: Settings, output_validation_path, output_test_path, data: Pr
             return_detailed=True)
     else:
         all_validation = {}
-
-    test_data_set = PreparedDataDataset(max_sequence_length, data, which='test')
 
     test_results = TaskResults()
     if len(test_data_set) > 0:

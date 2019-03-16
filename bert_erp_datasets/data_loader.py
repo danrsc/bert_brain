@@ -2,17 +2,19 @@ import os
 from collections import OrderedDict
 import itertools
 import dataclasses
+from types import MappingProxyType
 
 import numpy as np
 import torch
 
 from pytorch_pretrained_bert import BertTokenizer
 
-from bert_erp_tokenization import InputFeatures, RawData, make_tokenizer_model, FieldSpec
-from .university_college_london_corpus import ucl_data
-from .natural_stories import natural_stories_reaction_times
-from .harry_potter import harry_potter_meg_data, harry_potter_fmri_data
-from .colorless_green import colorless_green_agreement_data, linzen_agreement_data
+from .spacy_token_meta import make_tokenizer_model
+from .input_features import InputFeatures, RawData, KindData, FieldSpec
+from .university_college_london_corpus import UclCorpus
+from .natural_stories import NaturalStoriesCorpus
+from .harry_potter import HarryPotterCorpus
+from .colorless_green import ColorlessGreenCorpus, LinzenAgreementCorpus
 
 
 __all__ = ['DataLoader', 'DataKeys']
@@ -39,11 +41,12 @@ def _save_to_cache(cache_path, data, kwargs):
     if data.test_input_examples is not None:
         all_examples.extend(data.test_input_examples)
 
-    result = dict((k, list()) for k in dataclasses.asdict(all_examples[0]))
+    result = dict((k, list()) for k in dataclasses.asdict(all_examples[0]) if k != 'data_ids')
     result['__lengths__'] = list()
     fields_as_none = set()
     fields_with_value = set()
-    for example in all_examples:
+    data_ids = OrderedDict()
+    for idx_example, example in enumerate(all_examples):
         ex = dataclasses.asdict(example)
         has_tokens = False
         for k in ex:
@@ -56,12 +59,30 @@ def _save_to_cache(cache_path, data, kwargs):
                     raise ValueError('A field must always have a value if it ever has a value')
                 fields_as_none.add(k)
                 continue
-            if data.field_specs is not None and k in data.field_specs and not data.field_specs[k].is_sequence:
+            is_sequence = data.field_specs is not None \
+                and k in data.field_specs \
+                and not data.field_specs[k].is_sequence
+            if k != 'data_ids' and not is_sequence:
                 result[k].append(ex[k])
             elif k == 'tokens':
                 has_tokens = True
                 result['__lengths__'].append(len(ex[k]))
                 result[k].extend(ex[k])
+            elif k == 'data_ids':
+                response_data_ids = ex[k]
+                if response_data_ids is not None:
+                    if idx_example == 0:
+                        for rk in ex[k]:
+                            data_ids[rk] = list()
+                    if len(ex[k]) != len(data_ids):
+                        raise ValueError('Inconsistent data_id keys')
+                    for response_key in ex[k]:
+                        if response_key not in data_ids:
+                            raise ValueError('Inconsistent data_id keys')
+                        if is_sequence:
+                            data_ids[response_key].extend(ex[k][response_key])
+                        else:
+                            data_ids[response_key].append(ex[k][response_key])
             else:
                 result[k].extend(ex[k])
         assert has_tokens
@@ -73,10 +94,15 @@ def _save_to_cache(cache_path, data, kwargs):
         result['__kwarg__{}'.format(k)] = kwargs[k]
 
     for k in data.response_data:
-        result['__response_data__{}'.format(k)] = data.response_data[k]
+        result['__response_data_kind__{}'.format(k)] = data.response_data[k].kind
+        result['__response_data__{}'.format(k)] = data.response_data[k].data
 
-    for k in data.metadata:
-        result['__metadata__{}'.format(k)] = data.metadata[k]
+    for k in data_ids:
+        result['__data_ids__{}'.format(k)] = np.array(data_ids[k])
+
+    if data.metadata is not None:
+        for k in data.metadata:
+            result['__metadata__{}'.format(k)] = data.metadata[k]
 
     if data.field_specs is not None:
         for k in data.field_specs:
@@ -145,7 +171,9 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     key_prefixes = [
         '__kwarg__',
         '__response_data__',
+        '__response_data_kind__',
         '__metadata__',
+        '__data_ids__',
         '__field_spec_tensor_dtype__',
         '__field_spec_fill_value__',
         '__field_spec_is_sequence__']
@@ -201,6 +229,8 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
             current = example_data[k]
         else:
             current = np.split(example_data[k], splits)
+            for item in current:
+                item.setflags(write=False)
 
         if all_examples is None:
             all_examples = [{k: item} for item in current]
@@ -208,10 +238,26 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
             for idx, item in enumerate(current):
                 all_examples[idx][k] = item
 
+    data_ids = prefix_results['__data_ids__']
+    if len(data_ids) > 0:
+        for idx in range(len(all_examples)):
+            all_examples[idx]['data_ids'] = dict()
+    for k in data_ids:
+        if field_specs is not None and 'data_ids' in field_specs and not field_specs['data_ids'].is_sequence:
+            current = data_ids[k]
+        else:
+            current = np.split(data_ids[k], splits)
+            for item in current:
+                item.setflags(write=False)
+
+        for idx, item in enumerate(current):
+            all_examples[idx]['data_ids'][k] = current
+
     for idx in range(len(all_examples)):
+        all_examples[idx]['data_ids'] = MappingProxyType(all_examples[idx]['data_ids'])
         ex = InputFeatures(**all_examples[idx])
-        ex.tokens = [s for s in ex.tokens]  # convert array back to list of tokens
-        ex.input_head_tokens = [s for s in ex.input_head_tokens]
+        ex.tokens = tuple(s.item() for s in ex.tokens)  # convert array back to list of tokens
+        ex.head_tokens = tuple(s.item() for s in ex.head_tokens)
         all_examples[idx] = ex
 
     example_splits = [
@@ -232,9 +278,14 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
         assert(len(test_input_examples) == 0)
         test_input_examples = None
 
+    response_data = OrderedDict()
+    for k in prefix_results['__response_data__']:
+        prefix_results['__response_data__'][k].setflags(write=False)
+        response_data[k] = KindData(prefix_results['__response_data_kind__'][k], prefix_results['__response_data__'][k])
+
     return RawData(
         input_examples,
-        prefix_results['__response_data__'],
+        response_data,
         test_input_examples=test_input_examples,
         validation_input_examples=validation_input_examples,
         is_pre_split=loaded['__is_pre_split__'].item(),
@@ -259,18 +310,17 @@ def _populate_default_field_specs(raw_data):
     default_field_specs = {
         'unique_id': FieldSpec(tensor_dtype=torch.long, is_sequence=False),
         'tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
-        'input_ids': FieldSpec(tensor_dtype=torch.long),
-        'input_mask': FieldSpec(tensor_dtype=torch.uint8),
-        'input_is_stop': FieldSpec(fill_value=1, tensor_dtype=torch.uint8),
-        'input_is_begin_word_pieces': FieldSpec(tensor_dtype=torch.uint8),
-        'input_lengths': FieldSpec(tensor_dtype=torch.long),
-        'input_probs': FieldSpec(fill_value=-20.),
-        'input_head_location': FieldSpec(fill_value=np.nan),
-        'input_head_tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
-        'input_head_token_ids': FieldSpec(tensor_dtype=torch.long),
-        'input_type_ids': FieldSpec(tensor_dtype=torch.long),
+        'token_ids': FieldSpec(tensor_dtype=torch.long),
+        'mask': FieldSpec(tensor_dtype=torch.uint8),
+        'is_stop': FieldSpec(fill_value=1, tensor_dtype=torch.uint8),
+        'is_begin_word_pieces': FieldSpec(tensor_dtype=torch.uint8),
+        'token_lengths': FieldSpec(tensor_dtype=torch.long),
+        'token_probabilities': FieldSpec(fill_value=-20.),
+        'head_location': FieldSpec(fill_value=np.nan),
+        'head_tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
+        'head_token_ids': FieldSpec(tensor_dtype=torch.long),
+        'type_ids': FieldSpec(tensor_dtype=torch.long),
         'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long),
-        'index_in_image': FieldSpec(fill_value=-1, tensor_dtype=torch.long)
     }
 
     if raw_data.field_specs is None:
@@ -284,8 +334,7 @@ def _populate_default_field_specs(raw_data):
 class _DataKeys:
     geco: str
     bnc: str
-    harry_potter_meg: str
-    harry_potter_fmri: str
+    harry_potter: str
     ucl: str
     dundee: str
     proto_roles_english_web: str
@@ -343,15 +392,50 @@ class DataLoader(object):
                     kwargs = data_key_kwarg_dict[DataManager.harry_potter]
                 result = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
         """
-        (self.bert_pre_trained_model_name, self.cache_path, self.geco_path, self.bnc_root,
-         self.harry_potter_path, self.frank_2013_eye_path, self.frank_2015_erp_path, self.dundee_path,
-         self.english_web_universal_dependencies_v_1_2_path, self.english_web_universal_dependencies_v_2_3_path,
-         self.proto_roles_english_web_path, self.ontonotes_path, self.proto_roles_prop_bank_path,
-         self.natural_stories_path, self.linzen_agreement_path, self.data_key_kwarg_dict) = (
-            bert_pre_trained_model_name, cache_path, geco_path, bnc_root, harry_potter_path,
-            frank_2013_eye_path, frank_2015_erp_path, dundee_path, english_web_universal_dependencies_v_1_2_path,
-            english_web_universal_dependencies_v_2_3_path, proto_roles_english_web_path, ontonotes_path,
-            proto_roles_prop_bank_path, natural_stories_path, linzen_agreement_path, data_key_kwarg_dict)
+
+        def _get_kwargs(data_key):
+            if data_key_kwarg_dict is None \
+                    or data_key not in data_key_kwarg_dict \
+                    or data_key_kwarg_dict[data_key] is None:
+                return {}
+            return data_key_kwarg_dict[data_key]
+
+        # additional corpora exist in ulmfit code (thus the extra paths), but haven't migrated them over yet
+        self.corpora = {
+            DataKeys.ucl: UclCorpus(frank_2013_eye_path, frank_2015_erp_path, **_get_kwargs(DataKeys.ucl)),
+            DataKeys.natural_stories: NaturalStoriesCorpus(
+                natural_stories_path, **_get_kwargs(DataKeys.natural_stories)),
+            DataKeys.harry_potter: HarryPotterCorpus(harry_potter_path, **_get_kwargs(DataKeys.harry_potter)),
+            DataKeys.colorless_green: ColorlessGreenCorpus(
+                english_web_universal_dependencies_v_2_3_path, **_get_kwargs(DataKeys.colorless_green)),
+            DataKeys.linzen_agreement: LinzenAgreementCorpus(
+                linzen_agreement_path, **_get_kwargs(DataKeys.linzen_agreement))
+        }
+
+        # if key == DataLoader.geco:
+        #     result[key] = geco_data(self.geco_path, numerical_tokens, start_tokens, **kwargs)
+        # elif key == DataLoader.bnc:
+        #     result[key] = bnc_data(
+        #         self.bnc_root, numerical_tokens, start_tokens, quick_for_test=quick_for_test, **kwargs)
+        # elif key == DataLoader.dundee:
+        #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
+        # elif key == DataLoader.proto_roles_english_web:
+        #     result[key] = semantic_proto_role_data_english_web(
+        #         self.proto_roles_english_web_path, self.english_web_universal_dependencies_v_1_2_path,
+        #         numerical_tokens, start_tokens, filter_fn=protocol_v2_1, **kwargs)
+        # elif key == DataLoader.proto_roles_prop_bank:
+        #     result[key] = semantic_proto_role_data_prop_bank(
+        #         self.proto_roles_prop_bank_path,
+        #         self.ontonotes_path,
+        #         numerical_tokens,
+        #         start_tokens,
+        #         **kwargs)
+
+        # need to keep these for checking the cache
+        self._data_key_kwarg_dict = dict(data_key_kwarg_dict)
+
+        self.bert_pre_trained_model_name = bert_pre_trained_model_name
+        self.cache_path = cache_path
 
     def make_bert_tokenizer(self):
         return BertTokenizer.from_pretrained(self.bert_pre_trained_model_name, self.cache_path, do_lower_case=True)
@@ -377,53 +461,16 @@ class DataLoader(object):
             print('Loading {}...'.format(key), end='', flush=True)
 
             kwargs = {}
-            if self.data_key_kwarg_dict is not None and key in self.data_key_kwarg_dict:
-                kwargs = self.data_key_kwarg_dict[key]
+            if self._data_key_kwarg_dict is not None and key in self._data_key_kwarg_dict:
+                kwargs = self._data_key_kwarg_dict[key]
 
             cached = _load_from_cache(cache_path, kwargs, force_cache_miss)
 
             if cached is None:
-                # if key == DataLoader.geco:
-                #     result[key] = geco_data(self.geco_path, numerical_tokens, start_tokens, **kwargs)
-                # elif key == DataLoader.bnc:
-                #     result[key] = bnc_data(
-                #         self.bnc_root, numerical_tokens, start_tokens, quick_for_test=quick_for_test, **kwargs)
-                if key == DataKeys.ucl:
-                    result[key] = ucl_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.frank_2013_eye_path,
-                        self.frank_2015_erp_path, **kwargs)
-                elif key == DataKeys.natural_stories:
-                    result[key] = natural_stories_reaction_times(
-                        spacy_tokenizer_model, bert_tokenizer, self.natural_stories_path, **kwargs)
-                elif key == DataKeys.harry_potter_meg:
-                    result[key] = harry_potter_meg_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
-                elif key == DataKeys.harry_potter_fmri:
-                    result[key] = harry_potter_fmri_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.harry_potter_path, **kwargs)
-                elif key == DataKeys.colorless_green:
-                    result[key] = colorless_green_agreement_data(
-                        spacy_tokenizer_model, bert_tokenizer,
-                        self.english_web_universal_dependencies_v_2_3_path, **kwargs)
-                elif key == DataKeys.linzen_agreement:
-                    result[key] = linzen_agreement_data(
-                        spacy_tokenizer_model, bert_tokenizer, self.linzen_agreement_path, **kwargs)
-                # elif key == DataLoader.dundee:
-                #     result[key] = dundee_data(self.dundee_path, numerical_tokens, start_tokens, **kwargs)
-                # elif key == DataLoader.proto_roles_english_web:
-                #     result[key] = semantic_proto_role_data_english_web(
-                #         self.proto_roles_english_web_path, self.english_web_universal_dependencies_v_1_2_path,
-                #         numerical_tokens, start_tokens, filter_fn=protocol_v2_1, **kwargs)
-                # elif key == DataLoader.proto_roles_prop_bank:
-                #     result[key] = semantic_proto_role_data_prop_bank(
-                #         self.proto_roles_prop_bank_path,
-                #         self.ontonotes_path,
-                #         numerical_tokens,
-                #         start_tokens,
-                #         **kwargs)
-                else:
-                    raise ValueError('Unrecognized key: {}'.format(key))
 
+                if key not in self.corpora:
+                    raise ValueError('Unrecognized key: {}'.format(key))
+                result[key] = self.corpora[key].load(spacy_tokenizer_model, bert_tokenizer)
                 _populate_default_field_specs(result[key])
                 _save_to_cache(cache_path, result[key], kwargs)
 

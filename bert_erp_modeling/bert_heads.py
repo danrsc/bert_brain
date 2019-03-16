@@ -42,7 +42,7 @@ class GroupPool(torch.nn.Module):
         # first attach an example_id to the groups to ensure that we don't pool across examples in the batch
 
         # array of shape (batch, sequence, 1) which gives identifies which example
-        example_ids = torch.arange(groupby.size()[0]).view((groupby.size()[0], 1, 1)).repeat(1, groupby.size()[1], 1)
+        example_ids = torch.arange(groupby.size()[0]).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
         # -> (batch, sequence, 2): attach example_id to each group
         groupby = torch.cat((groupby.view(groupby.size() + (1,)), example_ids), dim=2)
 

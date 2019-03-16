@@ -1,78 +1,74 @@
 from dataclasses import dataclass, field
-from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional
+from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple
 
 import numpy as np
-from bert_erp_datasets import DataLoader, DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessMakeBinary, PreprocessNanMean, PreprocessClip, PreprocessDiscretize, PreprocessDetrend, \
-    PreprocessGaussianBlur, harry_potter_split_by_run
+from bert_erp_datasets import DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
+    PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_fmri_make_split_function, PreparedDataView, \
+    ResponseKind, InputFeatures, RawData
 from bert_erp_modeling import CriticKeys
 
 
-__all__ = ['TaskSettings', 'Settings']
+__all__ = ['CriticSettings', 'Settings']
 
 
 @dataclass
-class TaskSettings:
+class CriticSettings:
     critic_type: str
     critic_kwargs: Optional[Mapping] = None
-    preprocessor: Optional[Callable] = None
     # stop_word_mode can be:
     #     None: no distinction made between content words and stop words
     #     'train_both': training is done on both, results are reported separately
     #     'train_content': training is done on content, both results reported
     #     'report_content': training is done on content, only content results reported
     stop_word_mode: Optional[str] = 'train_content'
-    split_function: Optional[Callable] = None
 
 
-def _harry_potter_meg_task_settings():
+def _default_preprocessors():
 
-    # return (
-    #     CriticKeys.soft_label_cross_entropy,
+    preprocess_standardize = PreprocessStandardize(stop_mode='content')
+
+    # ResponseKind.colorless defaults to None
+    # ResponseKind.linzen_agree defaults to None
+
+    # alternate hp_meg for soft_label_cross_entropy
     #     PreprocessMany(
     #         #  preprocess_detrend,
     #         #  partial(preprocess_standardize, average_axis=None),
     #         PreprocessDiscretize(bins=np.exp(np.linspace(-0.2, 1., 5))),  # bins=np.arange(6) - 2.5
     #         PreprocessNanMean()))
 
-    return TaskSettings(
-        CriticKeys.mse,
-        preprocessor=PreprocessMany(
+    return {
+        ResponseKind.hp_fmri: PreprocessMany(
+            PreprocessStandardize(average_axis=None, metadata_response_group_by='example_run'),
+            PreprocessDetrend(stop_mode=None, metadata_response_group_by='example_run')),
+        ResponseKind.hp_meg: PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
-            PreprocessStandardize(average_axis=None, stop_mode='content')))
+            PreprocessStandardize(average_axis=None, stop_mode='content')),
+        ResponseKind.ucl_erp: preprocess_standardize,
+        ResponseKind.ucl_eye: PreprocessMany(PreprocessLog(), preprocess_standardize),
+        ResponseKind.ucl_self_paced: PreprocessMany(PreprocessLog(), preprocess_standardize),
+        ResponseKind.ns_reaction_times: PreprocessMany(
+            PreprocessClip(maximum=3000, value_beyond_max=np.nan), PreprocessLog(), preprocess_standardize),
+        ResponseKind.ns_froi: preprocess_standardize,
+    }
 
 
-def _default_task_settings():
-
-    # take boxcox transform of these
-    ucl_log_keys = {'first_fixation', 'first_pass', 'right_bounded', 'go_past', 'reading_time'}
-
-    preprocess_standardize = PreprocessStandardize(stop_mode='content')
+def _default_critics():
 
     return {
-        DataKeys.ucl: TaskSettings(
-            critic_type=CriticKeys.mse,
-            preprocessor=PreprocessMany(
-                PreprocessLog(data_key_whitelist=ucl_log_keys),
-                preprocess_standardize)),
-        DataKeys.natural_stories: TaskSettings(
-            critic_type=CriticKeys.mse,
-            preprocessor=PreprocessMany(
-                PreprocessClip(maximum=3000, value_beyond_max=np.nan),
-                PreprocessLog(),
-                preprocess_standardize)),
-        DataKeys.harry_potter_meg: _harry_potter_meg_task_settings(),
-        DataKeys.harry_potter_fmri: TaskSettings(
-            critic_type=CriticKeys.mse,
-            preprocessor=PreprocessMany(
-                PreprocessStandardize(average_axis=None, metadata_response_group_by='example_run'),
-                PreprocessDetrend(stop_mode=None, metadata_response_group_by='example_run')),
-            split_function=harry_potter_split_by_run),
-        DataKeys.colorless_green: TaskSettings(
-            critic_type=CriticKeys.sequence_binary_cross_entropy),
-        DataKeys.linzen_agreement: TaskSettings(
-            critic_type=CriticKeys.sequence_binary_cross_entropy)
+        DataKeys.ucl: CriticSettings(critic_type=CriticKeys.mse),
+        DataKeys.natural_stories: CriticSettings(critic_type=CriticKeys.mse),
+        DataKeys.harry_potter: CriticSettings(critic_type=CriticKeys.mse),
+        DataKeys.colorless_green: CriticSettings(critic_type=CriticKeys.sequence_binary_cross_entropy),
+        DataKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.sequence_binary_cross_entropy)
+    }
+
+
+def _default_split_functions():
+
+    return {
+        DataKeys.harry_potter: harry_potter_fmri_make_split_function
     }
 
 
@@ -83,7 +79,7 @@ def _default_data_key_kwargs():
 
 
 def _default_additional_fields():
-    return {'input_lengths', 'input_probs'}
+    return {'token_lengths', 'token_probabilities'}
 
 
 @dataclass
@@ -97,8 +93,21 @@ class Settings:
     # keyword args for loading data
     data_key_kwargs: Optional[Mapping[str, Mapping[str, Any]]] = field(default_factory=_default_data_key_kwargs)
 
-    # task specific settings, see TaskSettings
-    task_settings: MutableMapping[str, TaskSettings] = field(default_factory=_default_task_settings)
+    # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
+    critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)
+
+    preprocessors: MutableMapping[
+            str, Callable[[PreparedDataView, Optional[Mapping[str, np.array]]], PreparedDataView]] = \
+        field(default_factory=_default_preprocessors)
+
+    split_functions: MutableMapping[
+        str,
+        Callable[[int], Callable[
+            [RawData, np.random.RandomState],
+            Tuple[
+                Optional[Sequence[InputFeatures]],
+                Optional[Sequence[InputFeatures]],
+                Optional[Sequence[InputFeatures]]]]]] = field(default_factory=_default_split_functions())
 
     bert_model: str = 'bert-base-uncased'
 
@@ -160,20 +169,11 @@ class Settings:
     # Whether not to use CUDA when available
     no_cuda: bool = False
 
-    def get_data_preprocessors(self):
+    def get_split_functions(self, index_run):
         result = dict()
-        for key in self.task_settings:
-            if self.task_settings[key].preprocessor is not None:
-                result[key] = self.task_settings[key].preprocessor
-        if len(result) == 0:
-            return None
-        return result
-
-    def get_split_functions(self):
-        result = dict()
-        for key in self.task_settings:
-            if self.task_settings[key].split_function is not None:
-                result[key] = self.task_settings[key].split_function
+        for key in self.split_functions:
+            if self.split_functions[key] is not None:
+                result[key] = self.split_functions[key](index_run)
         if len(result) == 0:
             return None
         return result

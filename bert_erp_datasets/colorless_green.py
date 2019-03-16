@@ -5,13 +5,15 @@ from typing import Tuple
 import numpy as np
 
 from bert_erp_common import zip_equal
-from bert_erp_tokenization import bert_tokenize_with_spacy_meta, RawData, FieldSpec
 from syntactic_dependency import preprocess_english_morphology, collect_paradigms, extract_dependency_patterns, \
     generate_morph_pattern_test, DependencyTree, universal_dependency_reader, make_token_to_paradigms, \
     make_ltm_to_word, GeneratedExample
 
+from .input_features import RawData, FieldSpec, KindData, ResponseKind
+from .corpus_base import CorpusBase, CorpusExampleUnifier
 
-__all__ = ['colorless_green_agreement_data', 'linzen_agreement_data']
+
+__all__ = ['ColorlessGreenCorpus', 'LinzenAgreementCorpus']
 
 
 def _iterate_delimited(path, field_delimiter='\t', pattern_field_delimiter='!', pattern_context_delimiter='_'):
@@ -78,11 +80,10 @@ def generate_examples(english_web_path, bert_tokenizer):
     return examples
 
 
-def _agreement_data(spacy_tokenize_model, bert_tokenizer, examples):
+def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
     class_correct = 1
     class_incorrect = 0
     classes = list()
-    input_examples = list()
 
     for example in examples:
         words, correct_form, incorrect_form, index_target = example.agreement_tuple
@@ -92,46 +93,62 @@ def _agreement_data(spacy_tokenize_model, bert_tokenizer, examples):
         # until we put the test item in there
         words[index_target] = correct_form
 
-        input_example = bert_tokenize_with_spacy_meta(
-            spacy_tokenize_model, bert_tokenizer, len(input_examples), words,
-            data_offset=lambda idx_word: len(input_examples) if idx_word == index_target else -1)
+        data_ids = -1 * np.ones(len(words))
+        data_ids[index_target] = len(classes)
+        example_manager.add_example(words, data_key, data_ids)
         classes.append(class_correct)
-        input_examples.append(input_example)
 
         # switch to the wrong number-agreement
         words[index_target] = incorrect_form
 
-        input_example = bert_tokenize_with_spacy_meta(
-            spacy_tokenize_model, bert_tokenizer, len(input_examples), words,
-            data_offset=lambda idx_word: len(input_examples) if idx_word == index_target else -1)
+        data_ids = np.copy(data_ids)
+        data_ids[index_target] = len(classes)
+        example_manager.add_example(words, data_key, data_ids)
         classes.append(class_incorrect)
-        input_examples.append(input_example)
 
-    return input_examples, classes
-
-
-def colorless_green_agreement_data(spacy_tokenize_model, bert_tokenizer, path):
-
-    english_web_paths = [
-        os.path.join(path, 'en_ewt-ud-train.conllu'),
-        os.path.join(path, 'en_ewt-ud-dev.conllu'),
-        os.path.join(path, 'en_ewt-ud-test.conllu')]
-
-    examples, classes = _agreement_data(
-        spacy_tokenize_model, bert_tokenizer, generate_examples(english_web_paths, bert_tokenizer))
-
-    classes = {'colorless': np.array(classes, dtype=np.float64)}
-
-    return RawData(
-        examples, classes,
-        validation_proportion_of_train=0.1, field_specs={'colorless': FieldSpec(is_sequence=False)})
+    return classes
 
 
-def linzen_agreement_data(spacy_tokenize_model, bert_tokenizer, path):
+class ColorlessGreenCorpus(CorpusBase):
 
-    examples, classes = _agreement_data(spacy_tokenize_model, bert_tokenizer, _iterate_linzen(path))
+    def __init__(self, path):
+        self.path = path
 
-    classes = {'linzen_agree': np.array(classes, dtype=np.float)}
-    return RawData(
-        examples, classes,
-        validation_proportion_of_train=0.1, field_specs={'linzen_agree': FieldSpec(is_sequence=False)})
+    def _load(self, example_manager: CorpusExampleUnifier):
+        english_web_paths = [
+            os.path.join(self.path, 'en_ewt-ud-train.conllu'),
+            os.path.join(self.path, 'en_ewt-ud-dev.conllu'),
+            os.path.join(self.path, 'en_ewt-ud-test.conllu')]
+
+        classes = _agreement_data(
+            example_manager, generate_examples(english_web_paths, example_manager.bert_tokenizer), 'colorless')
+
+        def _readonly(arr):
+            arr.setflags(write=False)
+            return arr
+
+        classes = {'colorless': KindData(ResponseKind.colorless, _readonly(np.array(classes, dtype=np.float64)))}
+
+        return RawData(
+            list(example_manager.iterate_examples()), classes,
+            validation_proportion_of_train=0.1, field_specs={'colorless': FieldSpec(is_sequence=False)})
+
+
+class LinzenAgreementCorpus(CorpusBase):
+
+    def __init__(self, path):
+        self.path = path
+
+    def _load(self, example_manager: CorpusExampleUnifier):
+
+        classes = _agreement_data(example_manager, _iterate_linzen(self.path), 'linzen_agree')
+
+        def _readonly(arr):
+            arr.setflags(write=False)
+            return arr
+
+        classes = {'linzen_agree': KindData(ResponseKind.linzen_agree, _readonly(np.array(classes, dtype=np.float)))}
+
+        return RawData(
+            list(example_manager.iterate_examples()), classes,
+            validation_proportion_of_train=0.1, field_specs={'linzen_agree': FieldSpec(is_sequence=False)})
