@@ -9,8 +9,7 @@ from torch.utils.data.dataloader import default_collate
 
 from bert_erp_common import SwitchRemember
 from .input_features import RawData, FieldSpec
-from .preprocessors import PreparedData
-
+from .data_preparer import PreparedData
 
 __all__ = ['max_example_sequence_length', 'PreparedDataDataset', 'collate_fn']
 
