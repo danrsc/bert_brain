@@ -4,7 +4,7 @@ from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, U
 import numpy as np
 from bert_erp_datasets import DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_fmri_make_split_function, PreparedDataView, \
-    ResponseKind, InputFeatures, RawData
+    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
 from bert_erp_modeling import CriticKeys
 
 
@@ -68,14 +68,15 @@ def _default_critics():
 def _default_split_functions():
 
     return {
-        DataKeys.harry_potter: harry_potter_fmri_make_split_function
+        DataKeys.harry_potter: harry_potter_fmri_make_split_function,
+        DataKeys.natural_stories: natural_stories_make_leave_stories_out
     }
 
 
 def _default_data_key_kwargs():
     return {
         DataKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye'),
-        DataKeys.harry_potter_fmri: dict(subjects='I')}
+        DataKeys.harry_potter: dict(fmri_subjects='I')}
 
 
 def _default_additional_fields():
@@ -107,7 +108,7 @@ class Settings:
             Tuple[
                 Optional[Sequence[InputFeatures]],
                 Optional[Sequence[InputFeatures]],
-                Optional[Sequence[InputFeatures]]]]]] = field(default_factory=_default_split_functions())
+                Optional[Sequence[InputFeatures]]]]]] = field(default_factory=_default_split_functions)
 
     bert_model: str = 'bert-base-uncased'
 
@@ -177,3 +178,21 @@ class Settings:
         if len(result) == 0:
             return None
         return result
+
+    def _lookup_critic(self, field_name, data_set):
+        if field_name in self.critics:
+            return self.critics[field_name]
+        if data_set.is_response_data(field_name):
+            kind = data_set.response_data_kind(field_name)
+            if kind in self.critics:
+                return self.critics[kind]
+            data_key = data_set.data_set_key_for_field(field_name)
+            if data_key in self.critics:
+                return self.critics[data_key]
+        return CriticKeys.mse
+
+    def get_critic(self, field_name, data_set):
+        critic = self._lookup_critic(field_name, data_set)
+        if isinstance(critic, str):
+            return CriticSettings(critic)
+        return critic

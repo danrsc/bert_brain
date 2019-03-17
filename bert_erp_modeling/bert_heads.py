@@ -124,9 +124,9 @@ class BertMultiHead(BertPreTrainedModel):
 
     def forward(self, batch):
         sequence_output, pooled_output = self.bert(
-            batch['input_ids'],
-            token_type_ids=batch['input_type_ids'] if 'input_type_ids' in batch else None,
-            attention_mask=batch['input_mask'] if 'input_mask' in batch else None,
+            batch['token_ids'],
+            token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
+            attention_mask=batch['mask'] if 'mask' in batch else None,
             output_all_encoded_layers=False)
 
         if self.token_linear is not None or self.group_pooled_linear is not None:

@@ -20,6 +20,7 @@ class CorpusExampleUnifier:
         self.spacy_tokenize_model = spacy_tokenize_model
         self.bert_tokenizer = bert_tokenizer
         self._examples = OrderedDict()
+        self._seen_data_keys = OrderedDict()
 
     def add_example(
             self,
@@ -35,7 +36,7 @@ class CorpusExampleUnifier:
         Args:
             words: The words in the example
             data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
-            data_ids: indices into the response data, one for each key
+            data_ids: indices into the response data, one for each token
             is_apply_data_id_to_entire_group: If a word is broken into multiple tokens, generally a single token is
                 heuristically chosen as the 'main' token corresponding to that word. The data_id it is assigned is given
                 by data offset, while all the tokens that are not the main token in the group are assigned -1. If this
@@ -65,22 +66,40 @@ class CorpusExampleUnifier:
             current = dataclasses.asdict(input_features)
             have = dataclasses.asdict(self._examples[key])
             assert(len(have) == len(current))
-            for key in have:
-                assert(key in current)
-                if key == 'unique_id' or key == 'data_ids':
+            for k in have:
+                assert(k in current)
+                if k == 'unique_id' or k == 'data_ids':
                     continue
                 else:
-                    assert np.array_equal(have[key], current[key])
+                    # handles NaN, whereas np.array_equal does not
+                    np.testing.assert_array_equal(have[k], current[k])
             if isinstance(data_key, str):
                 data_key = [data_key]
             for k in data_key:
+                self._seen_data_keys[k] = True
                 self._examples[key].data_ids[k] = input_features.data_ids[k]
 
         return self._examples[key]
 
-    def iterate_examples(self):
+    def iterate_examples(self, fill_data_keys=False):
         for k in self._examples:
+            if fill_data_keys:
+                for data_key in self._seen_data_keys:
+                    if data_key not in self._examples[k].data_ids:
+                        self._examples[k].data_ids[data_key] = -1 * np.ones(
+                            len(self._examples[k].token_ids), dtype=np.int64)
             yield self._examples[k]
+
+    def remove_data_keys(self, data_keys):
+        if isinstance(data_keys, str):
+            data_keys = [data_keys]
+        for ex in self.iterate_examples():
+            for data_key in data_keys:
+                if data_key in ex.data_ids:
+                    del ex.data_ids[data_key]
+        for data_key in data_keys:
+            if data_key in self._seen_data_keys:
+                del self._seen_data_keys[data_key]
 
 
 class CorpusBase:

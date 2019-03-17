@@ -1,36 +1,13 @@
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Optional, Sequence, Mapping, Callable, Tuple
 
 import numpy as np
 
-from .input_features import InputFeatures, KindData, FieldSpec, RawData
+from .input_features import InputFeatures, KindData, FieldSpec, RawData, split_data
 
 
-__all__ = ['split_data', 'PreparedData', 'PreparedDataView', 'DataPreparer']
-
-
-def split_data(to_split, test_proportion, validation_of_train_proportion, shuffle=True, random_state=None):
-    from sklearn.model_selection import train_test_split
-
-    if test_proportion > 0:
-        idx_train, idx_test = train_test_split(
-            np.arange(len(to_split)), test_size=test_proportion, shuffle=shuffle, random_state=random_state)
-    else:
-        idx_train = np.arange(len(to_split))
-        idx_test = []
-
-    if validation_of_train_proportion > 0:
-        idx_train, idx_validation = train_test_split(
-            idx_train, test_size=validation_of_train_proportion, shuffle=shuffle, random_state=random_state)
-    else:
-        idx_validation = []
-
-    train = [to_split[i] for i in idx_train]
-    validation = [to_split[i] for i in idx_validation]
-    test = [to_split[i] for i in idx_test]
-    return train, validation, test
+__all__ = ['PreparedData', 'PreparedDataView', 'DataPreparer']
 
 
 @dataclass(frozen=True)
@@ -71,19 +48,25 @@ def _reconcile_view_examples(
         return
     view_examples = dict((ex.unique_id, ex.data_ids) for ex in view_examples) if view_examples is not None else {}
     for ex in prepared_data_examples:
-        ex.data_ids = dict(ex.data_ids)  # copy MappingProxyType into a new dict
         if ex.unique_id not in view_examples:
             ex.data_ids[response_key] = -1 * np.ones_like(ex.data_ids[response_key])
         else:
             ex.data_ids[response_key] = view_examples[ex.unique_id]
-        ex.data_ids = MappingProxyType(ex.data_ids)
 
 
-def _reconcile_view(prepared_data: PreparedData, view: PreparedData, response_key: str):
+def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, response_key: str):
     _reconcile_view_examples(prepared_data.train, view.train, response_key)
     _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
     _reconcile_view_examples(prepared_data.test, view.test, response_key)
     prepared_data.data[response_key] = replace(prepared_data.data[response_key], data=view.data)
+
+
+def _copy_examples(examples):
+    if examples is None:
+        return examples
+    # data_ids may be modified, so we copy them
+    return [replace(
+        ex, data_ids=type(ex.data_ids)((k, np.copy(ex.data_ids[k])) for k in ex.data_ids)) for ex in examples]
 
 
 class DataPreparer(object):
@@ -113,36 +96,41 @@ class DataPreparer(object):
             metadata[k] = raw_data_dict[k].metadata
             if raw_data_dict[k].is_pre_split:
                 result[k] = PreparedData(
-                    raw_data_dict[k].input_examples,
-                    raw_data_dict[k].validation_input_examples,
-                    raw_data_dict[k].test_input_examples,
-                    raw_data_dict[k].response_data,
+                    _copy_examples(raw_data_dict[k].input_examples),
+                    _copy_examples(raw_data_dict[k].validation_input_examples),
+                    _copy_examples(raw_data_dict[k].test_input_examples),
+                    OrderedDict(raw_data_dict[k].response_data),
                     field_specs=raw_data_dict[k].field_specs)
             elif (self._split_function_dict is not None
                     and k in self._split_function_dict and self._split_function_dict[k] is not None):
                 if k not in self._random_state:
                     self._random_state[k] = np.random.RandomState(self._seed)
+
                 train_input_examples, validation_input_examples, test_input_examples = self._split_function_dict[k](
-                    raw_data_dict[k], self._random_state[k])
+                    raw_data=raw_data_dict[k], random_state=self._random_state[k])
+
                 result[k] = PreparedData(
-                    train_input_examples, validation_input_examples, test_input_examples,
-                    raw_data_dict[k].response_data,
+                    _copy_examples(train_input_examples),
+                    _copy_examples(validation_input_examples),
+                    _copy_examples(test_input_examples),
+                    OrderedDict(raw_data_dict[k].response_data),
                     field_specs=raw_data_dict[k].field_specs)
             else:
                 if k not in self._random_state:
                     self._random_state[k] = np.random.RandomState(self._seed)
+
                 train_input_examples, validation_input_examples, test_input_examples = split_data(
                     raw_data_dict[k].input_examples,
                     raw_data_dict[k].test_proportion,
                     raw_data_dict[k].validation_proportion_of_train,
                     random_state=self._random_state[k])
-                loaded_data_tuple = PreparedData(
-                    train_input_examples,
-                    validation_input_examples,
-                    test_input_examples,
-                    raw_data_dict[k].response_data,
+
+                result[k] = PreparedData(
+                    _copy_examples(train_input_examples),
+                    _copy_examples(validation_input_examples),
+                    _copy_examples(test_input_examples),
+                    OrderedDict(raw_data_dict[k].response_data),
                     field_specs=raw_data_dict[k].field_specs)
-                result[k] = loaded_data_tuple
 
         def _get_preprocessor(preprocess_dict, corpus_key, response_key, kind):
             if preprocess_dict is None:

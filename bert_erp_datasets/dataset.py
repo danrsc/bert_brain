@@ -104,15 +104,13 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         return True
 
     @staticmethod
-    def _backfill(max_sequence_length, num_examples, example_tensors, field_specs, field):
+    def _backfill(max_sequence_length, num_examples, example_tensors, field_spec, field):
         # back-fill this field in case earlier data-sets did not have this feature
         num_seen = sum(num_examples[k] for k in num_examples)
-        if field_specs[field].is_sequence:
-            back_fill = _pad(
-                np.array([field_specs[field].fill_value]), max_sequence_length,
-                field_specs[field].fill_value)
+        if field_spec.is_sequence:
+            back_fill = _pad(np.array([field_spec.fill_value]), max_sequence_length, field_spec.fill_value)
         else:
-            back_fill = field_specs[field].fill_value
+            back_fill = field_spec.fill_value
         example_tensors[field] = [back_fill] * num_seen
 
     def __init__(self, max_sequence_length, prepared_data, which='train',
@@ -130,6 +128,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
 
         self._data_id_to_tokens = dict()
         self._data_set_id_to_data_set_key = dict()
+        self._field_to_data_set_key = dict()
 
         self._max_sequence_length = max_sequence_length
 
@@ -148,6 +147,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             for key in current.data:
                 if key in self._response_data:
                     raise ValueError('Multiple corpora use the same key in data: {}'.format(key))
+                self._field_to_data_set_key[key] = data_key
 
             fields_as_none = set()
 
@@ -175,7 +175,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                                     raise ValueError('Field name conflict: {}'.format(response_data_key))
                                 PreparedDataDataset._backfill(
                                     max_sequence_length, self._num_examples, self._response_data_indices,
-                                    self._field_specs, response_data_key)
+                                    self._field_specs[field], response_data_key)
                         else:
                             is_added = PreparedDataDataset._add_field_or_check_consistent(
                                 self._field_specs, field, current.field_specs)
@@ -184,8 +184,8 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                                     # could happen if there is a conflict between response_data and example fields
                                     raise ValueError('Field name conflict: {}'.format(field))
                                 PreparedDataDataset._backfill(
-                                    max_sequence_length, self._num_examples, self._example_tensors, self._field_specs,
-                                    field)
+                                    max_sequence_length, self._num_examples, self._example_tensors,
+                                    self._field_specs[field], field)
 
                 # add the current example
                 example_values = dataclasses.asdict(f)
@@ -209,12 +209,12 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                     if response_data_key in response_data_indices:
                         indices = response_data_indices[response_data_key]
                     else:
-                        if self._field_specs[response_data_key].is_sequence:
-                            indices = np.array([self._field_specs[response_data_key].fill_value])
+                        if self._field_specs[data_index_field].is_sequence:
+                            indices = np.array([self._field_specs[data_index_field].fill_value])
                         else:  # not sure when this would happen, but we allow it
-                            indices = self._field_specs[response_data_key].fill_value
-                    if self._field_specs[response_data_key].is_sequence:
-                        indices = _pad(indices, max_sequence_length, self._field_specs[response_data_key].fill_value)
+                            indices = self._field_specs[data_index_field].fill_value
+                    if self._field_specs[data_index_field].is_sequence:
+                        indices = _pad(indices, max_sequence_length, self._field_specs[data_index_field].fill_value)
                     self._response_data_indices[response_data_key].append(indices)
 
                 for field in fields_as_none:
@@ -223,8 +223,8 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                                          'if they are ever None in that dataset')
 
                 for response_data_key in current.data:
-                    self._response_data[response_data_key] = current.data.data
-                    self._response_data_kind[response_data_key] = current.data.kind
+                    self._response_data[response_data_key] = current.data[response_data_key].data
+                    self._response_data_kind[response_data_key] = current.data[response_data_key].kind
 
                 # remember the tokens
                 self._data_id_to_tokens[(data_set_id, example_values[id_field])] = example_values[token_field]
@@ -262,7 +262,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         if field in self._example_tensors:
             size = self._example_tensors[field].size()
         else:
-            size = self._response_data[field].size()
+            size = self._response_data[field].shape  # this is a numpy array, not a torch tensor
         if self._field_specs[field].is_sequence:
             return size[2:]
         return size[1:]
@@ -305,9 +305,8 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         return self._data_set_id_to_data_set_key[data_set_id]
 
     def data_set_key_for_field(self, field):
-        for response_data_key in self._response_data:
-            if field in self._response_data[response_data_key]:
-                return response_data_key
+        if field in self._field_to_data_set_key:
+            return self._field_to_data_set_key[field]
         return None
 
     def get_tokens(self, data_set_id, item_id):

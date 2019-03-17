@@ -125,7 +125,7 @@ def run_variation(
             continue
 
         seed = _seed(settings.seed, index_run, n_gpu)
-        data_preparer = DataPreparer(seed, settings.get_data_preprocessors(), settings.get_split_functions(index_run))
+        data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
         train_data, validation_data, test_data = make_datasets(data_preparer.prepare(data))
 
         train(settings, output_validation_path, output_test_path, train_data, validation_data, test_data, n_gpu, device)
@@ -175,8 +175,7 @@ def named_variations(name):
     elif name == 'hp_fmri':
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
-            task_data_keys=(DataKeys.harry_potter_fmri,))
-        settings.data_key_kwargs[DataKeys.harry_potter_fmri] = dict(subjects='I')
+            task_data_keys=(DataKeys.harry_potter,))
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     else:

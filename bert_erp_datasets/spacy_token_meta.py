@@ -1,6 +1,5 @@
 from string import punctuation
 from typing import Union, Sequence
-from types import MappingProxyType
 
 import numpy as np
 
@@ -318,4 +317,4 @@ def bert_tokenize_with_spacy_meta(
         head_location=_readonly(np.array(example_head_location)),
         head_tokens=tuple(example_token_head),
         head_token_ids=_readonly(np.array(bert_tokenizer.convert_tokens_to_ids(example_token_head))),
-        data_ids=MappingProxyType(dict((k, example_data_ids) for k in data_key)))
+        data_ids=dict((k, example_data_ids) for k in data_key))

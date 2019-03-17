@@ -40,17 +40,7 @@ def write_predictions(output_path, all_results, data_set, settings):
     output_dict = dict()
     for key in all_results:
 
-        critic_type = 'mse'
-        critic_kwargs = None
-        if key in settings.task_settings:
-            critic_type = settings.task_settings[key].critic_type
-            critic_kwargs = settings.task_settings[key].critic_kwargs
-        else:
-            task_owner_data_key = data_set.data_set_key_for_field(key)
-            if task_owner_data_key is not None and task_owner_data_key in settings.task_settings:
-                critic_type = settings.task_settings[task_owner_data_key].critic_type
-                critic_kwargs = settings.task_settings[task_owner_data_key].critic_kwargs
-
+        critic_settings = settings.get_critic(key, data_set)
         is_sequence = data_set.is_sequence(key)
 
         predictions = list()
@@ -90,11 +80,11 @@ def write_predictions(output_path, all_results, data_set, settings):
         output_dict['data_keys_{}'.format(key)] = np.array(data_keys)
         output_dict['unique_ids_{}'.format(key)] = np.array(unique_ids)
         output_dict['tokens_{}'.format(key)] = np.array(tokens)
-        output_dict['critic_{}'.format(key)] = critic_type
+        output_dict['critic_{}'.format(key)] = critic_settings.critic_type
         output_dict['is_sequence_{}'.format(key)] = is_sequence
-        if critic_kwargs is not None:
-            for critic_key in critic_kwargs:
-                output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_kwargs[critic_key]
+        if critic_settings.critic_kwargs is not None:
+            for critic_key in critic_settings.critic_kwargs:
+                output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_settings.critic_kwargs[critic_key]
 
     np.savez(output_path, keys=np.array([k for k in all_results]), **output_dict)
 

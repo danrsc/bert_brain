@@ -93,7 +93,7 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
         # until we put the test item in there
         words[index_target] = correct_form
 
-        data_ids = -1 * np.ones(len(words))
+        data_ids = -1 * np.ones(len(words), dtype=np.int64)
         data_ids[index_target] = len(classes)
         example_manager.add_example(words, data_key, data_ids)
         classes.append(class_correct)
@@ -130,7 +130,7 @@ class ColorlessGreenCorpus(CorpusBase):
         classes = {'colorless': KindData(ResponseKind.colorless, _readonly(np.array(classes, dtype=np.float64)))}
 
         return RawData(
-            list(example_manager.iterate_examples()), classes,
+            list(example_manager.iterate_examples(fill_data_keys=True)), classes,
             validation_proportion_of_train=0.1, field_specs={'colorless': FieldSpec(is_sequence=False)})
 
 
@@ -150,5 +150,5 @@ class LinzenAgreementCorpus(CorpusBase):
         classes = {'linzen_agree': KindData(ResponseKind.linzen_agree, _readonly(np.array(classes, dtype=np.float)))}
 
         return RawData(
-            list(example_manager.iterate_examples()), classes,
+            list(example_manager.iterate_examples(fill_data_keys=True)), classes,
             validation_proportion_of_train=0.1, field_specs={'linzen_agree': FieldSpec(is_sequence=False)})

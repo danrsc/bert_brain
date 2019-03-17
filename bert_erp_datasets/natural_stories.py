@@ -4,16 +4,19 @@ import csv
 from dataclasses import dataclass
 from collections import OrderedDict
 import dataclasses
+from functools import partial
+
 import numpy as np
 from scipy.io import loadmat
 
 from .corpus_base import CorpusBase, CorpusExampleUnifier
 from .spacy_token_meta import make_tokenizer_model
-from .input_features import RawData, KindData, ResponseKind
+from .input_features import RawData, KindData, ResponseKind, split_data
 from .praat_textgrid import TextGrid
 
 
-__all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus']
+__all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus', 'natural_stories_leave_stories_out',
+           'natural_stories_make_leave_stories_out']
 
 
 @dataclass
@@ -281,12 +284,20 @@ class NaturalStoriesCorpus(CorpusBase):
             froi = self._read_froi(example_manager)
             for k in froi:
                 data[k] = KindData(ResponseKind.ns_froi, froi[k])
-        examples = list(example_manager.iterate_examples())
+        examples = list(example_manager.iterate_examples(fill_data_keys=True))
+
+        story_ids = list()
+        for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
+            story_ids.append(sentence_word_records[0].item)
+
+        story_ids = np.array(story_ids)
+        story_ids.setflags(write=False)
 
         for k in data:
             data[k].data.setflags(write=False)
 
-        return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
+        return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1,
+                       metadata=dict(story_ids=story_ids))
 
     def _read_reaction_time_batches(self):
         groups = dict()
@@ -409,7 +420,7 @@ class NaturalStoriesCorpus(CorpusBase):
                 #     raise ValueError('Unable to compute alignment: {}, {}, {}, {}',
                 #                      story_data.shape, num_expected_story_images, story, maxes[story_to_item[story]])
                 collated_data[subject][item] = \
-                    story_data[start_image_padding:start_image_padding + num_expected_story_images]
+                    story_data[start_image_padding:start_image_padding + num_expected_story_images + 1]
                 if item in item_to_num_images:
                     if item_to_num_images[item] != collated_data[subject][item].shape[0]:
                         raise ValueError('Inconsistent number of images across subjects')
@@ -484,6 +495,54 @@ def read_natural_story_codings(directory_path, data_loader):
             raise ValueError('Unable to find codings for sentence: {}'.format(text))
         result[token_key] = codings[text]
     return result
+
+
+def natural_stories_make_leave_stories_out(index_variation_run):
+    return partial(natural_stories_leave_stories_out, index_variation_run=index_variation_run)
+
+
+def natural_stories_leave_stories_out(raw_data, index_variation_run, random_state=None, shuffle=True):
+    story_ids = raw_data.metadata['story_ids']
+    stories_with_froi = set()
+    froi_response_keys = [k for k in raw_data.response_data if raw_data.response_data[k].kind == ResponseKind.ns_froi]
+    for example in raw_data.input_examples:
+        for k in froi_response_keys:
+            if np.any(example.data_ids[k] >= 0):
+                stories_with_froi.add(story_ids[example.unique_id])
+                break
+
+    stories_without_froi = np.array([s for s in np.unique(story_ids) if s not in stories_with_froi])
+    stories_with_froi = np.array(list(sorted(stories_with_froi)))
+
+    if random_state:
+        random_state.shuffle(stories_with_froi)
+        random_state.shuffle(stories_without_froi)
+    else:
+        np.random.shuffle(stories_with_froi)
+        np.random.shuffle(stories_without_froi)
+
+    folds = list(itertools.product(stories_with_froi, stories_without_froi))
+
+    validation_stories = set(folds[index_variation_run % len(folds)])
+
+    train_examples = list()
+    validation_examples = list()
+    for example in raw_data.input_examples:
+        if story_ids[example.unique_id] in validation_stories:
+            validation_examples.append(example)
+        else:
+            train_examples.append(example)
+
+    if shuffle:
+        if random_state is not None:
+            random_state.shuffle(train_examples)
+            random_state.shuffle(validation_examples)
+        else:
+            np.random.shuffle(train_examples)
+            np.random.shuffle(validation_examples)
+
+    test_examples = list()
+    return train_examples, validation_examples, test_examples
 
 
 # library(plyr)

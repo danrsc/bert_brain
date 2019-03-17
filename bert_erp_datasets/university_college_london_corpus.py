@@ -1,6 +1,5 @@
 import csv
 import os
-from types import MappingProxyType
 from collections import OrderedDict
 
 import numpy as np
@@ -44,12 +43,7 @@ class UclCorpus(CorpusBase):
                 for k in eye:
                     data[k] = KindData(ResponseKind.ucl_eye, eye[k])
             else:
-                for example in example_manager.iterate_examples():
-                    example.data_ids = dict(example.data_ids)
-                    for key in eye_keys:
-                        if key in example.data_ids:
-                            del example.data_ids[key]
-                    example.data_ids = MappingProxyType(example.data_ids)
+                example_manager.remove_data_keys(eye_keys)
         if self.self_paced_inclusion == 'all' or self.self_paced_inclusion == 'eye':
             self_paced_subjects = self._read_self_paced_subject_ids()
             self_paced_keys = OrderedDict([('reading_time', 'RT')])
@@ -61,7 +55,7 @@ class UclCorpus(CorpusBase):
         elif self.self_paced_inclusion != 'none':
             raise ValueError('Unexpected value for self_paced_inclusion: {}'.format(self.self_paced_inclusion))
 
-        examples = list(example_manager.iterate_examples())
+        examples = list(example_manager.iterate_examples(fill_data_keys=True))
 
         for k in data:
             data[k].data.setflags(write=False)
@@ -160,7 +154,7 @@ class UclCorpus(CorpusBase):
                     for k in data_keys:
                         data[k][sentence_id][word_position] = dict()
                 for k in data_keys:
-                    data[k][sentence_id][word_position] = record[data_keys[k]]
+                    data[k][sentence_id][word_position][subject_id] = float(record[data_keys[k]])
 
         seen_subject_ids = list(sorted(seen_subject_ids))
         num_words = sum(len(sentence_words[sentence_id]) for sentence_id in sentence_words)

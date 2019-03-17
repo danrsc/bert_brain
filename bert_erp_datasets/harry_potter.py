@@ -61,7 +61,9 @@ class HarryPotterCorpus(CorpusBase):
         for k in data:
             data[k].data.setflags(write=False)
 
-        return RawData(input_examples=[example_manager.iterate_examples()], response_data=data, metadata=metadata)
+        return RawData(
+            input_examples=[example_manager.iterate_examples(fill_data_keys=True)],
+            response_data=data, metadata=metadata, validation_proportion_of_train=0.1, test_proportion=0.)
 
     def _read_meg(self, example_manager: CorpusExampleUnifier):
 

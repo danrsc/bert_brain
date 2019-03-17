@@ -2,7 +2,6 @@ import os
 from collections import OrderedDict
 import itertools
 import dataclasses
-from types import MappingProxyType
 
 import numpy as np
 import torch
@@ -59,9 +58,7 @@ def _save_to_cache(cache_path, data, kwargs):
                     raise ValueError('A field must always have a value if it ever has a value')
                 fields_as_none.add(k)
                 continue
-            is_sequence = data.field_specs is not None \
-                and k in data.field_specs \
-                and not data.field_specs[k].is_sequence
+            is_sequence = data.field_specs is None or k not in data.field_specs or data.field_specs[k].is_sequence
             if k != 'data_ids' and not is_sequence:
                 result[k].append(ex[k])
             elif k == 'tokens':
@@ -251,10 +248,9 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
                 item.setflags(write=False)
 
         for idx, item in enumerate(current):
-            all_examples[idx]['data_ids'][k] = current
+            all_examples[idx]['data_ids'][k] = item
 
     for idx in range(len(all_examples)):
-        all_examples[idx]['data_ids'] = MappingProxyType(all_examples[idx]['data_ids'])
         ex = InputFeatures(**all_examples[idx])
         ex.tokens = tuple(s.item() for s in ex.tokens)  # convert array back to list of tokens
         ex.head_tokens = tuple(s.item() for s in ex.head_tokens)
@@ -281,7 +277,8 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     response_data = OrderedDict()
     for k in prefix_results['__response_data__']:
         prefix_results['__response_data__'][k].setflags(write=False)
-        response_data[k] = KindData(prefix_results['__response_data_kind__'][k], prefix_results['__response_data__'][k])
+        response_data[k] = KindData(
+            prefix_results['__response_data_kind__'][k].item(), prefix_results['__response_data__'][k])
 
     return RawData(
         input_examples,

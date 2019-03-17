@@ -314,8 +314,15 @@ class PreprocessStandardize:
 
         valid_train_values = data[indicator_train]
 
-        pre_average_mean = np.nanmean(valid_train_values, axis=0, keepdims=True)
-        pre_average_std = np.nanstd(valid_train_values, axis=0, keepdims=True)
+        if len(valid_train_values) == 0:
+            raise ValueError('No training values')
+
+        with warnings.catch_warnings():
+            # catch 'Mean of emtpy slice' warning here; for example if a participant has no data
+            # within the training examples
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            pre_average_mean = np.nanmean(valid_train_values, axis=0, keepdims=True)
+            pre_average_std = np.nanstd(valid_train_values, axis=0, keepdims=True)
 
         transformed_data = (data - pre_average_mean) / pre_average_std
 

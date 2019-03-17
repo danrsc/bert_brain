@@ -174,16 +174,8 @@ def train(
                     loss_example_counts[k] = len(train_data_set)
                 else:
                     loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
-            critic_type = 'mse'
-            critic_kwargs = None
-            if k in settings.critics:
-                critic_type = settings.critics[k].critic_type
-                critic_kwargs = settings.critics[k].critic_kwargs
-            else:
-                if data_key is not None and data_key in settings.critics:
-                    critic_type = settings.critics[data_key].critic_type
-                    critic_kwargs = settings.critics[data_key].critic_kwargs
-            handler = make_loss_handler(k, critic_type, critic_kwargs)
+            critic_settings = settings.get_critic(k, train_data_set)
+            handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
             loss_handlers.append(handler)
             prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
             if train_data_set.is_sequence(k):
