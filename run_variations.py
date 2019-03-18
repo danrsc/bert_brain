@@ -126,7 +126,9 @@ def run_variation(
 
         seed = _seed(settings.seed, index_run, n_gpu)
         data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
-        train_data, validation_data, test_data = make_datasets(data_preparer.prepare(data))
+        train_data, validation_data, test_data = make_datasets(
+            data_preparer.prepare(data),
+            data_id_in_batch_keys=settings.grouped_prediction_keys)
 
         train(settings, output_validation_path, output_test_path, train_data, validation_data, test_data, n_gpu, device)
 
@@ -140,6 +142,9 @@ def iterate_powerset(items):
 def named_variations(name):
 
     erp_tasks = ('epnp', 'pnp', 'elan', 'lan', 'n400', 'p600')
+    ns_froi_tasks = ('ns_lh_pt', 'ns_lh_at', 'ns_lh_ifg', 'ns_lh_ifgpo', 'ns_lh_mfg', 'ns_lh_ag',
+                     'ns_rh_pt', 'ns_rh_at', 'ns_rh_ifg', 'ns_rh_ifgpo', 'ns_rh_mfg', 'ns_rh_ag')
+
     name = SwitchRemember(name)
     auxiliary_loss_tasks = set()
 
@@ -154,7 +159,10 @@ def named_variations(name):
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories':
-        training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
+        training_variations = [('ns_spr',),
+                               erp_tasks + ('ns_spr',),
+                               ns_froi_tasks + ('ns_spr',),
+                               erp_tasks + ns_froi_tasks + ('ns_spr',)]
         settings = Settings(task_data_keys=(DataKeys.natural_stories, DataKeys.ucl))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
@@ -176,7 +184,7 @@ def named_variations(name):
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             task_data_keys=(DataKeys.harry_potter,))
-        num_runs = 10
+        num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

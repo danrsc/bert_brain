@@ -3,7 +3,8 @@ from itertools import zip_longest
 import re
 
 
-__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'SwitchRemember', 'camel_to_snake']
+__all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'SwitchRemember', 'camel_to_snake',
+           'MultiReplace']
 
 
 def zip_equal(*it):
@@ -88,3 +89,15 @@ def camel_to_snake(s):
     # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+
+class MultiReplace:
+    def __init__(self, replace_dict):
+        self._replace_dict = dict(replace_dict)
+        self._regex = re.compile('|'.join(re.escape(k) for k in self._replace_dict))
+
+    def _get_replacement(self, match):
+        return self._replace_dict[match.group(0)]
+
+    def replace(self, text):
+        return self._regex.sub(self._get_replacement, text)

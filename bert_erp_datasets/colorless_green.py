@@ -85,7 +85,7 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
     class_incorrect = 0
     classes = list()
 
-    for example in examples:
+    for example_id, example in enumerate(examples):
         words, correct_form, incorrect_form, index_target = example.agreement_tuple
         words = list(words)
 
@@ -95,7 +95,7 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
 
         data_ids = -1 * np.ones(len(words), dtype=np.int64)
         data_ids[index_target] = len(classes)
-        example_manager.add_example(words, data_key, data_ids)
+        example_manager.add_example(example_id, words, data_key, data_ids)
         classes.append(class_correct)
 
         # switch to the wrong number-agreement
@@ -103,7 +103,7 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
 
         data_ids = np.copy(data_ids)
         data_ids[index_target] = len(classes)
-        example_manager.add_example(words, data_key, data_ids)
+        example_manager.add_example(example_id, words, data_key, data_ids)
         classes.append(class_incorrect)
 
     return classes

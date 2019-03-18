@@ -3,7 +3,7 @@ from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, U
 
 import numpy as np
 from bert_erp_datasets import DataKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_fmri_make_split_function, PreparedDataView, \
+    PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_make_leave_out_fmri_run, PreparedDataView, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
 from bert_erp_modeling import CriticKeys
 
@@ -39,8 +39,8 @@ def _default_preprocessors():
 
     return {
         ResponseKind.hp_fmri: PreprocessMany(
-            PreprocessStandardize(average_axis=None, metadata_response_group_by='example_run'),
-            PreprocessDetrend(stop_mode=None, metadata_response_group_by='example_run')),
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode='content')),
         ResponseKind.hp_meg: PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
@@ -59,16 +59,17 @@ def _default_critics():
     return {
         DataKeys.ucl: CriticSettings(critic_type=CriticKeys.mse),
         DataKeys.natural_stories: CriticSettings(critic_type=CriticKeys.mse),
+        ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.pooled_mse),
         DataKeys.harry_potter: CriticSettings(critic_type=CriticKeys.mse),
-        DataKeys.colorless_green: CriticSettings(critic_type=CriticKeys.sequence_binary_cross_entropy),
-        DataKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.sequence_binary_cross_entropy)
+        DataKeys.colorless_green: CriticSettings(critic_type=CriticKeys.pooled_binary_cross_entropy),
+        DataKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.pooled_binary_cross_entropy)
     }
 
 
 def _default_split_functions():
 
     return {
-        DataKeys.harry_potter: harry_potter_fmri_make_split_function,
+        DataKeys.harry_potter: harry_potter_make_leave_out_fmri_run,
         DataKeys.natural_stories: natural_stories_make_leave_stories_out
     }
 
@@ -109,6 +110,10 @@ class Settings:
                 Optional[Sequence[InputFeatures]],
                 Optional[Sequence[InputFeatures]],
                 Optional[Sequence[InputFeatures]]]]]] = field(default_factory=_default_split_functions)
+
+    # these keys will be grouped by data_id so if more than one word in a sequence maps to the same image, the
+    # predictions of each word mapping to a single image will be averaged before the linear layer is applied
+    grouped_prediction_keys: Optional[Sequence[str]] = (ResponseKind.hp_fmri, ResponseKind.ns_froi)
 
     bert_model: str = 'bert-base-uncased'
 

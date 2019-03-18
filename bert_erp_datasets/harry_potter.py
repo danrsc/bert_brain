@@ -11,12 +11,13 @@ from scipy.ndimage.filters import gaussian_filter1d
 import nibabel
 import cortex
 
+from bert_erp_common import MultiReplace
 from .corpus_base import CorpusBase, CorpusExampleUnifier
 from .input_features import RawData, KindData, ResponseKind
 
 
-__all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_split_by_fmri_run',
-           'harry_potter_fmri_make_split_function']
+__all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
+           'harry_potter_make_leave_out_fmri_run']
 
 
 @dataclass
@@ -29,6 +30,12 @@ class _HarryPotterWordFMRI:
 
 
 class HarryPotterCorpus(CorpusBase):
+
+    # we need to use these so we can have run information even when we
+    # don't read in fmri data; i.e. as a way to do train-test splits the
+    # same for MEG as for fMRI. We will assert that the run lengths we
+    # get are equal to these when we read fMRI
+    static_run_lengths = (340, 352, 279, 380)
 
     def __init__(
             self,
@@ -47,14 +54,27 @@ class HarryPotterCorpus(CorpusBase):
 
     def _load(self, example_manager: CorpusExampleUnifier):
         data = OrderedDict()
-        metadata = None
+
+        # add all of the sentences first to guarantee consistent example ids
+        sentences = self._harry_potter_fmri_word_info(HarryPotterCorpus.static_run_lengths)
+        fmri_runs = list()
+        for id_sentence, sentence in enumerate(sentences):
+            assert(all(w.run == sentence[0].run for w in sentence[1:]))
+            fmri_runs.append(sentence[0].run)
+            features = example_manager.add_example(id_sentence, [w.word for w in sentence], None, None)
+            assert(features.unique_id == id_sentence)
+
+        fmri_runs = np.array(fmri_runs)
+        fmri_runs.setflags(write=False)
+
+        metadata = dict(fmri_runs=fmri_runs)
+
         if self.include_meg:
             meg = self._read_meg(example_manager)
             for k in meg:
                 data[k] = KindData(ResponseKind.hp_meg, meg[k])
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri, image_runs = self._read_fmri(example_manager)
-            metadata = dict(response_runs=image_runs)
+            fmri = self._read_fmri(example_manager)
             for k in fmri:
                 data[k] = KindData(ResponseKind.hp_fmri, fmri[k])
 
@@ -62,7 +82,7 @@ class HarryPotterCorpus(CorpusBase):
             data[k].data.setflags(write=False)
 
         return RawData(
-            input_examples=[example_manager.iterate_examples(fill_data_keys=True)],
+            input_examples=list(example_manager.iterate_examples(fill_data_keys=True)),
             response_data=data, metadata=metadata, validation_proportion_of_train=0.1, test_proportion=0.)
 
     def _read_meg(self, example_manager: CorpusExampleUnifier):
@@ -84,6 +104,10 @@ class HarryPotterCorpus(CorpusBase):
         loaded = np.load(meg_path)
 
         stimuli = loaded['stimuli']
+
+        assert(stimuli[2364] == '..."')
+        stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
+
         # blocks should be int, but is stored as float
         blocks = loaded['blocks']
         blocks = np.round(blocks).astype(np.int64)
@@ -168,12 +192,20 @@ class HarryPotterCorpus(CorpusBase):
             data = separated_data
 
         offset = 0
-        for example_id in np.unique(example_id_words):
+        for sentence_id, example_id in enumerate(np.unique(example_id_words)):
+            # we don't use the example_id directly here, because when we assign sentence ids pluses
+            # are filtered out. An example_id can be assigned to just a plus; but a sentence_id skips it
             indicator_example = example_id_words == example_id
             example_stimuli = stimuli[indicator_example]
             # we don't currently use blocks for anything, but we could use it as an input to the model
             # example_blocks = blocks[indicator_example]
-            example_manager.add_example(example_stimuli, [k for k in data], np.arange(len(example_stimuli)) + offset)
+            features = example_manager.add_example(
+                sentence_id,
+                [_clean_word(w) for w in example_stimuli],
+                [k for k in data],
+                np.arange(len(example_stimuli)) + offset,
+                allow_new_examples=False)
+            assert(features is not None)
 
         return data
 
@@ -220,6 +252,7 @@ class HarryPotterCorpus(CorpusBase):
 
         time_images = np.arange(1351) * 2
         words = np.load(os.path.join(self.path, 'words_fmri.npy'))
+        words = [w.item() for w in words]
         time_words = np.load(os.path.join(self.path, 'time_words_fmri.npy'))
         assert (len(words) == len(time_words))
 
@@ -264,6 +297,8 @@ class HarryPotterCorpus(CorpusBase):
             else:
                 assert (np.array_equal([len(r) for r in data[subject]], run_lengths))
 
+        assert(np.array_equal(run_lengths, HarryPotterCorpus.static_run_lengths))
+
         # get the words, image indices, and story features per sentence
         sentences = self._harry_potter_fmri_word_info(run_lengths)
 
@@ -287,35 +322,39 @@ class HarryPotterCorpus(CorpusBase):
 
         # filter unused images
         active_sentence_images_to_new_index = dict()
-        image_runs = list()
-        active_images = np.full(np.sum(run_lengths), False)
+        active_image_indices = list()
         for sentence_id, sentence in enumerate(sentences):
             if sentence_id in excluded:
                 continue
             for w in sentence:
                 # store the new index
-                new_index = len(active_sentence_images_to_new_index)
-                active_sentence_images_to_new_index[w.image] = new_index
-                active_images[w.image] = True
-                image_runs.append(w.run)
+                if w.image not in active_sentence_images_to_new_index:
+                    active_sentence_images_to_new_index[w.image] = len(active_image_indices)
+                    active_image_indices.append(w.image)
+        active_image_indices = np.array(active_image_indices)
 
         masked_data = OrderedDict()
         for subject in data:
-            subject_data = np.concatenate(data[subject])[active_images]
+            subject_data = np.concatenate(data[subject])[active_image_indices]
             if self.fmri_smooth_factor is not None:
                 subject_data = gaussian_filter1d(
                     subject_data, sigma=self.fmri_smooth_factor, axis=1, order=0, mode='reflect', truncate=4.0)
-            masked_data['hp_fmri_{}'.format(subject)] = subject_data[:, spatial_masks[subject]]
+            # apply spatial mask
+            subject_data = subject_data[:, spatial_masks[subject]]
+            # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
+            masked_data['hp_fmri_{}'.format(subject)] = np.expand_dims(subject_data, axis=1)
         data = masked_data
 
         for sentence_id, sentence in enumerate(sentences):
             if sentence_id in excluded:
                 continue
             images = [active_sentence_images_to_new_index[w.image] for w in sentence]
-            example_manager.add_example(
-                [w.word for w in sentence], [k for k in data], images, is_apply_data_id_to_entire_group=True)
+            features = example_manager.add_example(
+                sentence_id, [w.word for w in sentence], [k for k in data], images,
+                is_apply_data_id_to_entire_group=True, allow_new_examples=False)
+            assert(features is not None)
 
-        return data, image_runs
+        return data
 
 
 def read_harry_potter_story_features(path):
@@ -380,29 +419,34 @@ def _group_sentence_indices(indices_in_sentences):
         yield current
 
 
+_replacer = MultiReplace({
+        '@': '',
+        '\\': '',
+        '…': '...',
+        '‘': '\'',
+        '—': '--',
+        '^': ''  # this just seems like spurious character in context; maybe it was supposed to be @
+    })
+
+
 def _clean_word(w):
-    return str(w).replace('@', '').replace('\\', '')
+    return _replacer.replace(w)
 
 
-def harry_potter_fmri_make_split_function(index_variation_run):
-    return partial(harry_potter_split_by_fmri_run, index_variation_run=index_variation_run)
+def harry_potter_make_leave_out_fmri_run(index_variation_run):
+    return partial(harry_potter_leave_out_fmri_run, index_variation_run=index_variation_run)
 
 
-def harry_potter_split_by_fmri_run(raw_data, index_variation_run, random_state=None, shuffle=True):
-    runs = raw_data.metadata['response_runs']
+def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=None, shuffle=True):
+    runs = raw_data.metadata['fmri_runs']
     unique_runs = np.unique(runs)
     index_validation = index_variation_run % len(unique_runs)
     validation_run = unique_runs[index_validation]
     train_examples = list()
     validation_examples = list()
+
     for example in raw_data.input_examples:
-        run = None
-        for data_id in example.data_ids:
-            if data_id >= 0:
-                run = runs[data_id]
-                break
-        assert(run is not None)
-        if run == validation_run:
+        if runs[example.unique_id] == validation_run:
             validation_examples.append(example)
         else:
             train_examples.append(example)
@@ -413,5 +457,5 @@ def harry_potter_split_by_fmri_run(raw_data, index_variation_run, random_state=N
         else:
             np.random.shuffle(train_examples)
             np.random.shuffle(validation_examples)
-    test_examples = None
+    test_examples = list()
     return train_examples, validation_examples, test_examples

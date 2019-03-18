@@ -1,5 +1,5 @@
 from string import punctuation
-from typing import Union, Sequence
+from typing import Union, Sequence, Optional
 
 import numpy as np
 
@@ -192,8 +192,8 @@ def bert_tokenize_with_spacy_meta(
         bert_tokenizer: BertTokenizer,
         unique_id: int,
         words: Sequence[str],
-        data_key: Union[str, Sequence[str]],
-        data_ids: Sequence[int],
+        data_key: Optional[Union[str, Sequence[str]]],
+        data_ids: Optional[Sequence[int]],
         type_id: int = 0,
         is_apply_data_offset_entire_group: bool = False) -> InputFeatures:
     """
@@ -289,12 +289,14 @@ def bert_tokenize_with_spacy_meta(
             example_type_ids.append(type_id)
             # we follow the BERT paper and always use the first word-piece as the labeled one
             data_id = -1
-            if idx_token == idx_data or is_apply_data_offset_entire_group:
+            if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
                 data_id = data_ids[idx_group]
             example_data_ids.append(data_id)
 
     _append_special_token('[SEP]')
 
+    if data_key is None:
+        data_key = dict()
     if isinstance(data_key, str):
         data_key = [data_key]
 

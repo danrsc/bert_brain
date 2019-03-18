@@ -1,6 +1,6 @@
 from collections import OrderedDict
 import dataclasses
-from typing import Sequence, Union, Optional
+from typing import Sequence, Union, Optional, Hashable
 
 import numpy as np
 
@@ -24,9 +24,10 @@ class CorpusExampleUnifier:
 
     def add_example(
             self,
+            example_key: Optional[Hashable],
             words: Sequence[str],
-            data_key: Union[str, Sequence[str]],
-            data_ids: Sequence[int],
+            data_key: Optional[Union[str, Sequence[str]]],
+            data_ids: Optional[Sequence[int]],
             is_apply_data_id_to_entire_group: bool = False,
             type_ids: int = 0,
             allow_new_examples: bool = True) -> Optional[InputFeatures]:
@@ -34,6 +35,9 @@ class CorpusExampleUnifier:
         Adds an example for the current data loader to return later. Simplifies the process of merging examples
         across different response measures. For example MEG and fMRI
         Args:
+            example_key: For instance, the position of the example within a story. If this is set to None, then the
+                tokens will be used as the example_key. However, this may be undesirable since in a given passage,
+                sentences, especially short sentences, can be repeated.
             words: The words in the example
             data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
             data_ids: indices into the response data, one for each token
@@ -56,15 +60,17 @@ class CorpusExampleUnifier:
             self.spacy_tokenize_model, self.bert_tokenizer,
             len(self._examples), words, data_key, data_ids, type_ids, is_apply_data_id_to_entire_group)
 
-        key = tuple(input_features.token_ids)
-        if key not in self._examples:
+        if example_key is None:
+            example_key = tuple(input_features.token_ids)
+
+        if example_key not in self._examples:
             if allow_new_examples:
-                self._examples[key] = input_features
+                self._examples[example_key] = input_features
             else:
                 return None
         else:
             current = dataclasses.asdict(input_features)
-            have = dataclasses.asdict(self._examples[key])
+            have = dataclasses.asdict(self._examples[example_key])
             assert(len(have) == len(current))
             for k in have:
                 assert(k in current)
@@ -73,13 +79,14 @@ class CorpusExampleUnifier:
                 else:
                     # handles NaN, whereas np.array_equal does not
                     np.testing.assert_array_equal(have[k], current[k])
-            if isinstance(data_key, str):
-                data_key = [data_key]
-            for k in data_key:
-                self._seen_data_keys[k] = True
-                self._examples[key].data_ids[k] = input_features.data_ids[k]
+            if data_key is not None:
+                if isinstance(data_key, str):
+                    data_key = [data_key]
+                for k in data_key:
+                    self._seen_data_keys[k] = True
+                    self._examples[example_key].data_ids[k] = input_features.data_ids[k]
 
-        return self._examples[key]
+        return self._examples[example_key]
 
     def iterate_examples(self, fill_data_keys=False):
         for k in self._examples:

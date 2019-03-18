@@ -21,9 +21,9 @@ __all__ = [
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
     'NamedTargetStopWordAwareCrossEntropy',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
-    'NamedTargetSequenceBinaryCrossEntropyWithLogits',
-    'NamedTargetSequenceCrossEntropy',
-    'NamedTargetSequenceSoftLabelCrossEntropy',
+    'NamedTargetPooledBinaryCrossEntropyWithLogits',
+    'NamedTargetPooledCrossEntropy',
+    'NamedTargetPooledSoftLabelCrossEntropy',
     'CriticMapping',
     'CriticKeys',
     'make_loss_handler']
@@ -229,8 +229,9 @@ class _NamedTargetMaskedLoss:
             return (loss,) + result[1:]
         return loss
 
-    def __call__(self, batch, predictions, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
-        predictions = predictions[self.field]
+    def __call__(
+            self, batch, prediction_dict, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
+        predictions = prediction_dict[self.field]
         target = batch[self.field]
         mask = self._get_mask(batch, predictions, target)
 
@@ -247,6 +248,12 @@ class _NamedTargetMaskedLoss:
             result = self.apply_weight(result)
 
         if return_detailed:
+
+            example_indices = None
+            group_prediction_key = (self.field, 'example_indices')
+            if group_prediction_key in prediction_dict:
+                example_indices = prediction_dict[group_prediction_key]
+
             batch_mask = mask.detach().cpu().numpy()
             batch_predictions = predictions.detach().cpu().numpy()
             batch_target = target.detach().cpu().numpy()
@@ -256,6 +263,10 @@ class _NamedTargetMaskedLoss:
             detailed_result = list()
             for idx, (example_mask, example_predictions, example_targets) in enumerate(zip(
                     batch_mask, batch_predictions, batch_target)):
+
+                if example_indices is not None:
+                    idx = example_indices[idx]
+
                 data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
                 unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
                 detailed_result.append(
@@ -342,7 +353,13 @@ class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLos
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class NamedTargetSequenceCrossEntropy(_NamedTargetMaskedLoss):
+class NamedTargetPooledMSE(_NamedTargetMaskedLoss):
+
+    def _masked_loss(self, mask, predictions, target):
+        return masked_squared_error(mask, predictions, target)
+
+
+class NamedTargetPooledCrossEntropy(_NamedTargetMaskedLoss):
 
     def __init__(self, field, num_classes, weight=1.):
         self.num_classes = num_classes
@@ -355,13 +372,13 @@ class NamedTargetSequenceCrossEntropy(_NamedTargetMaskedLoss):
         return shape + (self.num_classes,)
 
 
-class NamedTargetSequenceSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
+class NamedTargetPooledSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
 
     def _masked_loss(self, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class NamedTargetSequenceBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
+class NamedTargetPooledBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
 
     def __init__(self, field, weight=1., pos_weight=None):
         super().__init__(field, weight)
@@ -382,12 +399,13 @@ class CriticMapping:
         metadata=dict(hidden_value=NamedTargetStopWordAwareBinaryCrossEntropyWithLogits))
     soft_label_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
-    sequence_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSequenceCrossEntropy))
-    sequence_binary_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSequenceBinaryCrossEntropyWithLogits))
-    sequence_soft_label_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSequenceSoftLabelCrossEntropy))
+    pooled_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetPooledMSE))
+    pooled_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetPooledCrossEntropy))
+    pooled_binary_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetPooledBinaryCrossEntropyWithLogits))
+    pooled_soft_label_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetPooledSoftLabelCrossEntropy))
 
 
 CriticKeys = CriticMapping(**dict((f.name, f.name) for f in dataclasses.fields(CriticMapping)))

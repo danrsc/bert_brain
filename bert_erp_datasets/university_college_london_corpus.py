@@ -5,7 +5,7 @@ from collections import OrderedDict
 import numpy as np
 from scipy.io import loadmat
 
-from .corpus_base import CorpusBase
+from .corpus_base import CorpusBase, CorpusExampleUnifier
 from .input_features import RawData, KindData, ResponseKind
 
 
@@ -24,7 +24,7 @@ class UclCorpus(CorpusBase):
         self.include_eye = include_eye
         self.self_paced_inclusion = self_paced_inclusion
 
-    def _load(self, example_manager):
+    def _load(self, example_manager: CorpusExampleUnifier):
         data = OrderedDict()
         if self.include_erp:
             erp = self._read_erp(example_manager)
@@ -62,7 +62,7 @@ class UclCorpus(CorpusBase):
 
         return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
 
-    def _read_erp(self, example_manager):
+    def _read_erp(self, example_manager: CorpusExampleUnifier):
         data = loadmat(self.frank_2015_erp_path)
         sentences = data['sentences'].squeeze(axis=1)
         erp = data['ERP'].squeeze(axis=1)
@@ -85,9 +85,10 @@ class UclCorpus(CorpusBase):
             s = s.squeeze(axis=0)
 
             example_manager.add_example(
-                [str(w[0]) for w in s],
-                erp_names,
-                len(rows) + np.arange(len(s)))
+                example_key=None,
+                words=[str(w[0]) for w in s],
+                data_key=erp_names,
+                data_ids=len(rows) + np.arange(len(s)))
 
             for w_e in e:
                 rows.append(np.expand_dims(np.asarray(w_e, dtype=np.float32), 0))
@@ -128,7 +129,8 @@ class UclCorpus(CorpusBase):
                 subject_ids.add(int(record['subj_nr']))
         return subject_ids
 
-    def _read_2013_data(self, file_name, example_manager, subject_ids, data_keys, allow_new_examples=True):
+    def _read_2013_data(
+            self, file_name, example_manager: CorpusExampleUnifier, subject_ids, data_keys, allow_new_examples=True):
         sentence_words = dict()
         data = dict()
         for k in data_keys:
@@ -166,7 +168,10 @@ class UclCorpus(CorpusBase):
             sorted_pos = sorted(sentence_words[sentence_id])
             words = [sentence_words[sentence_id][p] for p in sorted_pos]
             example_manager.add_example(
-                words, [k for k in data_keys], np.arange(len(words)) + data_offset,
+                example_key=None,
+                words=words,
+                data_key=[k for k in data_keys],
+                data_ids=np.arange(len(words)) + data_offset,
                 allow_new_examples=allow_new_examples)
             for k in data_keys:
                 for i, p in enumerate(sorted_pos):

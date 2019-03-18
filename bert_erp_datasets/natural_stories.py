@@ -328,6 +328,7 @@ class NaturalStoriesCorpus(CorpusBase):
         key_to_row = dict((k, i) for i, k in enumerate(keys))
         for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
             example_manager.add_example(
+                unique_id,
                 [r.word for r in sentence_word_records],
                 'ns_spr',
                 [key_to_row[(r.item, r.zone)] for r in sentence_word_records])
@@ -467,6 +468,7 @@ class NaturalStoriesCorpus(CorpusBase):
                 continue
 
             example_manager.add_example(
+                unique_id,
                 [r.word for r in sentence_word_records],
                 data_keys,
                 [key_to_index_image[r.item, r.zone] for r in sentence_word_records],

@@ -42,7 +42,8 @@ class GroupPool(torch.nn.Module):
         # first attach an example_id to the groups to ensure that we don't pool across examples in the batch
 
         # array of shape (batch, sequence, 1) which gives identifies which example
-        example_ids = torch.arange(groupby.size()[0]).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
+        example_ids = torch.arange(
+            groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
         # -> (batch, sequence, 2): attach example_id to each group
         groupby = torch.cat((groupby.view(groupby.size() + (1,)), example_ids), dim=2)
 
@@ -52,19 +53,37 @@ class GroupPool(torch.nn.Module):
         # each group is a (group, example_id) tuple
         groups, group_indices = torch.unique(groupby, return_inverse=True, dim=0)
 
-        # -> (batch, sequence)
-        group_indices = group_indices.view((x.size()[0], x.size()[1]))
-
-        # remove the example_id
+        # split the groups into the true groups and example_ids
+        example_ids = groups[:, 1]
         groups = groups[:, 0]
 
-        pooled = torch.zeros((groups.size()[0],) + x.size()[1:], dtype=x.dtype)
-        counts = torch.zeros_like(pooled, dtype=x.dtype)
-        pooled.scatter_add_(dim=0, index=group_indices, other=x)
-        counts.scatter_add_(dim=0, index=group_indices, other=torch.ones_like(group_indices))
+        # -> (batch * sequence, 1, 1, ..., 1)
+        group_indices = group_indices.view((x.size()[0] * x.size()[1],) + (1,) * (len(x.size()) - 2))
+
+        # -> (batch * sequence, n, m, ..., k)
+        group_indices = group_indices.repeat((1,) + x.size()[2:])
+
+        # -> (batch * sequence, n, m, ..., k)
+        x = x.view((x.size()[0] * x.size()[1],) + x.size()[2:])
+
+        pooled = torch.zeros((groups.size()[0],) + x.size()[1:], dtype=x.dtype, device=x.device)
+        pooled.scatter_add_(dim=0, index=group_indices, src=x)
+
+        # -> (batch * sequence)
+        group_indices = group_indices[:, 0]
+        counts = torch.zeros(groups.size()[0], dtype=x.dtype, device=x.device)
+        counts.scatter_add_(
+            dim=0, index=group_indices, src=torch.ones(len(group_indices), dtype=x.dtype, device=x.device))
+        counts = counts.view(counts.size() + (1,) * len(pooled.size()[1:]))
         pooled = pooled / counts
 
-        return pooled, groups
+        # filter out groups < 0
+        indicator_valid = groups >= 0
+        pooled = pooled[indicator_valid]
+        groups = groups[indicator_valid]
+        example_ids = example_ids[indicator_valid]
+
+        return pooled, groups, example_ids
 
 
 class BertMultiHead(BertPreTrainedModel):
@@ -94,8 +113,7 @@ class BertMultiHead(BertPreTrainedModel):
             token_level_input_key_to_shape=None,
             pooled_prediction_key_to_shape=None,
             pooled_input_key_to_shape=None,
-            group_pooled_prediction_key_to_shape=None,
-            group_pooled_input_key_to_shape=None):
+            group_pooled_prediction_key_to_shape=None):
 
         has_prediction = False
         for p_to_s in (
@@ -115,11 +133,14 @@ class BertMultiHead(BertPreTrainedModel):
             config.hidden_size, token_prediction_key_to_shape, token_level_input_key_to_shape, 'token')
         self.pooled_input_key_to_shape, self.pooled_linear = BertMultiHead._setup_linear_layer(
             config.hidden_size, pooled_prediction_key_to_shape, pooled_input_key_to_shape, 'pooled')
-        self.group_pooled_input_key_to_shape, self.group_pooled_linear = BertMultiHead._setup_linear_layer(
-            config.hidden_size, group_pooled_prediction_key_to_shape, group_pooled_input_key_to_shape, 'group_pooled')
         self.group_pool = None
-        if self.group_pooled_linear is not None:
+        self.group_pooled_linear = None
+        if group_pooled_prediction_key_to_shape is not None and len(group_pooled_prediction_key_to_shape) > 0:
             self.group_pool = GroupPool()
+            self.group_pooled_linear = torch.nn.ModuleDict()
+            for key in group_pooled_prediction_key_to_shape:
+                self.group_pooled_linear[key] = KeyedLinear(
+                    False, config.hidden_size, OrderedDict([(key, group_pooled_prediction_key_to_shape[key])]))
         self.apply(self.init_bert_weights)
 
     def forward(self, batch):
@@ -154,19 +175,13 @@ class BertMultiHead(BertPreTrainedModel):
             pooled_input = torch.cat(all_values, dim=1)
 
         group_pool_predictions = None
-        groups = None
-        if self.group_pool is not None:
-            grouped_input = sequence_output
-            if self.group_pooled_input_key_to_shape is not None:
-                all_values = [sequence_output]
-                for key in self.group_pooled_input_key_to_shape:
-                    values = batch[key]
-                    values = values.view(values.size()[:2] + (int(np.prod(self.group_pooled_input_key_to_shape[key])),))
-                    all_values.append(self.dropout(values.type(sequence_output.dtype)))
-                grouped_input = torch.cat(all_values, dim=2)
-
-            grouped_input, groups = self.group_pool(grouped_input, batch['data_ids'])
-            group_pool_predictions = self.group_pooled_linear(grouped_input)
+        if self.group_pooled_linear is not None:
+            group_pool_predictions = OrderedDict()
+            for key in self.group_pooled_linear:
+                grouped_input, groups, example_indices = self.group_pool(sequence_output, batch[(key, 'data_ids')])
+                group_pool_predictions[key] = self.group_pooled_linear[key](grouped_input)[key]
+                group_pool_predictions[(key, 'data_ids')] = groups
+                group_pool_predictions[(key, 'example_indices')] = example_indices
 
         token_predictions = self.token_linear(token_input) if self.token_linear is not None else None
         pooled_predictions = self.pooled_linear(pooled_input) if self.pooled_linear is not None else None
@@ -188,6 +203,5 @@ class BertMultiHead(BertPreTrainedModel):
                 if k in predictions:
                     raise ValueError('multiple predictions made for key: {}'.format(k))
                 predictions[k] = group_pool_predictions[k]
-            predictions['group_pool_groups'] = groups
 
         return predictions

@@ -60,6 +60,17 @@ def _indicator_from_examples(data_size, examples, stop_mode=None):
     return result
 
 
+def _unsorted_group_by(items, group_by_fn):
+    groups = dict()
+    for item in items:
+        key = group_by_fn(item)
+        if key not in groups:
+            groups[key] = list()
+        groups[key].append(item)
+    for key in sorted(groups):
+        yield key, groups[key]
+
+
 def _parallel_column_map(fit_fn, apply_fn, data, indicator_fit=None):
     shape = data.shape
     data = np.reshape(data, (data.shape[0], -1))
@@ -96,16 +107,23 @@ class PreprocessDetrend:
     def __init__(
             self,
             stop_mode: Optional[str] = None,
-            metadata_response_group_by: str = None):
+            metadata_example_group_by: str = None,
+            train_on_all: bool = False):
         self.stop_mode = stop_mode
-        self.metadata_response_group_by = metadata_response_group_by
+        self.metadata_example_group_by = metadata_example_group_by
+        self.train_on_all = train_on_all
 
     @staticmethod
     def _detrend(arr, indicator_train):
-        x = np.arange(len(arr))[indicator_train]
-        to_fit = arr[indicator_train]
+        x = np.arange(len(arr))
+        to_fit = arr
+
+        if indicator_train is not None:
+            x = x[indicator_train]
+            to_fit = to_fit[indicator_train]
+
         to_fit = np.ma.masked_invalid(to_fit)
-        p = np.ma.polyfit(x, np.reshape(to_fit.shape[0], -1), deg=1)
+        p = np.ma.polyfit(x, np.reshape(to_fit, (to_fit.shape[0], -1)), deg=1)
         #      (1, num_columns)            (num_rows, 1)
         lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(arr)), (-1, 1)) + np.reshape(p[1], (1, -1))
         lines = np.reshape(lines, arr.shape)
@@ -113,19 +131,23 @@ class PreprocessDetrend:
 
     def __call__(self, loaded_data_tuple, metadata):
 
-        indicator_train = _indicator_from_examples(len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
+        indicator_train = None
+        if not self.train_on_all:
+            indicator_train = _indicator_from_examples(
+                len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
 
-        if self.metadata_response_group_by is not None:
-            if metadata is None or self.metadata_response_group_by not in metadata:
-                raise ValueError('metadata_response_group_by {} not found in metadata'.format(
-                    self.metadata_response_group_by))
-            group_by = np.unique(metadata[self.metadata_response_group_by])
-            groups = np.unique(group_by)
+        if self.metadata_example_group_by is not None:
+            if metadata is None or self.metadata_example_group_by not in metadata:
+                raise ValueError('metadata_example_group_by {} not found in metadata'.format(
+                    self.metadata_example_group_by))
             data = np.copy(loaded_data_tuple.data)
-            for group in groups:
-                indicator_group = group == group_by
+            grouped_examples = _unsorted_group_by(
+                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
+            for group, group_examples in grouped_examples:
+                indicator_group = _indicator_from_examples(len(data), group_examples)
                 group_data = data[indicator_group]
-                group_indicator_train = indicator_train[indicator_group]
+                group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
                 group_data = PreprocessDetrend._detrend(group_data, group_indicator_train)
                 data[indicator_group] = group_data
         else:
@@ -279,7 +301,7 @@ class PreprocessPCA:
         # -> (samples, task, features)
         all_values = np.reshape(
             all_values,
-            (all_values.shape[0], int(np.prod(all_values.shape[1:-1]))), all_values.shape[-1])
+            (all_values.shape[0], int(np.prod(all_values.shape[1:-1])), all_values.shape[-1]))
         # -> (task, samples, features)
         all_values = np.transpose(all_values, (1, 0, 2))
         result = list()
@@ -305,14 +327,18 @@ class PreprocessStandardize:
             self,
             average_axis: Optional[int] = 1,
             stop_mode: Optional[str] = None,
-            metadata_response_group_by: Optional[str] = None):
+            metadata_example_group_by: Optional[str] = None,
+            train_on_all: Optional[bool] = False):
         self.stop_mode = stop_mode
         self.average_axis = average_axis
-        self.metadata_response_group_by = metadata_response_group_by
+        self.metadata_example_group_by = metadata_example_group_by
+        self.train_on_all = train_on_all
 
     def _standardize(self, data, indicator_train):
 
-        valid_train_values = data[indicator_train]
+        valid_train_values = data
+        if indicator_train is not None:
+            valid_train_values = data[indicator_train]
 
         if len(valid_train_values) == 0:
             raise ValueError('No training values')
@@ -324,10 +350,12 @@ class PreprocessStandardize:
             pre_average_mean = np.nanmean(valid_train_values, axis=0, keepdims=True)
             pre_average_std = np.nanstd(valid_train_values, axis=0, keepdims=True)
 
-        transformed_data = (data - pre_average_mean) / pre_average_std
+        transformed_data = np.divide(data - pre_average_mean, pre_average_std, where=pre_average_std != 0)
 
         if self.average_axis is not None:
-            standardized_train_values = (valid_train_values - pre_average_mean) / pre_average_std
+            standardized_train_values = transformed_data
+            if indicator_train is not None:
+                standardized_train_values = standardized_train_values[indicator_train]
             with warnings.catch_warnings():
                 # catch 'Mean of emtpy slice' warning here
                 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -335,26 +363,29 @@ class PreprocessStandardize:
                 transformed_data = np.nanmean(transformed_data, axis=self.average_axis)
             post_average_mean = np.nanmean(standardized_train_values, axis=0, keepdims=True)
             post_average_std = np.nanstd(standardized_train_values, axis=0, keepdims=True)
-            transformed_data = (transformed_data - post_average_mean) / post_average_std
+            transformed_data = np.divide(
+                transformed_data - post_average_mean, post_average_std, where=post_average_std != 0)
 
         return transformed_data
 
     def __call__(self, loaded_data_tuple, metadata):
 
-        indicator_train = _indicator_from_examples(len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
+        indicator_train = None
+        if not self.train_on_all:
+            indicator_train = _indicator_from_examples(
+                len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
 
-        if self.metadata_response_group_by is not None:
-            if metadata is None or self.metadata_response_group_by not in metadata:
-                raise ValueError('metadata_response_group_by not found: {}'.format(
-                    self.metadata_response_group_by))
-
+        if self.metadata_example_group_by is not None:
+            if metadata is None or self.metadata_example_group_by not in metadata:
+                raise ValueError('metadata_example_group_by not found: {}'.format(self.metadata_example_group_by))
             data = np.copy(loaded_data_tuple.data)
-            group_by = metadata[self.metadata_response_group_by]
-            groups = np.unique(group_by)
-            for group in groups:
-                indicator_group = group_by == group
+            grouped_examples = _unsorted_group_by(
+                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
+            for group, group_examples in grouped_examples:
+                indicator_group = _indicator_from_examples(len(data), group_examples)
                 group_data = loaded_data_tuple.data[indicator_group]
-                group_indicator_train = indicator_train[indicator_group]
+                group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
                 group_data = self._standardize(group_data, group_indicator_train)
                 data[indicator_group] = group_data
         else:

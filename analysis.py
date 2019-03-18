@@ -396,9 +396,10 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
     cross_entropy=class_handler,
     binary_cross_entropy=(class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=class_handler,
-    sequence_cross_entropy=class_handler,
-    sequence_binary_cross_entropy=(class_handler, dict(is_binary=True)),
-    sequence_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
+    pooled_mse=regression_handler,
+    pooled_cross_entropy=class_handler,
+    pooled_binary_cross_entropy=(class_handler, dict(is_binary=True)),
+    pooled_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None):

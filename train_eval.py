@@ -80,6 +80,11 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
             batch[k] = batch[k].to(device)
         with torch.no_grad():
             predictions = model(batch)
+            # fetch data for groups
+            for k in predictions:
+                if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
+                    group_data = eval_data_set.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
+                    batch[k[0]] = group_data.to(device)
             loss_result = OrderedDict(
                 (h.field,
                  (h.weight, h(batch, predictions, return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
@@ -102,7 +107,8 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
                     current = np.nan
                 else:
                     current = data_loss
-                if data_key in settings.loss_tasks and not no_valid_inputs:
+                kind = eval_data_set.response_data_kind(data_key)
+                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
                     if loss is None:
                         loss = weight * current
                     else:
@@ -128,14 +134,19 @@ def _loss_weights(loss_count_dict):
     return dict(zip(keys, [w.item() for w in loss_weights]))
 
 
-def make_datasets(data: Mapping[str, PreparedData], which: Optional[Union[str, Sequence[str]]] = None):
+def make_datasets(
+        data: Mapping[str, PreparedData],
+        which: Optional[Union[str, Sequence[str]]] = None,
+        data_id_in_batch_keys: Optional[Sequence[str]] = None):
     if which is None:
         which = ['train', 'validation', 'test']
     max_sequence_length = max_example_sequence_length(data)
     is_single = isinstance(which, str)
     if is_single:
         which = [which]
-    result = [PreparedDataDataset(max_sequence_length, data, which=w) for w in which]
+    result = [
+        PreparedDataDataset(max_sequence_length, data, which=w, data_id_in_batch_keys=data_id_in_batch_keys)
+        for w in which]
     if is_single:
         result = result[0]
     return result
@@ -158,27 +169,30 @@ def train(
 
     token_level_prediction_shapes = OrderedDict()
     pooled_prediction_shapes = OrderedDict()
+    group_pooled_prediction_shapes = OrderedDict()
 
     loss_example_counts = dict()
     loss_handlers = list()
 
+    all_kinds = set([train_data_set.response_data_kind(k) for k in train_data_set.fields
+                     if train_data_set.response_data_kind(k) is not None])
+
     for k in settings.loss_tasks:
-        if k not in train_data_set.fields:
+        if k not in all_kinds and k not in train_data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
     for k in train_data_set.fields:
+        kind = train_data_set.response_data_kind(k) if train_data_set.is_response_data(k) else None
         if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
-            data_key = train_data_set.data_set_key_for_field(k)
-            if k in settings.loss_tasks:
-                if data_key is None:
-                    loss_example_counts[k] = len(train_data_set)
-                else:
-                    loss_example_counts[k] = train_data_set.num_examples_for_data_key(data_key)
+            if k in settings.loss_tasks or kind in settings.loss_tasks:
+                loss_example_counts[k] = train_data_set.num_examples_for_field(k)
             critic_settings = settings.get_critic(k, train_data_set)
             handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
             loss_handlers.append(handler)
             prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
-            if train_data_set.is_sequence(k):
+            if k in settings.grouped_prediction_keys or kind in settings.grouped_prediction_keys:
+                group_pooled_prediction_shapes[k] = prediction_shape
+            elif train_data_set.is_sequence(k):
                 token_level_prediction_shapes[k] = prediction_shape
             else:
                 pooled_prediction_shapes[k] = prediction_shape
@@ -204,7 +218,8 @@ def train(
         token_prediction_key_to_shape=token_level_prediction_shapes,
         token_level_input_key_to_shape=token_level_input_key_to_shape,
         pooled_prediction_key_to_shape=pooled_prediction_shapes,
-        pooled_input_key_to_shape=pooled_input_key_to_shape)
+        pooled_input_key_to_shape=pooled_input_key_to_shape,
+        group_pooled_prediction_key_to_shape=group_pooled_prediction_shapes)
 
     if settings.fp16:
         model.half()
@@ -269,6 +284,11 @@ def train(
                 for k in batch:
                     batch[k] = batch[k].to(device)
             predictions = model(batch)
+            # fetch data for groups
+            for k in predictions:
+                if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
+                    group_data = train_data_set.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
+                    batch[k[0]] = group_data.to(device)
             loss_dict = OrderedDict(
                 (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
             batch_size = len(batch['unique_id'])
@@ -281,7 +301,8 @@ def train(
             for data_key in loss_dict:
                 weight, data_loss = loss_dict[data_key]
                 no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
-                if data_key in settings.loss_tasks and not no_valid_inputs:
+                kind = train_data_set.response_data_kind(data_key)
+                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
                     current = weight * data_loss
                     if loss is None:
                         loss = current

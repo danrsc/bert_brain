@@ -113,8 +113,15 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             back_fill = field_spec.fill_value
         example_tensors[field] = [back_fill] * num_seen
 
-    def __init__(self, max_sequence_length, prepared_data, which='train',
-                 token_field='tokens', id_field='unique_id', data_index_field='data_ids'):
+    def __init__(
+            self,
+            max_sequence_length,
+            prepared_data,
+            which='train',
+            token_field='tokens',
+            id_field='unique_id',
+            data_index_field='data_ids',
+            data_id_in_batch_keys=None):
 
         self._field_specs = dict()
 
@@ -125,10 +132,15 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         self._response_data = OrderedDict()
         self._response_data_indices = OrderedDict()
         self._response_data_kind = OrderedDict()
+        self._response_data_example_counts = OrderedDict()
 
         self._data_id_to_tokens = dict()
         self._data_set_id_to_data_set_key = dict()
         self._field_to_data_set_key = dict()
+
+        self._data_id_in_batch_keys = None
+        if data_id_in_batch_keys is not None:
+            self._data_id_in_batch_keys = set(data_id_in_batch_keys)
 
         self._max_sequence_length = max_sequence_length
 
@@ -215,6 +227,11 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                             indices = self._field_specs[data_index_field].fill_value
                     if self._field_specs[data_index_field].is_sequence:
                         indices = _pad(indices, max_sequence_length, self._field_specs[data_index_field].fill_value)
+                    if np.any(indices >= 0):
+                        if response_data_key not in self._response_data_example_counts:
+                            self._response_data_example_counts[response_data_key] = 1
+                        else:
+                            self._response_data_example_counts[response_data_key] += 1
                     self._response_data_indices[response_data_key].append(indices)
 
                 for field in fields_as_none:
@@ -261,14 +278,18 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             raise KeyError('Invalid field: {}'.format(field))
         if field in self._example_tensors:
             size = self._example_tensors[field].size()
+            if self._field_specs[field].is_sequence:
+                return size[2:]
+            return size[1:]
         else:
             size = self._response_data[field].shape  # this is a numpy array, not a torch tensor
-        if self._field_specs[field].is_sequence:
-            return size[2:]
-        return size[1:]
+            # response data is flat regardless of whether the field is a sequence (until we access it during batching)
+            return size[1:]
 
     def response_data_kind(self, field):
-        return self._response_data_kind[field]
+        if field not in self._field_specs:
+            raise KeyError('Unknown field: {}'.format(field))
+        return self._response_data_kind[field] if field in self._response_data_kind else None
 
     def is_sequence(self, field):
         return self._field_specs[field].is_sequence
@@ -278,20 +299,32 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         # we assemble the response data JIT to reduce the memory footprint
         for response_data_key in self._response_data:
             response_data_indices = self._response_data_indices[response_data_key][item]
-            if self.is_sequence(response_data_key):
-                response_data = _filled_values(
-                    response_data_indices,
-                    self._response_data[response_data_key],
-                    self.max_sequence_length,
-                    self._field_specs[response_data_key].fill_value)
+            if response_data_key in self._data_id_in_batch_keys \
+                    or self._response_data_kind[response_data_key] in self._data_id_in_batch_keys:
+                result[(response_data_key, 'data_ids')] = torch.tensor(
+                    _pad(response_data_indices, self.max_sequence_length, value=-1), dtype=torch.long)
             else:
-                response_data = _at_most_one_value(
-                    response_data_indices,
-                    self._response_data[response_data_key],
-                    self._field_specs[response_data_key].fill_value)
-            result[response_data_key] = torch.tensor(
-                response_data, dtype=self._field_specs[response_data_key].tensor_dtype)
+                if self.is_sequence(response_data_key):
+                    response_data = _filled_values(
+                        response_data_indices,
+                        self._response_data[response_data_key],
+                        self.max_sequence_length,
+                        self._field_specs[response_data_key].fill_value)
+                else:
+                    response_data = _at_most_one_value(
+                        response_data_indices,
+                        self._response_data[response_data_key],
+                        self._field_specs[response_data_key].fill_value)
+                result[response_data_key] = torch.tensor(
+                    response_data, dtype=self._field_specs[response_data_key].tensor_dtype)
+
         return result
+
+    def get_data_for_data_ids(self, field, data_ids):
+        if field not in self._response_data:
+            raise KeyError('Field is not a response data field: {}'.format(field))
+        data_ids = np.asarray(data_ids)
+        return torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
 
     def __len__(self):
         for k in self._example_tensors:
@@ -326,5 +359,9 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             raise KeyError('Item does not exist in dataset: {}, {}'.format(data_set_key, item_id))
         return self._data_id_to_tokens[key]
 
-    def num_examples_for_data_key(self, data_key):
-        return self._num_examples[data_key]
+    def num_examples_for_field(self, field):
+        if field not in self._field_specs:
+            raise KeyError('Unknown field: {}'.format(field))
+        if field in self._response_data_example_counts:
+            return self._response_data_example_counts[field]
+        return len(self)
