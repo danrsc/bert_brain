@@ -90,7 +90,7 @@ class Aggregator:
         return self._counts[name]
 
 
-def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
+def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, compute_scalar=True):
     output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     losses = dict()
@@ -116,14 +116,23 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
                 if name not in losses:
                     losses[name] = output_result.critic_type
                 else:
-                    assert(losses[name] == output_result.critic_type)
+                    assert (losses[name] == output_result.critic_type)
                 run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
         for name in run_aggregated:
             handler = make_prediction_handler(losses[name])
             result_dict = handler(run_aggregated[name])
+            if compute_scalar:
+                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
             if name not in aggregated:
                 aggregated[name] = Aggregator()
             aggregated[name].update(result_dict, is_sequence=False)
+
+    return aggregated, count_runs
+
+
+def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
+
+    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs)
 
     metrics = list()
     for metric in output_order:
@@ -227,6 +236,11 @@ def regression_handler(aggregator):
         seq_r = list()
         for seq_target, seq_predictions in zip(np.split(target, splits), np.split(predictions, splits)):
             seq_r.append(nan_pearson(seq_target, seq_predictions))
+        seq_r = np.array(seq_r)
+        with warnings.catch_warnings():
+            # filter mean of empty slice
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            seq_r = np.nanmean(seq_r, axis=0)
     else:
         seq_r = np.nan
 
@@ -236,15 +250,19 @@ def regression_handler(aggregator):
     else:
         masked_target = target
 
-    variance = np.nanvar(masked_target)
-    mse = np.nanmean(np.square(predictions - masked_target))
+    variance = np.nanvar(masked_target, axis=0)
+    mse = np.nanmean(np.square(predictions - masked_target), axis=0)
 
-    return dict(
+    variance = np.where(variance < 1e-8, np.nan, variance)
+
+    result = dict(
         mse=mse,
         pove=1 - (mse / variance),
-        povu=mse / variance,
+        povu=(mse / variance),
         variance=variance,
-        r_seq=np.nanmean(seq_r))
+        r_seq=seq_r)
+
+    return result
 
 
 def bincount_axis(x, weights=None, minlength=None, axis=-1):
@@ -355,16 +373,14 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
 
         poma = accuracy / mode_accuracy
 
-        # for now, if there are multiple axes, we're just taking the mean across them, but maybe we should
-        # write each one out or do a visualization
         return dict(
-            xent=np.mean(cross_entropy),
-            acc=np.mean(accuracy),
-            macc=np.mean(mode_accuracy),
-            poma=np.mean(poma),
-            prec=np.mean(precision),
-            rec=np.mean(recall),
-            f1=np.mean(f1))
+            xent=cross_entropy,
+            acc=accuracy,
+            macc=mode_accuracy,
+            poma=poma,
+            prec=precision,
+            rec=recall,
+            f1=f1)
     else:
         is_hard_label = len(predictions.shape) > len(target.shape) or target.shape[-1] == 1
         log_sum = logsumexp(predictions, axis=-1)
