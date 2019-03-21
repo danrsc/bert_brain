@@ -119,7 +119,7 @@ def evaluate(
                         loss += weight * current
                 eval_results.add_result(data_key, global_step, current)
             if loss is not None:
-                total_loss += loss
+                total_loss += loss * len(batch['unique_id'])
                 total_count += len(batch['unique_id'])
 
     if total_count > 0:
@@ -319,7 +319,6 @@ def train(
             predictions = model(batch, train_data_set)
             loss_dict = OrderedDict(
                 (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
-            batch_size = len(batch['unique_id'])
 
             # free up memory
             del predictions
@@ -345,7 +344,7 @@ def train(
             del loss_dict
 
             if loss is not None:
-                logger.info('train: {}'.format(loss.item() / batch_size))
+                logger.info('train: {}'.format(loss.item()))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
