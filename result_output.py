@@ -23,6 +23,7 @@ class OutputResult:
     mask: Sequence[bool]
     prediction: Sequence[float]
     target: Sequence[float]
+    sequence_type: str
 
 
 def _num_tokens(tokens):
@@ -41,34 +42,45 @@ def write_predictions(output_path, all_results, data_set, settings):
     for key in all_results:
 
         critic_settings = settings.get_critic(key, data_set)
-        is_sequence = data_set.is_sequence(key)
 
         predictions = list()
         targets = list()
         masks = list()
         lengths = list()
+        target_lengths = list()
         data_keys = list()
         unique_ids = list()
         tokens = list()
 
+        sequence_type = None
         for detailed_result in all_results[key]:
+            if sequence_type is None:
+                sequence_type = detailed_result.sequence_type
+            else:
+                assert(sequence_type == detailed_result.sequence_type)
             current_tokens = data_set.get_tokens(detailed_result.data_set_id, detailed_result.unique_id)
             num_tokens = _num_tokens(current_tokens)
             tokens.extend(current_tokens[:num_tokens])
             unique_ids.append(detailed_result.unique_id)
             data_keys.append(data_set.data_set_key_for_id(detailed_result.data_set_id))
             lengths.append(num_tokens)
-            if is_sequence:
+            if sequence_type == 'sequence':
                 predictions.append(detailed_result.prediction[:num_tokens])
                 targets.append(detailed_result.target[:num_tokens])
                 if detailed_result.mask is not None:
                     masks.append(detailed_result.mask[:num_tokens])
                 else:
                     masks.append(None)
-            else:
+                target_lengths.append(num_tokens)
+            elif sequence_type == 'single':
                 predictions.append(np.expand_dims(detailed_result.prediction, 0))
                 targets.append(np.expand_dims(detailed_result.target, 0))
                 masks.append(np.expand_dims(detailed_result.mask, 0) if detailed_result.mask is not None else None)
+            elif sequence_type == 'grouped':
+                predictions.append(detailed_result.prediction)
+                targets.append(detailed_result.target)
+                masks.append(detailed_result.mask)
+                target_lengths.append(len(detailed_result.target))
 
         if any(m is None for m in masks) and any(m is not None for m in masks):
             raise ValueError('Unable to write a mixture of None and non-None masks')
@@ -77,11 +89,12 @@ def write_predictions(output_path, all_results, data_set, settings):
         output_dict['target_{}'.format(key)] = np.concatenate(targets)
         output_dict['masks_{}'.format(key)] = np.concatenate(masks) if masks[0] is not None else None
         output_dict['lengths_{}'.format(key)] = np.array(lengths)
+        output_dict['target_lengths_{}'.format(key)] = np.array(target_lengths)
         output_dict['data_keys_{}'.format(key)] = np.array(data_keys)
         output_dict['unique_ids_{}'.format(key)] = np.array(unique_ids)
         output_dict['tokens_{}'.format(key)] = np.array(tokens)
         output_dict['critic_{}'.format(key)] = critic_settings.critic_type
-        output_dict['is_sequence_{}'.format(key)] = is_sequence
+        output_dict['sequence_type_{}'.format(key)] = sequence_type
         if critic_settings.critic_kwargs is not None:
             for critic_key in critic_settings.critic_kwargs:
                 output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_settings.critic_kwargs[critic_key]
@@ -100,11 +113,12 @@ def read_predictions(output_path):
         target = npz['target_{}'.format(key)]
         masks = npz['masks_{}'.format(key)]
         lengths = npz['lengths_{}'.format(key)]
+        target_lengths = npz['target_lengths_{}'.format(key)]
         data_keys = npz['data_keys_{}'.format(key)]
         unique_ids = npz['unique_ids_{}'.format(key)]
         tokens = npz['tokens_{}'.format(key)]
         critic_type = npz['critic_{}'.format(key)].item()
-        is_sequence = npz['is_sequence_{}'.format(key)].item()
+        sequence_type = npz['sequence_type_{}'.format(key)].item()
         critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
         critic_kwargs = dict()
         for npz_key in npz.keys():
@@ -114,11 +128,17 @@ def read_predictions(output_path):
             critic_kwargs = None
 
         splits = np.cumsum(lengths)[:-1]
-        if is_sequence:
-            predictions = np.split(predictions, splits)
-            target = np.split(target, splits)
+        if sequence_type == 'sequence':
+            target_splits = splits
+        elif sequence_type == 'grouped':
+            target_splits = np.cumsum(target_lengths)[:-1]
+        else:
+            target_splits = None
+        if target_splits is not None:
+            predictions = np.split(predictions, target_splits)
+            target = np.split(target, target_splits)
             if masks is not None:
-                masks = np.split(masks, splits)
+                masks = np.split(masks, target_splits)
         data_keys = [k.item() for k in data_keys]
         unique_ids = [u.item() for u in unique_ids]
         tokens = np.split(tokens, splits)
@@ -128,7 +148,7 @@ def read_predictions(output_path):
         for idx in range(len(tokens)):
             results.append(OutputResult(
                 key, critic_type, critic_kwargs,
-                unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx]))
+                unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx], sequence_type))
 
         result[key] = results
 

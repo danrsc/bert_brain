@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 from bert_erp_common import SwitchRemember
-from bert_erp_datasets import DataKeys, DataPreparer
+from bert_erp_datasets import CorpusKeys, DataPreparer
 from bert_erp_settings import Settings
 from bert_erp_paths import Paths
 from train_eval import train, make_datasets
@@ -71,7 +71,7 @@ def run_variation(
             auxiliary_loss_tasks: Sequence[str],
             force_cache_miss: bool):
 
-    if settings.local_rank == -1 or settings.no_cuda:
+    if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not settings.no_cuda else "cpu")
         n_gpu = 1  # torch.cuda.device_count()
     else:
@@ -79,15 +79,15 @@ def run_variation(
         n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl')
-        if settings.fp16:
+        if settings.optimization_settings.fp16:
             logger.info("16-bits training currently not supported in distributed training")
-            settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
+            settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
     logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits trainiing: {}".format(
-        device, n_gpu, bool(settings.local_rank != -1), settings.fp16))
+        device, n_gpu, bool(settings.optimization_settings.local_rank != -1), settings.optimization_settings.fp16))
 
-    if settings.gradient_accumulation_steps < 1:
+    if settings.optimization_settings.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
-                            settings.gradient_accumulation_steps))
+                            settings.optimization_settings.gradient_accumulation_steps))
 
     # TODO: seems like this is taken care of below?
     # settings = replace(
@@ -95,7 +95,7 @@ def run_variation(
 
     def io_setup():
         temp_paths = Paths()
-        data_loader_ = temp_paths.make_data_loader(data_key_kwarg_dict=settings.data_key_kwargs)
+        corpus_loader_ = temp_paths.make_corpus_loader(data_key_kwarg_dict=settings.corpus_key_kwargs)
         hash_ = task_hash(loss_tasks)
         model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
         result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
@@ -105,13 +105,13 @@ def run_variation(
         if not os.path.exists(result_path_):
             os.makedirs(result_path_)
 
-        return data_loader_, result_path_, model_path_
+        return corpus_loader_, result_path_, model_path_
 
-    data_loader, result_path, model_path = io_setup()
+    corpus_loader, result_path, model_path = io_setup()
     loss_tasks = set(loss_tasks)
     loss_tasks.update(auxiliary_loss_tasks)
     settings = replace(settings, loss_tasks=loss_tasks)
-    data = data_loader.load(settings.task_data_keys, force_cache_miss=force_cache_miss)
+    data = corpus_loader.load(settings.corpus_keys, force_cache_miss=force_cache_miss)
     for index_run in trange(num_runs, desc='Run'):
 
         output_dir = os.path.join(result_path, 'run_{}'.format(index_run))
@@ -128,7 +128,7 @@ def run_variation(
         data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
-            data_id_in_batch_keys=settings.grouped_prediction_keys)
+            data_id_in_batch_keys=settings.data_id_in_batch_keys)
 
         train(settings, output_validation_path, output_test_path, train_data, validation_data, test_data, n_gpu, device)
 
@@ -150,12 +150,12 @@ def named_variations(name):
 
     if name == 'erp':
         training_variations = list(iterate_powerset(erp_tasks))
-        settings = Settings(task_data_keys=(DataKeys.ucl,))
+        settings = Settings(corpus_keys=(CorpusKeys.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'erp_joint':
         training_variations = [erp_tasks]
-        settings = Settings(task_data_keys=(DataKeys.ucl,))
+        settings = Settings(corpus_keys=(CorpusKeys.ucl,))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories':
@@ -163,27 +163,24 @@ def named_variations(name):
                                erp_tasks + ('ns_spr',),
                                ns_froi_tasks + ('ns_spr',),
                                erp_tasks + ns_froi_tasks + ('ns_spr',)]
-        settings = Settings(task_data_keys=(DataKeys.natural_stories, DataKeys.ucl))
+        settings = Settings(corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.ucl))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
-        settings = Settings(
-            task_data_keys=(DataKeys.natural_stories, DataKeys.ucl))
+        settings = Settings(corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.ucl))
         auxiliary_loss_tasks = {'input_head_location'}
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'number_agreement':
         agr = ('colorless', 'linzen_agree')
         training_variations = [agr, erp_tasks + agr, erp_tasks]
-        settings = Settings(
-            task_data_keys=(DataKeys.colorless_green, DataKeys.linzen_agreement, DataKeys.ucl))
+        settings = Settings(corpus_keys=(CorpusKeys.colorless_green, CorpusKeys.linzen_agreement, CorpusKeys.ucl))
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri':
         training_variations = [('hp_fmri_I',)]
-        settings = Settings(
-            task_data_keys=(DataKeys.harry_potter,))
+        settings = Settings(corpus_keys=(CorpusKeys.harry_potter,))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:

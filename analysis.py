@@ -33,7 +33,7 @@ class Aggregator:
         self._field_values = None
         self._counts = None
 
-    def update(self, result):
+    def update(self, result, is_sequence):
         if self._field_values is None:
             self._field_values = OrderedDict()
             self._counts = OrderedDict()
@@ -56,9 +56,12 @@ class Aggregator:
             elif np.isscalar(result[field]):
                 self._field_values[field].append(result[field])
                 self._counts[field].append(1)
-            else:
+            elif is_sequence:
                 self._field_values[field].extend(result[field])
                 self._counts[field].append(len(result[field]))
+            else:
+                self._field_values[field].append(result[field])
+                self._counts[field].append(1)
 
     def __contains__(self, item):
         return item in self._field_values
@@ -87,13 +90,21 @@ class Aggregator:
         return self._counts[name]
 
 
-def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
+def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, compute_scalar=True):
     output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     losses = dict()
+    count_runs = 0
+    has_warned = False
     for index_run in range(num_runs):
         run_aggregated = dict()
         validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+        if not os.path.exists(validation_npz_path):
+            if not has_warned:
+                print('Warning: results incomplete. Some output files not found')
+            has_warned = True
+            continue
+        count_runs += 1
         output_results_by_name = read_predictions(validation_npz_path)
         for name in output_results_by_name:
             if name not in training_variation and name not in aux_loss:
@@ -105,14 +116,23 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
                 if name not in losses:
                     losses[name] = output_result.critic_type
                 else:
-                    assert(losses[name] == output_result.critic_type)
-                run_aggregated[name].update(output_result)
+                    assert (losses[name] == output_result.critic_type)
+                run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
         for name in run_aggregated:
             handler = make_prediction_handler(losses[name])
             result_dict = handler(run_aggregated[name])
+            if compute_scalar:
+                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
             if name not in aggregated:
                 aggregated[name] = Aggregator()
-            aggregated[name].update(result_dict)
+            aggregated[name].update(result_dict, is_sequence=False)
+
+    return aggregated, count_runs
+
+
+def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
+
+    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs)
 
     metrics = list()
     for metric in output_order:
@@ -132,7 +152,7 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
             text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
 
-    print('Variation: {}'.format(', '.join(sorted(training_variation))))
+    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, ', '.join(sorted(training_variation))))
     write_text_grid_to_console(text_grid, width='tight')
     print('')
     print('')
@@ -141,8 +161,14 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
 def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
     output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     result = dict()
+    has_warned = False
     for index_run in range(num_runs):
         validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+        if not os.path.exists(validation_npz_path):
+            if not has_warned:
+                print('warning: results are incomplete. Some runs not found')
+            has_warned = True
+            continue
         output_results = np.load(validation_npz_path)
         for output_result in output_results:
             name = output_result.name
@@ -204,12 +230,19 @@ def regression_handler(aggregator):
     prediction_counts = np.array(aggregator.counts('prediction'))
     assert(np.array_equal(target_counts, prediction_counts))
 
-    splits = np.cumsum(target_counts)
+    splits = np.cumsum(target_counts)[:-1]
 
-    seq_r = list()
-    for seq_target, seq_predictions in zip(
-            np.split(target, splits[:-1]), np.split(predictions, splits[:-1])):
-        seq_r.append(nan_pearson(seq_target, seq_predictions))
+    if np.any(target_counts > 1):
+        seq_r = list()
+        for seq_target, seq_predictions in zip(np.split(target, splits), np.split(predictions, splits)):
+            seq_r.append(nan_pearson(seq_target, seq_predictions))
+        seq_r = np.array(seq_r)
+        with warnings.catch_warnings():
+            # filter mean of empty slice
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            seq_r = np.nanmean(seq_r, axis=0)
+    else:
+        seq_r = np.nan
 
     if len(mask) > 0:
         assert(len(mask) == len(target))
@@ -219,12 +252,17 @@ def regression_handler(aggregator):
 
     variance = np.nanvar(masked_target, axis=0)
     mse = np.nanmean(np.square(predictions - masked_target), axis=0)
-    return dict(
+
+    variance = np.where(variance < 1e-8, np.nan, variance)
+
+    result = dict(
         mse=mse,
         pove=1 - (mse / variance),
-        povu=mse / variance,
+        povu=(mse / variance),
         variance=variance,
-        r_seq=np.nanmean(seq_r, axis=0))
+        r_seq=seq_r)
+
+    return result
 
 
 def bincount_axis(x, weights=None, minlength=None, axis=-1):
@@ -396,10 +434,10 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
     cross_entropy=class_handler,
     binary_cross_entropy=(class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=class_handler,
-    pooled_mse=regression_handler,
-    pooled_cross_entropy=class_handler,
-    pooled_binary_cross_entropy=(class_handler, dict(is_binary=True)),
-    pooled_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
+    single_mse=regression_handler,
+    single_cross_entropy=class_handler,
+    single_binary_cross_entropy=(class_handler, dict(is_binary=True)),
+    single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None):

@@ -21,9 +21,9 @@ __all__ = [
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
     'NamedTargetStopWordAwareCrossEntropy',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
-    'NamedTargetPooledBinaryCrossEntropyWithLogits',
-    'NamedTargetPooledCrossEntropy',
-    'NamedTargetPooledSoftLabelCrossEntropy',
+    'NamedTargetSingleBinaryCrossEntropyWithLogits',
+    'NamedTargetSingleCrossEntropy',
+    'NamedTargetSingleSoftLabelCrossEntropy',
     'CriticMapping',
     'CriticKeys',
     'make_loss_handler']
@@ -192,6 +192,7 @@ class DetailedResult:
     mask: Optional[np.array]
     prediction: np.array
     target: np.array
+    sequence_type: str
     data_set_id: Optional[int] = None
     unique_id: Optional[int] = None
 
@@ -250,16 +251,38 @@ class _NamedTargetMaskedLoss:
         if return_detailed:
 
             example_indices = None
-            group_prediction_key = (self.field, 'example_indices')
+            group_prediction_key = (self.field, 'example_ids')
             if group_prediction_key in prediction_dict:
-                example_indices = prediction_dict[group_prediction_key]
+                example_indices = prediction_dict[group_prediction_key].detach().cpu().numpy()
 
             batch_mask = mask.detach().cpu().numpy()
             batch_predictions = predictions.detach().cpu().numpy()
             batch_target = target.detach().cpu().numpy()
-            batch_mask = np.split(batch_mask, len(batch_mask))
-            batch_predictions = np.split(batch_predictions, len(batch_predictions))
-            batch_target = np.split(batch_target, len(batch_target))
+            batch_mask = np.split(batch_mask, len(batch_mask)) if len(batch_mask) > 0 else batch_mask
+            batch_predictions = np.split(batch_predictions, len(batch_predictions)) \
+                if len(batch_predictions) > 0 else batch_predictions
+            batch_target = np.split(batch_target, len(batch_target)) if len(batch_target) > 0 else batch_target
+
+            sequence_type = 'sequence' if self._is_sequence_loss() else 'single'
+
+            if example_indices is not None:  # group by the example indices
+                sequence_type = 'grouped'
+                grouped = dict()
+                for m, p, t, ex in zip(batch_mask, batch_predictions, batch_target, example_indices):
+                    if ex not in grouped:
+                        grouped[ex] = (list(), list(), list())
+                    grouped[ex][0].append(np.expand_dims(m, 1))
+                    grouped[ex][1].append(np.expand_dims(p, 1))
+                    grouped[ex][2].append(np.expand_dims(t, 1))
+                batch_mask = list()
+                batch_predictions = list()
+                batch_target = list()
+                example_indices = [ex for ex in sorted(grouped)]
+                for ex in example_indices:
+                    batch_mask.append(np.concatenate(grouped[ex][0], axis=1))
+                    batch_predictions.append(np.concatenate(grouped[ex][1], axis=1))
+                    batch_target.append(np.concatenate(grouped[ex][2], axis=1))
+
             detailed_result = list()
             for idx, (example_mask, example_predictions, example_targets) in enumerate(zip(
                     batch_mask, batch_predictions, batch_target)):
@@ -271,11 +294,12 @@ class _NamedTargetMaskedLoss:
                 unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
-                        np.squeeze(example_mask, axis=0) == 1,  # convert to bool
-                        np.squeeze(example_predictions, axis=0),
-                        np.squeeze(example_targets, axis=0),
-                        data_set_id,
-                        unique_id))
+                        mask=np.squeeze(example_mask, axis=0) == 1,  # convert to bool
+                        prediction=np.squeeze(example_predictions, axis=0),
+                        target=np.squeeze(example_targets, axis=0),
+                        sequence_type=sequence_type,
+                        data_set_id=data_set_id,
+                        unique_id=unique_id))
             return result, detailed_result
         return result
 
@@ -284,6 +308,10 @@ class _NamedTargetMaskedLoss:
 
     def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
+
+    @classmethod
+    def _is_sequence_loss(cls):
+        return False
 
     def shape_adjust(self, shape):
         return shape
@@ -301,6 +329,10 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
 
     def _masked_loss(self, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
+
+    @classmethod
+    def _is_sequence_loss(cls):
+        return True
 
 
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
@@ -353,13 +385,13 @@ class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLos
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class NamedTargetPooledMSE(_NamedTargetMaskedLoss):
+class NamedTargetSingleMSE(_NamedTargetMaskedLoss):
 
     def _masked_loss(self, mask, predictions, target):
         return masked_squared_error(mask, predictions, target)
 
 
-class NamedTargetPooledCrossEntropy(_NamedTargetMaskedLoss):
+class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
 
     def __init__(self, field, num_classes, weight=1.):
         self.num_classes = num_classes
@@ -372,13 +404,13 @@ class NamedTargetPooledCrossEntropy(_NamedTargetMaskedLoss):
         return shape + (self.num_classes,)
 
 
-class NamedTargetPooledSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
+class NamedTargetSingleSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
 
     def _masked_loss(self, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
-class NamedTargetPooledBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
+class NamedTargetSingleBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
 
     def __init__(self, field, weight=1., pos_weight=None):
         super().__init__(field, weight)
@@ -399,13 +431,13 @@ class CriticMapping:
         metadata=dict(hidden_value=NamedTargetStopWordAwareBinaryCrossEntropyWithLogits))
     soft_label_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
-    pooled_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetPooledMSE))
-    pooled_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetPooledCrossEntropy))
-    pooled_binary_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetPooledBinaryCrossEntropyWithLogits))
-    pooled_soft_label_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetPooledSoftLabelCrossEntropy))
+    single_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMSE))
+    single_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSingleCrossEntropy))
+    single_binary_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSingleBinaryCrossEntropyWithLogits))
+    single_soft_label_cross_entropy: Any = dataclasses.field(
+        metadata=dict(hidden_value=NamedTargetSingleSoftLabelCrossEntropy))
 
 
 CriticKeys = CriticMapping(**dict((f.name, f.name) for f in dataclasses.fields(CriticMapping)))

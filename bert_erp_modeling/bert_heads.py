@@ -6,22 +6,26 @@ import torch
 from torch import nn
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel
 
+from bert_erp_modeling.utility_modules import GroupPool
+
 logger = logging.getLogger(__name__)
 
 
-__all__ = ['BertMultiHead']
+__all__ = ['BertMultiPredictionHead', 'KeyedLinear', 'KeyedGroupPooledLinear', 'MultiPredictionHead',
+           'BertOutputSupplement']
 
 
 class KeyedLinear(torch.nn.Module):
 
-    def __init__(self, is_sequence, input_size, prediction_key_to_shape):
+    def __init__(self, is_sequence, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
         super(KeyedLinear, self).__init__()
         self.is_sequence = is_sequence
         self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
         self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
-        self.linear = nn.Linear(input_size, sum(self.splits))
+        self.linear = nn.Linear(in_sequence_channels if self.is_sequence else in_pooled_channels, sum(self.splits))
 
-    def forward(self, x):
+    def forward(self, sequence_output, pooled_output, batch):
+        x = sequence_output if self.is_sequence else pooled_output
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()
@@ -35,173 +39,161 @@ class KeyedLinear(torch.nn.Module):
         return result
 
 
-class GroupPool(torch.nn.Module):
+class KeyedGroupPooledLinear(torch.nn.Module):
 
-    def forward(self, x, groupby):
+    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+        super().__init__()
+        self.group_pool = GroupPool()
+        self.linear = KeyedLinear(
+            is_sequence=False, in_channels=in_sequence_channels, prediction_key_to_shape=prediction_key_to_shape)
 
-        # first attach an example_id to the groups to ensure that we don't pool across examples in the batch
-
-        # array of shape (batch, sequence, 1) which gives identifies which example
-        example_ids = torch.arange(
-            groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
-        # -> (batch, sequence, 2): attach example_id to each group
-        groupby = torch.cat((groupby.view(groupby.size() + (1,)), example_ids), dim=2)
-
-        # -> (batch * sequence, 2)
-        groupby = groupby.view((groupby.size()[0] * groupby.size()[1], groupby.size()[2]))
-
-        # each group is a (group, example_id) tuple
-        groups, group_indices = torch.unique(groupby, return_inverse=True, dim=0)
-
-        # split the groups into the true groups and example_ids
-        example_ids = groups[:, 1]
-        groups = groups[:, 0]
-
-        # -> (batch * sequence, 1, 1, ..., 1)
-        group_indices = group_indices.view((x.size()[0] * x.size()[1],) + (1,) * (len(x.size()) - 2))
-
-        # -> (batch * sequence, n, m, ..., k)
-        group_indices = group_indices.repeat((1,) + x.size()[2:])
-
-        # -> (batch * sequence, n, m, ..., k)
-        x = x.view((x.size()[0] * x.size()[1],) + x.size()[2:])
-
-        pooled = torch.zeros((groups.size()[0],) + x.size()[1:], dtype=x.dtype, device=x.device)
-        pooled.scatter_add_(dim=0, index=group_indices, src=x)
-
-        # -> (batch * sequence)
-        group_indices = group_indices[:, 0]
-        counts = torch.zeros(groups.size()[0], dtype=x.dtype, device=x.device)
-        counts.scatter_add_(
-            dim=0, index=group_indices, src=torch.ones(len(group_indices), dtype=x.dtype, device=x.device))
-        counts = counts.view(counts.size() + (1,) * len(pooled.size()[1:]))
-        pooled = pooled / counts
-
-        # filter out groups < 0
-        indicator_valid = groups >= 0
-        pooled = pooled[indicator_valid]
-        groups = groups[indicator_valid]
-        example_ids = example_ids[indicator_valid]
-
-        return pooled, groups, example_ids
+    def forward(self, sequence_output, pooled_output, batch):
+        all_data_ids = [batch[(k, 'data_ids')] for k in self.prediction_key_to_shape]
+        for idx in range(1, len(all_data_ids)):
+            if not torch.equal(all_data_ids[0], all_data_ids[idx]):
+                raise ValueError('Inconsistent data_ids cannot be used within the same instance of FMRIHead')
+        data_ids = all_data_ids[0]
+        pooled, groups, example_ids = self.group_pool(sequence_output, data_ids)
+        result = self.linear(None, pooled, batch)
+        keys = [k for k in result]
+        for k in keys:
+            result[(k, 'data_ids')] = groups
+            result[(k, 'example_ids')] = example_ids
+        return result
 
 
-class BertMultiHead(BertPreTrainedModel):
+class BertOutputSupplement(torch.nn.Module):
 
-    @staticmethod
-    def _setup_linear_layer(hidden_size, prediction_key_to_shape, input_key_to_shape, which):
-        linear = None
-        if prediction_key_to_shape is not None and len(prediction_key_to_shape) > 0:
-            if input_key_to_shape is not None:
-                input_key_to_shape = OrderedDict(input_key_to_shape)
-                input_count = sum(int(np.prod(input_key_to_shape[k])) for k in input_key_to_shape)
-            else:
-                input_count = 0
+    def __init__(
+            self, in_channels, supplemental_dropout_prob, is_sequence_supplement, supplement_key_to_shape,
+            skip_dropout_keys=None):
+        super().__init__()
+        self.is_sequence_supplement = is_sequence_supplement
+        self.in_channels = in_channels
+        self.dropout = torch.nn.Dropout(supplemental_dropout_prob)
+        self.supplement_key_to_shape = OrderedDict()
+        if supplement_key_to_shape is not None:
+            self.supplement_key_to_shape.update(supplement_key_to_shape)
+        self.skip_dropout_keys = set()
+        if skip_dropout_keys is not None:
+            self.skip_dropout_keys.update(skip_dropout_keys)
 
-            logger.info('{} head active'.format(which))
-            linear = KeyedLinear(which == 'token', hidden_size + input_count, prediction_key_to_shape)
-        else:
-            logger.info('{} head inactive'.format(which))
-            if input_key_to_shape is not None and len(input_key_to_shape) > 0:
-                logger.warning('input_key_to_shape is not None, but {} prediction is inactive'.format(which))
-        return input_key_to_shape, linear
+    def supplement_channels(self):
+        return sum(int(np.prod(self.supplement_key_to_shape[k])) for k in self.supplement_key_to_shape)
+
+    def out_channels(self):
+        return self.in_channels + self.supplement_channels()
+
+    def forward(self, x, batch):
+        # we expect that dropout has already been applied to sequence_output / pooled_output
+        all_values = [x]
+        for key in self.supplement_key_to_shape:
+            values = batch[key]
+            shape_part = values.size()[:2] if self.is_sequence_supplement else values.size()[:1]
+            values = values.view(
+                shape_part + (int(np.prod(self.supplement_key_to_shape[key])),)).type(all_values[0].dtype)
+            if key not in self.skip_dropout_keys:
+                values = self.dropout(values)
+            all_values.append(values)
+        return torch.cat(all_values, dim=2 if self.is_sequence_supplement else 1)
+
+
+class MultiPredictionHead(torch.nn.Module):
+
+    def __init__(
+            self,
+            in_channels,
+            supplemental_dropout_prob,
+            prediction_head_settings,
+            token_supplemental_key_to_shape=None,
+            token_supplemental_skip_dropout_keys=None,
+            pooled_supplemental_key_to_shape=None,
+            pooled_supplemental_skip_dropout_keys=None):
+        super().__init__()
+
+        in_sequence_channels = in_channels
+        in_pooled_channels = in_channels
+        self.token_supplement = None
+        if token_supplemental_key_to_shape is not None and len(token_supplemental_key_to_shape) > 0:
+            self.token_supplement = BertOutputSupplement(
+                in_channels,
+                supplemental_dropout_prob=supplemental_dropout_prob,
+                is_sequence_supplement=True,
+                supplement_key_to_shape=token_supplemental_key_to_shape,
+                skip_dropout_keys=token_supplemental_skip_dropout_keys)
+            in_sequence_channels = self.token_supplement.out_channels()
+        self.pooled_supplement = None
+        if pooled_supplemental_key_to_shape is not None and len(pooled_supplemental_key_to_shape) > 0:
+            self.pooled_supplement = BertOutputSupplement(
+                in_channels,
+                supplemental_dropout_prob=supplemental_dropout_prob,
+                is_sequence_supplement=False,
+                supplement_key_to_shape=pooled_supplemental_key_to_shape,
+                skip_dropout_keys=pooled_supplemental_skip_dropout_keys)
+            in_pooled_channels = self.pooled_supplement.out_channels()
+
+        self.prediction_heads = torch.nn.ModuleList(modules=[
+            ph[0].head_type(
+                in_sequence_channels=in_sequence_channels,
+                in_pooled_channels=in_pooled_channels,
+                prediction_key_to_shape=ph[1],
+                **ph[0].kwargs)
+            for ph in prediction_head_settings])
+
+    def forward(self, sequence_output, pooled_output, batch, dataset):
+        if self.token_supplement is not None:
+            sequence_output = self.token_supplement(sequence_output, batch)
+        if self.pooled_supplement is not None:
+            pooled_output = self.pooled_supplement(pooled_output, batch)
+
+        predictions = OrderedDict()
+        for head in self.prediction_heads:
+            head_predictions = head(sequence_output, pooled_output, batch)
+            for k in head_predictions:
+                if k in predictions:
+                    raise ValueError('multiple predictions made for key: {}'.format(k))
+                else:
+                    predictions[k] = head_predictions[k]
+
+        # fetch the data that was too expensive to put in batch as padded
+        for k in predictions:
+            if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
+                group_data = dataset.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
+                batch[k[0]] = group_data.to(predictions[k].device)
+
+        return predictions
+
+
+class BertMultiPredictionHead(BertPreTrainedModel):
 
     def __init__(
             self,
             config,
-            token_prediction_key_to_shape=None,
-            token_level_input_key_to_shape=None,
-            pooled_prediction_key_to_shape=None,
-            pooled_input_key_to_shape=None,
-            group_pooled_prediction_key_to_shape=None):
+            prediction_head_settings,
+            token_supplemental_key_to_shape=None,
+            token_supplemental_skip_dropout_keys=None,
+            pooled_supplemental_key_to_shape=None,
+            pooled_supplemental_skip_dropout_keys=None):
 
-        has_prediction = False
-        for p_to_s in (
-                token_prediction_key_to_shape, pooled_prediction_key_to_shape, group_pooled_prediction_key_to_shape):
-            if p_to_s is not None and len(p_to_s) > 0:
-                has_prediction = True
-                break
-
-        if not has_prediction:
-            raise ValueError('At least one of token_prediction_key_to_shape, pooled_prediction_key_to_shape, '
-                             'and group_pooled_prediction_key_to_shape must be non-empty')
-
-        super(BertMultiHead, self).__init__(config)
+        super(BertMultiPredictionHead, self).__init__(config)
         self.bert = BertModel(config)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-        self.token_level_input_key_to_shape, self.token_linear = BertMultiHead._setup_linear_layer(
-            config.hidden_size, token_prediction_key_to_shape, token_level_input_key_to_shape, 'token')
-        self.pooled_input_key_to_shape, self.pooled_linear = BertMultiHead._setup_linear_layer(
-            config.hidden_size, pooled_prediction_key_to_shape, pooled_input_key_to_shape, 'pooled')
-        self.group_pool = None
-        self.group_pooled_linear = None
-        if group_pooled_prediction_key_to_shape is not None and len(group_pooled_prediction_key_to_shape) > 0:
-            self.group_pool = GroupPool()
-            self.group_pooled_linear = torch.nn.ModuleDict()
-            for key in group_pooled_prediction_key_to_shape:
-                self.group_pooled_linear[key] = KeyedLinear(
-                    False, config.hidden_size, OrderedDict([(key, group_pooled_prediction_key_to_shape[key])]))
+        self.prediction_head = MultiPredictionHead(
+            config.hidden_size,
+            config.hidden_dropout_prob,
+            prediction_head_settings,
+            token_supplemental_key_to_shape,
+            token_supplemental_skip_dropout_keys,
+            pooled_supplemental_key_to_shape,
+            pooled_supplemental_skip_dropout_keys)
         self.apply(self.init_bert_weights)
 
-    def forward(self, batch):
+    def forward(self, batch, dataset):
         sequence_output, pooled_output = self.bert(
             batch['token_ids'],
             token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
             attention_mask=batch['mask'] if 'mask' in batch else None,
             output_all_encoded_layers=False)
-
-        if self.token_linear is not None or self.group_pooled_linear is not None:
-            sequence_output = self.dropout(sequence_output)
-        if self.pooled_linear is not None:
-            pooled_output = self.dropout(pooled_output)
-
-        token_input = sequence_output
-        if self.token_level_input_key_to_shape is not None:
-            all_values = [sequence_output]
-            for key in self.token_level_input_key_to_shape:
-                values = batch[key]
-                values = values.view(
-                    values.size()[:2] + (int(np.prod(self.token_level_input_key_to_shape[key])),))
-                all_values.append(self.dropout(values.type(sequence_output.dtype)))
-            token_input = torch.cat(all_values, dim=2)
-
-        pooled_input = pooled_output
-        if self.pooled_input_key_to_shape is not None:
-            all_values = [pooled_output]
-            for key in self.pooled_input_key_to_shape:
-                values = batch[key]
-                values = values.view(values.size()[:1] + (int(np.prod(self.pooled_input_key_to_shape[key])),))
-                all_values.append(self.dropout(values.type(pooled_output.dtype)))
-            pooled_input = torch.cat(all_values, dim=1)
-
-        group_pool_predictions = None
-        if self.group_pooled_linear is not None:
-            group_pool_predictions = OrderedDict()
-            for key in self.group_pooled_linear:
-                grouped_input, groups, example_indices = self.group_pool(sequence_output, batch[(key, 'data_ids')])
-                group_pool_predictions[key] = self.group_pooled_linear[key](grouped_input)[key]
-                group_pool_predictions[(key, 'data_ids')] = groups
-                group_pool_predictions[(key, 'example_indices')] = example_indices
-
-        token_predictions = self.token_linear(token_input) if self.token_linear is not None else None
-        pooled_predictions = self.pooled_linear(pooled_input) if self.pooled_linear is not None else None
-
-        predictions = OrderedDict()
-        if token_predictions is not None:
-            for k in token_predictions:
-                if k in predictions:
-                    raise ValueError('multiple predictions made for key: {}'.format(k))
-                predictions[k] = token_predictions[k]
-        if pooled_predictions is not None:
-            for k in pooled_predictions:
-                if k in predictions:  # this key is also in token_predictions; add the two
-                    predictions[k] = predictions[k] + pooled_predictions[k].unsqueeze(dim=1)
-                else:
-                    predictions[k] = pooled_predictions[k]
-        if group_pool_predictions is not None:
-            for k in group_pool_predictions:
-                if k in predictions:
-                    raise ValueError('multiple predictions made for key: {}'.format(k))
-                predictions[k] = group_pool_predictions[k]
-
-        return predictions
+        sequence_output = self.dropout(sequence_output)
+        pooled_output = self.dropout(pooled_output)
+        return self.prediction_head(sequence_output, pooled_output, batch, dataset)
