@@ -299,8 +299,9 @@ class PreparedDataDataset(torch.utils.data.Dataset):
         # we assemble the response data JIT to reduce the memory footprint
         for response_data_key in self._response_data:
             response_data_indices = self._response_data_indices[response_data_key][item]
-            if response_data_key in self._data_id_in_batch_keys \
-                    or self._response_data_kind[response_data_key] in self._data_id_in_batch_keys:
+            if self._data_id_in_batch_keys is not None and (
+                    response_data_key in self._data_id_in_batch_keys
+                    or self._response_data_kind[response_data_key] in self._data_id_in_batch_keys):
                 result[(response_data_key, 'data_ids')] = torch.tensor(
                     _pad(response_data_indices, self.max_sequence_length, value=-1), dtype=torch.long)
             else:

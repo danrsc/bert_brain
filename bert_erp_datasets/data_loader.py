@@ -16,7 +16,7 @@ from .harry_potter import HarryPotterCorpus
 from .colorless_green import ColorlessGreenCorpus, LinzenAgreementCorpus
 
 
-__all__ = ['DataLoader', 'DataKeys']
+__all__ = ['CorpusLoader', 'CorpusKeys']
 
 
 def _save_to_cache(cache_path, data, kwargs):
@@ -328,7 +328,7 @@ def _populate_default_field_specs(raw_data):
 
 
 @dataclasses.dataclass(frozen=True)
-class _DataKeys:
+class _CorpusKeys:
     geco: str
     bnc: str
     harry_potter: str
@@ -341,10 +341,10 @@ class _DataKeys:
     linzen_agreement: str
 
 
-DataKeys = _DataKeys(**dict((f.name, f.name) for f in dataclasses.fields(_DataKeys)))
+CorpusKeys = _CorpusKeys(**dict((f.name, f.name) for f in dataclasses.fields(_CorpusKeys)))
 
 
-class DataLoader(object):
+class CorpusLoader(object):
 
     def __init__(
             self,
@@ -363,7 +363,7 @@ class DataLoader(object):
             proto_roles_prop_bank_path,
             natural_stories_path,
             linzen_agreement_path,
-            data_key_kwarg_dict=None):
+            corpus_key_kwarg_dict=None):
         """
         This object knows how to load data, and stores settings that should be invariant across calls to load
         Args:
@@ -381,32 +381,32 @@ class DataLoader(object):
                 see https://github.com/UniversalDependencies/UD_English-EWT
             proto_roles_english_web_path: The path to the labels for semantic proto roles for v1.2 of
                 English Web universal dependencies. See http://decomp.io/data/
-            data_key_kwarg_dict: A dictionary keyed by Dataset key (e.g. DataManager.harry_potter), and values
-                which are themselves dictionaries. The values are passed as keyword arguments to the underlying load
-                functions, e.g.
+            corpus_key_kwarg_dict: A dictionary keyed by a CorpusKey (e.g. CorpusKey.harry_potter), and values
+                which are themselves dictionaries. These keyword arguments are passed to the underlying Corpus type
+                when it is constructed, e.g.
                 kwargs = {}
-                if DataManager.harry_potter in self.data_key_kwarg_dict:
-                    kwargs = data_key_kwarg_dict[DataManager.harry_potter]
-                result = harry_potter_data(self.harry_potter_path, numerical_tokens, start_tokens, **kwargs)
+                if CorpusKey.harry_potter in self.corpus_key_kwarg_dict:
+                    kwargs = corpus_key_kwarg_dict[CorpusKey.harry_potter]
+                corpus = HarryPotterCorpus(harry_potter_path, **kwargs)
         """
 
         def _get_kwargs(data_key):
-            if data_key_kwarg_dict is None \
-                    or data_key not in data_key_kwarg_dict \
-                    or data_key_kwarg_dict[data_key] is None:
+            if corpus_key_kwarg_dict is None \
+                    or data_key not in corpus_key_kwarg_dict \
+                    or corpus_key_kwarg_dict[data_key] is None:
                 return {}
-            return data_key_kwarg_dict[data_key]
+            return corpus_key_kwarg_dict[data_key]
 
         # additional corpora exist in ulmfit code (thus the extra paths), but haven't migrated them over yet
         self.corpora = {
-            DataKeys.ucl: UclCorpus(frank_2013_eye_path, frank_2015_erp_path, **_get_kwargs(DataKeys.ucl)),
-            DataKeys.natural_stories: NaturalStoriesCorpus(
-                natural_stories_path, **_get_kwargs(DataKeys.natural_stories)),
-            DataKeys.harry_potter: HarryPotterCorpus(harry_potter_path, **_get_kwargs(DataKeys.harry_potter)),
-            DataKeys.colorless_green: ColorlessGreenCorpus(
-                english_web_universal_dependencies_v_2_3_path, **_get_kwargs(DataKeys.colorless_green)),
-            DataKeys.linzen_agreement: LinzenAgreementCorpus(
-                linzen_agreement_path, **_get_kwargs(DataKeys.linzen_agreement))
+            CorpusKeys.ucl: UclCorpus(frank_2013_eye_path, frank_2015_erp_path, **_get_kwargs(CorpusKeys.ucl)),
+            CorpusKeys.natural_stories: NaturalStoriesCorpus(
+                natural_stories_path, **_get_kwargs(CorpusKeys.natural_stories)),
+            CorpusKeys.harry_potter: HarryPotterCorpus(harry_potter_path, **_get_kwargs(CorpusKeys.harry_potter)),
+            CorpusKeys.colorless_green: ColorlessGreenCorpus(
+                english_web_universal_dependencies_v_2_3_path, **_get_kwargs(CorpusKeys.colorless_green)),
+            CorpusKeys.linzen_agreement: LinzenAgreementCorpus(
+                linzen_agreement_path, **_get_kwargs(CorpusKeys.linzen_agreement))
         }
 
         # if key == DataLoader.geco:
@@ -429,7 +429,7 @@ class DataLoader(object):
         #         **kwargs)
 
         # need to keep these for checking the cache
-        self._data_key_kwarg_dict = dict(data_key_kwarg_dict)
+        self._corpus_key_kwarg_dict = dict(corpus_key_kwarg_dict) if corpus_key_kwarg_dict is not None else None
 
         self.bert_pre_trained_model_name = bert_pre_trained_model_name
         self.cache_path = cache_path
@@ -458,8 +458,8 @@ class DataLoader(object):
             print('Loading {}...'.format(key), end='', flush=True)
 
             kwargs = {}
-            if self._data_key_kwarg_dict is not None and key in self._data_key_kwarg_dict:
-                kwargs = self._data_key_kwarg_dict[key]
+            if self._corpus_key_kwarg_dict is not None and key in self._corpus_key_kwarg_dict:
+                kwargs = self._corpus_key_kwarg_dict[key]
 
             cached = _load_from_cache(cache_path, kwargs, force_cache_miss)
 

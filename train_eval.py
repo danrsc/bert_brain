@@ -11,8 +11,8 @@ from torch.utils.data import SequentialSampler, DistributedSampler, DataLoader a
 from tqdm import tqdm, trange
 
 from bert_erp_datasets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
-from bert_erp_modeling import make_loss_handler, BertMultiHead
-from bert_erp_settings import Settings
+from bert_erp_modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
+from bert_erp_settings import Settings, PredictionHeadSettings
 from result_output import write_predictions
 
 
@@ -53,14 +53,23 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
     return is_nan
 
 
-def evaluate(settings, model, loss_handlers, device, global_step, eval_results, eval_data_set, return_detailed=False):
+def evaluate(
+        settings: Settings,
+        model,
+        loss_handlers,
+        device,
+        global_step,
+        eval_results,
+        eval_data_set,
+        return_detailed=False):
 
-    if settings.local_rank == -1:
+    if settings.optimization_settings.local_rank == -1:
         eval_sampler = SequentialSampler(eval_data_set)
     else:
         eval_sampler = DistributedSampler(eval_data_set)
     eval_data_loader = TorchDataLoader(
-        eval_data_set, sampler=eval_sampler, batch_size=settings.predict_batch_size, collate_fn=collate_fn)
+        eval_data_set,
+        sampler=eval_sampler, batch_size=settings.optimization_settings.predict_batch_size, collate_fn=collate_fn)
 
     model.eval()
     all_results = OrderedDict()
@@ -79,12 +88,7 @@ def evaluate(settings, model, loss_handlers, device, global_step, eval_results, 
         for k in batch:
             batch[k] = batch[k].to(device)
         with torch.no_grad():
-            predictions = model(batch)
-            # fetch data for groups
-            for k in predictions:
-                if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
-                    group_data = eval_data_set.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
-                    batch[k[0]] = group_data.to(device)
+            predictions = model(batch, eval_data_set)
             loss_result = OrderedDict(
                 (h.field,
                  (h.weight, h(batch, predictions, return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
@@ -152,6 +156,17 @@ def make_datasets(
     return result
 
 
+def _raise_if_head_settings_inconsistent(head_a, head_b):
+    if head_a.head_type != head_b.head_type:
+        raise ValueError('Inconsistent types in prediction head settings with same key: {}'.format(head_b.key))
+    if len(head_a.kwargs) != len(head_b.kwargs):
+        raise ValueError('Inconsistent kwargs in prediction head settings with same key: {}'.format(head_b.key))
+    for kwarg in head_a.kwargs:
+        if kwarg not in head_b.kwargs \
+                or head_a.kwargs[kwarg] != head_b.kwargs[kwarg]:
+            raise ValueError('Inconsistent kwargs in prediction head settings with same key: {}'.format(head_b.key))
+
+
 def train(
         settings: Settings,
         output_validation_path: str,
@@ -164,12 +179,8 @@ def train(
 
     num_train_steps = int(
         len(train_data_set) /
-        settings.train_batch_size /
-        settings.gradient_accumulation_steps * settings.num_train_epochs)
-
-    token_level_prediction_shapes = OrderedDict()
-    pooled_prediction_shapes = OrderedDict()
-    group_pooled_prediction_shapes = OrderedDict()
+        settings.optimization_settings.train_batch_size /
+        settings.optimization_settings.gradient_accumulation_steps * settings.optimization_settings.num_train_epochs)
 
     loss_example_counts = dict()
     loss_handlers = list()
@@ -181,60 +192,81 @@ def train(
         if k not in all_kinds and k not in train_data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
+    prediction_heads = dict()
     for k in train_data_set.fields:
         kind = train_data_set.response_data_kind(k) if train_data_set.is_response_data(k) else None
+        corpus_key = train_data_set.data_set_key_for_field(k)
         if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
             if k in settings.loss_tasks or kind in settings.loss_tasks:
                 loss_example_counts[k] = train_data_set.num_examples_for_field(k)
             critic_settings = settings.get_critic(k, train_data_set)
             handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
             loss_handlers.append(handler)
+
             prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
-            if k in settings.grouped_prediction_keys or kind in settings.grouped_prediction_keys:
-                group_pooled_prediction_shapes[k] = prediction_shape
-            elif train_data_set.is_sequence(k):
-                token_level_prediction_shapes[k] = prediction_shape
+            prediction_head_settings = None
+            if k in settings.prediction_heads:
+                prediction_head_settings = settings.prediction_heads[k]
+            elif kind in settings.prediction_heads:
+                prediction_head_settings = settings.prediction_heads[kind]
+            elif corpus_key in settings.prediction_heads:
+                prediction_head_settings = settings.prediction_heads[corpus_key]
+
+            if prediction_head_settings is None:
+                if train_data_set.is_sequence(k):
+                    prediction_head_settings = PredictionHeadSettings(
+                        '__default_sequence__', KeyedLinear, dict(is_sequence=True))
+                else:
+                    prediction_head_settings = PredictionHeadSettings(
+                        '__default_pooled__', KeyedLinear, dict(is_sequence=False))
+
+            if prediction_head_settings.key not in prediction_heads:
+                prediction_heads[prediction_head_settings.key] = (prediction_head_settings, OrderedDict())
             else:
-                pooled_prediction_shapes[k] = prediction_shape
+                _raise_if_head_settings_inconsistent(
+                    prediction_heads[prediction_head_settings.key][0], prediction_head_settings)
+            prediction_heads[prediction_head_settings.key][1][k] = prediction_shape
+
+    prediction_heads = [prediction_heads[k] for k in prediction_heads]
 
     loss_weights = _loss_weights(loss_example_counts)
     for loss_handler in loss_handlers:
         if loss_handler.field in loss_weights:
             loss_handler.weight = loss_weights[loss_handler.field]
 
-    token_level_input_key_to_shape = OrderedDict()
-    pooled_input_key_to_shape = OrderedDict()
+    token_supplemental_key_to_shape = OrderedDict()
+    pooled_supplemental_key_to_shape = OrderedDict()
 
     for k in train_data_set.fields:
-        if k in settings.additional_input_fields:
+        if k in settings.supplemental_fields:
             if train_data_set.is_sequence(k):
-                token_level_input_key_to_shape[k] = train_data_set.value_shape(k)
+                token_supplemental_key_to_shape[k] = train_data_set.value_shape(k)
             else:
-                pooled_input_key_to_shape[k] = train_data_set.value_shape(k)
+                pooled_supplemental_key_to_shape[k] = train_data_set.value_shape(k)
 
     # Prepare model
-    model = BertMultiHead.from_pretrained(
+    model = BertMultiPredictionHead.from_pretrained(
         settings.bert_model,
-        token_prediction_key_to_shape=token_level_prediction_shapes,
-        token_level_input_key_to_shape=token_level_input_key_to_shape,
-        pooled_prediction_key_to_shape=pooled_prediction_shapes,
-        pooled_input_key_to_shape=pooled_input_key_to_shape,
-        group_pooled_prediction_key_to_shape=group_pooled_prediction_shapes)
+        prediction_head_settings=prediction_heads,
+        token_supplemental_key_to_shape=token_supplemental_key_to_shape,
+        pooled_supplemental_key_to_shape=pooled_supplemental_key_to_shape)
 
-    if settings.fp16:
+    if settings.optimization_settings.fp16:
         model.half()
     model.to(device)
-    if settings.local_rank != -1:
+    if settings.optimization_settings.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[settings.local_rank], output_device=settings.local_rank)
+            model,
+            device_ids=[settings.optimization_settings.local_rank],
+            output_device=settings.optimization_settings.local_rank)
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
-    if settings.fp16:
+    if settings.optimization_settings.fp16:
         param_optimizer = [(n, param.clone().detach().to('cpu').float().requires_grad_())
                            for n, param in model.named_parameters()]
-    elif settings.optimize_on_cpu:
+    elif settings.optimization_settings.optimize_on_cpu:
         param_optimizer = [(n, param.clone().detach().to('cpu').requires_grad_())
                            for n, param in model.named_parameters()]
     else:
@@ -244,8 +276,8 @@ def train(
         {'params': [p for n, p in param_optimizer if n not in no_decay], 'weight_decay_rate': 0.01},
         {'params': [p for n, p in param_optimizer if n in no_decay], 'weight_decay_rate': 0.0}]
     optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr=settings.learning_rate,
-                         warmup=settings.warmup_proportion,
+                         lr=settings.optimization_settings.learning_rate,
+                         warmup=settings.optimization_settings.warmup_proportion,
                          t_total=num_train_steps)
 
     global_step = 0
@@ -255,20 +287,21 @@ def train(
     logger.info("  Num orig examples = %d", len(train_data_set))
     # for now we set max_sequence_length so these are never split
     logger.info("  Num split examples = %d", len(train_data_set))
-    logger.info("  Batch size = %d", settings.train_batch_size)
+    logger.info("  Batch size = %d", settings.optimization_settings.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
 
-    if settings.local_rank == -1:
+    if settings.optimization_settings.local_rank == -1:
         train_sampler = RandomSampler(train_data_set)
     else:
         train_sampler = DistributedSampler(train_data_set)
     train_data_loader = TorchDataLoader(
-        train_data_set, sampler=train_sampler, batch_size=settings.train_batch_size, collate_fn=collate_fn)
+        train_data_set,
+        sampler=train_sampler, batch_size=settings.optimization_settings.train_batch_size, collate_fn=collate_fn)
 
     if settings.show_epoch_progress:
-        epoch_range = trange(int(settings.num_train_epochs), desc="Epoch")
+        epoch_range = trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch")
     else:
-        epoch_range = range(int(settings.num_train_epochs))
+        epoch_range = range(int(settings.optimization_settings.num_train_epochs))
 
     for _ in epoch_range:
 
@@ -283,12 +316,7 @@ def train(
             if n_gpu == 1:
                 for k in batch:
                     batch[k] = batch[k].to(device)
-            predictions = model(batch)
-            # fetch data for groups
-            for k in predictions:
-                if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
-                    group_data = train_data_set.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
-                    batch[k[0]] = group_data.to(device)
+            predictions = model(batch, train_data_set)
             loss_dict = OrderedDict(
                 (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
             batch_size = len(batch['unique_id'])
@@ -320,17 +348,17 @@ def train(
                 logger.info('train: {}'.format(loss.item() / batch_size))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
-                if settings.fp16 and settings.loss_scale != 1.0:
+                if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
                     # rescale loss for fp16 training
                     # see https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html
                     loss = loss * settings.loss_scale
-                if settings.gradient_accumulation_steps > 1:
-                    loss = loss / settings.gradient_accumulation_steps
+                if settings.optimization_settings.gradient_accumulation_steps > 1:
+                    loss = loss / settings.optimization_settings.gradient_accumulation_steps
                 loss.backward()
 
-            if (step + 1) % settings.gradient_accumulation_steps == 0:
-                if settings.fp16 or settings.optimize_on_cpu:
-                    if settings.fp16 and settings.loss_scale != 1.0:
+            if (step + 1) % settings.optimization_settings.gradient_accumulation_steps == 0:
+                if settings.optimization_settings.fp16 or settings.optimization_settings.optimize_on_cpu:
+                    if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
                         # scale down gradients for fp16 training
                         for param in model.parameters():
                             param.grad.data = param.grad.data / settings.loss_scale
@@ -359,7 +387,7 @@ def train(
     logger.info("***** Running predictions *****")
     logger.info("  Num orig examples = %d", len(validation_data_set))
     logger.info("  Num split examples = %d", len(validation_data_set))
-    logger.info("  Batch size = %d", settings.predict_batch_size)
+    logger.info("  Batch size = %d", settings.optimization_settings.predict_batch_size)
 
     if len(validation_data_set) > 0:
         all_validation = evaluate(

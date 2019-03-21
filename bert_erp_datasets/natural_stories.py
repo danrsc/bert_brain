@@ -5,13 +5,14 @@ from dataclasses import dataclass
 from collections import OrderedDict
 import dataclasses
 from functools import partial
+from typing import Sequence, Optional
 
 import numpy as np
 from scipy.io import loadmat
 
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, get_combined_sentence_examples_for_fmri_context
 from .spacy_token_meta import make_tokenizer_model
-from .input_features import RawData, KindData, ResponseKind, split_data
+from .input_features import RawData, KindData, ResponseKind
 from .praat_textgrid import TextGrid
 
 
@@ -269,26 +270,96 @@ def _read_codings(directory_path):
 
 class NaturalStoriesCorpus(CorpusBase):
 
-    def __init__(self, path, froi_subjects=None, include_reaction_times=True):
+    def __init__(
+            self,
+            path: str,
+            include_reaction_times: bool = True,
+            group_reaction_time_sentences_like_froi: bool = False,
+            froi_subjects: Optional[Sequence[str]] = None,
+            froi_skip_start_trs: int = 0,
+            froi_skip_end_trs: int = 0,
+            froi_window_size_features: float = 8.,
+            froi_min_duration_target: float = 7.8):
+        """
+
+        Args:
+            path: The path to the directory where the data is stored
+            include_reaction_times: Whether to include self-paced reading times
+            group_reaction_time_sentences_like_froi: If False, examples for reaction times are one sentence each.
+                If True, then examples are created as they would be for fROIs, i.e. including sentences as required by
+                the froi_window_size_features parameter
+            froi_subjects: Which subjects' data to load for fROIs. None will cause all subjects' data to load. An
+                empty list can be provided to cause fROI loading to be skipped.
+            froi_skip_start_trs: The number of TRs to remove from the beginning of each fMRI run, since the first few
+                TRs can be problematic
+            froi_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
+                problematic
+            froi_window_size_features: The duration, in seconds, of the window of time preceding a TR from which to
+                choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
+                which occurred with tr_time > word_time >= tr_time - 8 will be used to predict the TR.
+            froi_min_duration_target: The minimum duration, in seconds, of the time between the earliest word used to
+                predict a TR and the occurrence of the TR required for the TR to be a legitimate target. For example,
+                if this is set to 7.5, then letting the time of the earliest word occurring in the
+                fmri_window_size_features seconds before the TR be min_word_time, if tr_time - min_word_time <
+                fmri_min_duration_target, the TR is not is not used for training or evaluation.
+        """
         self.path = path
-        self.froi_subjects = froi_subjects
         self.include_reaction_times = include_reaction_times
+        self.group_reaction_time_sentences_like_froi = group_reaction_time_sentences_like_froi
+        self.froi_subjects = froi_subjects
+        self.froi_skip_start_trs = froi_skip_start_trs
+        self.froi_skip_end_trs = froi_skip_end_trs
+        self.froi_window_size_features = froi_window_size_features
+        self.froi_min_duration_target = froi_min_duration_target
 
     def _load(self, example_manager: CorpusExampleUnifier):
+
         data = OrderedDict()
+        story_ids = list()
+
+        froi_examples = None
+        if ((self.include_reaction_times and self.group_reaction_time_sentences_like_froi)
+                or self.froi_subjects is None  # None means all subjects
+                or len(self.froi_subjects)) > 0:
+
+            froi_response_data = None
+            item_to_num_images = None
+            if self.froi_subjects is None or len(self.froi_subjects) > 0:
+                froi_response_data, item_to_num_images, _ = self._read_froi_response_data()
+                for k in froi_response_data:
+                    data[k] = KindData(ResponseKind.ns_froi, froi_response_data[k])
+
+            froi_examples = self._compute_examples_froi_audio(item_to_num_images)
+            for example in froi_examples:
+                key = tuple((w.item, w.zone) for w in example.words)
+                features = example_manager.add_example(key, [w.word for w in example.words], None, None)
+                assert (features.unique_id == len(story_ids))
+                story_ids.append(example.words[0].item)
+
+            if froi_response_data is not None:
+                self._add_froi_targets(example_manager, froi_examples, froi_response_data, item_to_num_images)
+
         if self.include_reaction_times:
-            reaction_times = self._read_reaction_times(example_manager)
+            if self.group_reaction_time_sentences_like_froi:
+                # add all of the sentences first to guarantee consistent example ids
+                sentences = list(_read_story_sentences(self.path))
+                for sentence in sentences:
+                    key = tuple((w.item, w.zone) for w in sentence)
+                    features = example_manager.add_example(key, [w.word for w in sentence], None, None)
+                    assert (features.unique_id <= len(story_ids))
+                    if features.unique_id < len(story_ids):
+                        assert (story_ids[features.unique_id] == sentence[0].item)
+                    else:
+                        story_ids.append(sentence[0].item)
+                reaction_time_examples = sentences
+            else:
+                reaction_time_examples = [ex.words for ex in froi_examples]
+
+            reaction_times = self._read_reaction_times(example_manager, reaction_time_examples)
             for k in reaction_times:
                 data[k] = KindData(ResponseKind.ns_reaction_times, reaction_times[k])
-        if self.froi_subjects is None or len(self.froi_subjects) > 0:
-            froi = self._read_froi(example_manager)
-            for k in froi:
-                data[k] = KindData(ResponseKind.ns_froi, froi[k])
-        examples = list(example_manager.iterate_examples(fill_data_keys=True))
 
-        story_ids = list()
-        for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
-            story_ids.append(sentence_word_records[0].item)
+        examples = list(example_manager.iterate_examples(fill_data_keys=True))
 
         story_ids = np.array(story_ids)
         story_ids.setflags(write=False)
@@ -323,15 +394,17 @@ class NaturalStoriesCorpus(CorpusBase):
 
         return reaction_times, sorted_keys, all_worker_ids
 
-    def _read_reaction_times(self, example_manager: CorpusExampleUnifier):
+    def _read_reaction_times(self, example_manager: CorpusExampleUnifier, examples):
         reaction_times, keys, _ = self._read_reaction_time_batches()
         key_to_row = dict((k, i) for i, k in enumerate(keys))
-        for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
-            example_manager.add_example(
-                unique_id,
-                [r.word for r in sentence_word_records],
+        for example in examples:
+            features = example_manager.add_example(
+                tuple((w.item, w.zone) for w in example),
+                [w.word for w in example],
                 'ns_spr',
-                [key_to_row[(r.item, r.zone)] for r in sentence_word_records])
+                [key_to_row[(w.item, w.zone)] for w in example],
+                allow_new_examples=False)
+            assert(features is not None)
 
         return {'ns_spr': reaction_times}
 
@@ -369,7 +442,61 @@ class NaturalStoriesCorpus(CorpusBase):
 
         return OrderedDict((key, result[key]) for key in sorted(result)), mins, maxes
 
-    def _read_froi(self, example_manager: CorpusExampleUnifier):
+    def _compute_examples_froi_audio(self, item_to_num_images=None):
+        audio_times, mins, maxes = self._read_audio_times()
+
+        item_words = OrderedDict()
+        for sentence_word_records in _read_story_sentences(self.path):
+            if sentence_word_records[0].item not in item_words:
+                item_words[sentence_word_records[0].item] = list()
+            item_words[sentence_word_records[0].item].extend(sentence_word_records)
+
+        item_tr_offsets = OrderedDict()
+        tr_offset = 0
+        if item_to_num_images is not None:
+            for item in item_to_num_images:
+                item_tr_offsets[item] = tr_offset
+                tr_offset += item_to_num_images[item]
+        for item in item_words:
+            if item not in item_tr_offsets:
+                item_tr_offsets[item] = tr_offset
+
+        examples = list()
+        for item in item_words:
+
+            word_times = dict()
+            for zone, min_time, max_time in audio_times[item]:
+                # we can get duplicate entries for compound words like long-bearded
+                if zone in word_times:
+                    word_times[zone] = min(word_times[zone], min_time)
+                else:
+                    word_times[zone] = min_time
+
+            word_times = list(word_times[z] for z in sorted(word_times))
+
+            if item_to_num_images is not None and item in item_to_num_images:
+                num_images = item_to_num_images[item]
+            else:
+                max_word_time = int(np.ceil(np.max(word_times)))
+                # doesn't really matter if this goes past what is required
+                num_images = int(np.ceil(max_word_time / 2.)) + 1
+
+            time_images = np.arange(num_images, dtype=np.float) * 2.
+            assert (len(time_images) > self.froi_skip_start_trs + self.froi_skip_end_trs)
+            time_images = time_images[self.froi_skip_start_trs:(len(time_images) - self.froi_skip_end_trs)]
+
+            examples.extend(get_combined_sentence_examples_for_fmri_context(
+                words=item_words[item],
+                word_times=word_times,
+                word_sentence_ids=[w.sentence for w in item_words[item]],
+                tr_times=time_images,
+                duration_tr_features=self.froi_window_size_features,
+                minimum_duration_required=self.froi_min_duration_target,
+                tr_offset=item_tr_offsets[item]))
+
+        return examples
+
+    def _read_froi_response_data(self):
         froi_path = os.path.join(self.path, 'fROI')
         suffix = '_language_fROIs.mat'
         froi_subjects = self.froi_subjects
@@ -380,8 +507,6 @@ class NaturalStoriesCorpus(CorpusBase):
                     froi_subjects.append(name[:-len(suffix)])
         elif isinstance(froi_subjects, str):
             froi_subjects = [froi_subjects]
-
-        audio_times, mins, maxes = self._read_audio_times()
 
         story_to_item = dict(
             (s, i + 1) for i, s in enumerate(
@@ -412,19 +537,13 @@ class NaturalStoriesCorpus(CorpusBase):
                 elif num_rois != story_data.shape[1]:
                     raise ValueError('Inconsistent number of rois')
                 item = story_to_item[story]
-                num_expected_story_images = int(np.ceil((maxes[item] - mins[item]) / 2.))  # 2 seconds per image
                 start_image_padding = 8
-                # end_image_padding = 8
-                # if start_image_padding + end_image_padding + num_expected_story_images < story_data.shape[0]:
-                #     end_image_padding += 8
-                # if start_image_padding + end_image_padding + num_expected_story_images != story_data.shape[0]:
-                #     raise ValueError('Unable to compute alignment: {}, {}, {}, {}',
-                #                      story_data.shape, num_expected_story_images, story, maxes[story_to_item[story]])
-                collated_data[subject][item] = \
-                    story_data[start_image_padding:start_image_padding + num_expected_story_images + 1]
+                collated_data[subject][item] = story_data[start_image_padding:]
                 if item in item_to_num_images:
-                    if item_to_num_images[item] != collated_data[subject][item].shape[0]:
-                        raise ValueError('Inconsistent number of images across subjects')
+                    item_to_num_images[item] = min(item_to_num_images[item], collated_data[subject][item].shape[0])
+                    for s in collated_data:
+                        if item in collated_data[s]:
+                            collated_data[s][item] = collated_data[s][item][:item_to_num_images[item]]
                 else:
                     item_to_num_images[item] = collated_data[subject][item].shape[0]
 
@@ -449,34 +568,44 @@ class NaturalStoriesCorpus(CorpusBase):
             ('mfg', 'middle frontal gyrus'),
             ('ag', 'angular gyrus')]
         short_rois = ['lh_' + roi[0] for roi in hemisphere_rois] + ['rh_' + roi[0] for roi in hemisphere_rois]
+        # long_rois = ['left ' + roi[1] for roi in hemisphere_rois] + ['right ' + roi[1] for roi in hemisphere_rois]
 
         if len(short_rois) != num_rois:
             raise ValueError('Unexpected number of rois')
 
-        key_to_index_image = dict()
-        data_offset = 0
-        for item in items:
-            for zone, min_time, max_time in audio_times[item]:
-                key_to_index_image[item, zone] = int(np.ceil(max_time / 2.)) + data_offset
-            data_offset += item_to_num_images[item]
-
         data_keys = ['ns_{}'.format(roi) for roi in short_rois]
 
-        for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
-
-            if sentence_word_records[0].item not in item_to_num_images:
-                continue
-
-            example_manager.add_example(
-                unique_id,
-                [r.word for r in sentence_word_records],
-                data_keys,
-                [key_to_index_image[r.item, r.zone] for r in sentence_word_records],
-                is_apply_data_id_to_entire_group=True)
-
-        return OrderedDict(
+        data = OrderedDict(
             (n, np.squeeze(d, axis=2))
             for n, d in zip(data_keys, np.split(data, data.shape[2], axis=2)))
+
+        return data, item_to_num_images, subjects
+
+    def _add_froi_targets(
+            self, example_manager: CorpusExampleUnifier, examples, froi_response_data, item_to_num_images):
+
+        data_keys = [k for k in froi_response_data]
+
+        for example in examples:
+            # this means we don't actually have images for this story
+            if example.words[0].item not in item_to_num_images:
+                continue
+
+            images = list()
+            for target_tr in example.tr_target:
+                if target_tr is None:
+                    images.append(-1)
+                else:
+                    images.append(target_tr[0])  # keep only the first target if there are multiple
+
+            features = example_manager.add_example(
+                tuple((w.item, w.zone) for w in example.words),
+                [w.word for w in example.words],
+                data_keys,
+                images,
+                is_apply_data_id_to_entire_group=True,
+                allow_new_examples=False)
+            assert(features is not None)
 
 
 def read_natural_story_codings(directory_path, data_loader):
