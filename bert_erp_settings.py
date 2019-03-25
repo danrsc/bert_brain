@@ -33,6 +33,8 @@ class OptimizationSettings:
     gradient_accumulation_steps: int = 1
     # local_rank for distributed training on gpus; probably don't need this
     local_rank: int = -1
+    # If True, the bert parameters are not modified, only the parameters in the prediction heads
+    is_train_prediction_heads_only: bool = False
 
 
 @dataclass
