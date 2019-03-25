@@ -87,11 +87,11 @@ class Paths:
                 self.data_set_base_path, Paths.default_relative_linzen_agreement_path)
 
     def make_corpus_loader(
-            self, bert_pre_trained_model_name='bert-base-uncased', data_key_kwarg_dict=None):
+            self, bert_pre_trained_model_name='bert-base-uncased', corpus_key_kwarg_dict=None):
         return CorpusLoader(
             bert_pre_trained_model_name,
             self.cache_path, self.geco_path, self.bnc_root, self.harry_potter_path, self.frank_2013_eye_path,
             self.frank_2015_erp_path, self.dundee_path, self.english_web_universal_dependencies_v_1_2_path,
             self.english_web_universal_dependencies_v_2_3_path, self.proto_roles_english_web_path, self.ontonotes_path,
             self.proto_roles_prop_bank_path, self.natural_stories_path, self.linzen_agreement_path,
-            corpus_key_kwarg_dict=data_key_kwarg_dict)
+            corpus_key_kwarg_dict=corpus_key_kwarg_dict)

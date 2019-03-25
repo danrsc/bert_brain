@@ -10,7 +10,8 @@ from typing import Sequence, Optional
 import numpy as np
 from scipy.io import loadmat
 
-from .corpus_base import CorpusBase, CorpusExampleUnifier, get_combined_sentence_examples_for_fmri_context
+from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample
 from .spacy_token_meta import make_tokenizer_model
 from .input_features import RawData, KindData, ResponseKind
 from .praat_textgrid import TextGrid
@@ -278,8 +279,10 @@ class NaturalStoriesCorpus(CorpusBase):
             froi_subjects: Optional[Sequence[str]] = None,
             froi_skip_start_trs: int = 0,
             froi_skip_end_trs: int = 0,
-            froi_window_size_features: float = 8.,
-            froi_min_duration_target: float = 7.8):
+            froi_window_duration: float = 8.,
+            froi_minimum_duration_required: float = 7.8,
+            froi_use_word_unit_durations: bool = False,
+            froi_sentence_mode: str = 'multiple'):
         """
 
         Args:
@@ -294,14 +297,21 @@ class NaturalStoriesCorpus(CorpusBase):
                 TRs can be problematic
             froi_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
                 problematic
-            froi_window_size_features: The duration, in seconds, of the window of time preceding a TR from which to
+            froi_window_duration: The duration of the window of time preceding a TR from which to
                 choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
-                which occurred with tr_time > word_time >= tr_time - 8 will be used to predict the TR.
-            froi_min_duration_target: The minimum duration, in seconds, of the time between the earliest word used to
-                predict a TR and the occurrence of the TR required for the TR to be a legitimate target. For example,
-                if this is set to 7.5, then letting the time of the earliest word occurring in the
-                fmri_window_size_features seconds before the TR be min_word_time, if tr_time - min_word_time <
-                fmri_min_duration_target, the TR is not is not used for training or evaluation.
+                which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
+            froi_minimum_duration_required: The minimum duration of the time between the earliest word used to
+                predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
+                target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
+                window_duration before the TR be min_word_time, if tr_time - min_word_time <
+                minimum_duration_required, the TR is not is not used to build any examples.
+            froi_use_word_unit_durations: If True, then window_duration and minimum_duration_required are in number
+                of words rather than time_units. window_duration = 8. would select the 8 previous words.
+            froi_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
+                combination of sentences as described above. If 'single', changes the behavior of the function so that
+                the feature window is truncated by the start of a sentence, thus resulting in examples with one
+                sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
+                without consideration of the sentence boundaries
         """
         self.path = path
         self.include_reaction_times = include_reaction_times
@@ -309,8 +319,11 @@ class NaturalStoriesCorpus(CorpusBase):
         self.froi_subjects = froi_subjects
         self.froi_skip_start_trs = froi_skip_start_trs
         self.froi_skip_end_trs = froi_skip_end_trs
-        self.froi_window_size_features = froi_window_size_features
-        self.froi_min_duration_target = froi_min_duration_target
+        self.froi_example_builder = FMRICombinedSentenceExamples(
+            window_duration=froi_window_duration,
+            minimum_duration_required=froi_minimum_duration_required,
+            use_word_unit_durations=froi_use_word_unit_durations,
+            sentence_mode=froi_sentence_mode)
 
     def _load(self, example_manager: CorpusExampleUnifier):
 
@@ -332,7 +345,14 @@ class NaturalStoriesCorpus(CorpusBase):
             froi_examples = self._compute_examples_froi_audio(item_to_num_images)
             for example in froi_examples:
                 key = tuple((w.item, w.zone) for w in example.words)
-                features = example_manager.add_example(key, [w.word for w in example.words], None, None)
+                features = example_manager.add_example(
+                    key,
+                    [w.word for w in example.full_sentences],
+                    [w.sentence for w in example.full_sentences],
+                    None,
+                    None,
+                    start=example.offset,
+                    stop=example.offset + len(example.words))
                 assert (features.unique_id == len(story_ids))
                 story_ids.append(example.words[0].item)
 
@@ -340,20 +360,28 @@ class NaturalStoriesCorpus(CorpusBase):
                 self._add_froi_targets(example_manager, froi_examples, froi_response_data, item_to_num_images)
 
         if self.include_reaction_times:
-            if self.group_reaction_time_sentences_like_froi:
+            if not self.group_reaction_time_sentences_like_froi:
                 # add all of the sentences first to guarantee consistent example ids
                 sentences = list(_read_story_sentences(self.path))
+                reaction_time_examples = list()
                 for sentence in sentences:
                     key = tuple((w.item, w.zone) for w in sentence)
-                    features = example_manager.add_example(key, [w.word for w in sentence], None, None)
+                    features = example_manager.add_example(
+                        key,
+                        [w.word for w in sentence],
+                        [w.sentence for w in sentence],
+                        None,
+                        None)
                     assert (features.unique_id <= len(story_ids))
                     if features.unique_id < len(story_ids):
                         assert (story_ids[features.unique_id] == sentence[0].item)
                     else:
                         story_ids.append(sentence[0].item)
-                reaction_time_examples = sentences
+                    # tr_target is not going to be used, so we don't build it
+                    reaction_time_examples.append(
+                        FMRIExample(sentence, [w.sentence for w in sentence], [], sentence, 0))
             else:
-                reaction_time_examples = [ex.words for ex in froi_examples]
+                reaction_time_examples = froi_examples
 
             reaction_times = self._read_reaction_times(example_manager, reaction_time_examples)
             for k in reaction_times:
@@ -399,10 +427,13 @@ class NaturalStoriesCorpus(CorpusBase):
         key_to_row = dict((k, i) for i, k in enumerate(keys))
         for example in examples:
             features = example_manager.add_example(
-                tuple((w.item, w.zone) for w in example),
-                [w.word for w in example],
+                tuple((w.item, w.zone) for w in example.words),
+                [w.word for w in example.full_sentences],
+                [w.sentence for w in example.full_sentences],
                 'ns_spr',
-                [key_to_row[(w.item, w.zone)] for w in example],
+                [key_to_row[(w.item, w.zone)] for w in example.full_sentences],
+                start=example.offset,
+                stop=example.offset + len(example.words),
                 allow_new_examples=False)
             assert(features is not None)
 
@@ -485,13 +516,11 @@ class NaturalStoriesCorpus(CorpusBase):
             assert (len(time_images) > self.froi_skip_start_trs + self.froi_skip_end_trs)
             time_images = time_images[self.froi_skip_start_trs:(len(time_images) - self.froi_skip_end_trs)]
 
-            examples.extend(get_combined_sentence_examples_for_fmri_context(
+            examples.extend(self.froi_example_builder(
                 words=item_words[item],
                 word_times=word_times,
                 word_sentence_ids=[w.sentence for w in item_words[item]],
                 tr_times=time_images,
-                duration_tr_features=self.froi_window_size_features,
-                minimum_duration_required=self.froi_min_duration_target,
                 tr_offset=item_tr_offsets[item]))
 
         return examples
@@ -598,19 +627,23 @@ class NaturalStoriesCorpus(CorpusBase):
                 else:
                     images.append(target_tr[0])  # keep only the first target if there are multiple
 
+            pad_end = len(example.full_sentences) - len(example.words) - example.offset
             features = example_manager.add_example(
                 tuple((w.item, w.zone) for w in example.words),
-                [w.word for w in example.words],
+                [w.word for w in example.full_sentences],
+                [w.sentence for w in example.full_sentences],
                 data_keys,
-                images,
+                [-1] * example.offset + images + [-1] * pad_end,
+                start=example.offset,
+                stop=example.offset + len(example.words),
                 is_apply_data_id_to_entire_group=True,
                 allow_new_examples=False)
             assert(features is not None)
 
 
-def read_natural_story_codings(directory_path, data_loader):
+def read_natural_story_codings(directory_path, corpus_loader):
 
-    bert_tokenizer = data_loader.make_bert_tokenizer()
+    bert_tokenizer = corpus_loader.make_bert_tokenizer()
     spacy_tokenize_model = make_tokenizer_model()
 
     example_manager = CorpusExampleUnifier(spacy_tokenize_model, bert_tokenizer)
@@ -620,7 +653,12 @@ def read_natural_story_codings(directory_path, data_loader):
     for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
         words = [wr.word for wr in sentence_word_records]
         text = ' '.join(words)
-        input_features = example_manager.add_example(words, 'bogus', [0] * len(words))
+        input_features = example_manager.add_example(
+            tuple((w.item, w.zone) for w in sentence_word_records),
+            [w.word for w in sentence_word_records],
+            [w.sentence for w in sentence_word_records],
+            None,
+            None)
         token_key = ' '.join(input_features.tokens)
         if text not in codings:
             raise ValueError('Unable to find codings for sentence: {}'.format(text))

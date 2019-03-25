@@ -30,9 +30,10 @@ import numpy as np
 import torch
 
 from bert_erp_common import SwitchRemember
-from bert_erp_datasets import CorpusKeys, DataPreparer
-from bert_erp_settings import Settings
+from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind
+from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings
 from bert_erp_paths import Paths
+from bert_erp_modeling import KeyedLinear
 from train_eval import train, make_datasets
 
 __all__ = ['task_hash', 'named_variations', 'run_variation', 'iterate_powerset']
@@ -95,7 +96,7 @@ def run_variation(
 
     def io_setup():
         temp_paths = Paths()
-        corpus_loader_ = temp_paths.make_corpus_loader(data_key_kwarg_dict=settings.corpus_key_kwargs)
+        corpus_loader_ = temp_paths.make_corpus_loader(corpus_key_kwarg_dict=settings.corpus_key_kwargs)
         hash_ = task_hash(loss_tasks)
         model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
         result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
@@ -180,7 +181,21 @@ def named_variations(name):
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri':
         training_variations = [('hp_fmri_I',)]
-        settings = Settings(corpus_keys=(CorpusKeys.harry_potter,))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=100))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_20':
+        training_variations = [('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=100))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:

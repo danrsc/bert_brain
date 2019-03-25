@@ -6,10 +6,10 @@ import torch
 from bert_erp_modeling.utility_modules import Conv1DCausal
 
 
-__all__ = ['FMRIHead']
+__all__ = ['FMRIConvConvWithDilationHead']
 
 
-class FMRIHead(torch.nn.Module):
+class FMRIConvConvWithDilationHead(torch.nn.Module):
 
     def __init__(
             self,
