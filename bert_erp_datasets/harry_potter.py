@@ -12,7 +12,8 @@ import nibabel
 import cortex
 
 from bert_erp_common import MultiReplace
-from .corpus_base import CorpusBase, CorpusExampleUnifier, get_combined_sentence_examples_for_fmri_context
+from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample
 from .input_features import RawData, KindData, ResponseKind
 
 
@@ -50,8 +51,9 @@ class HarryPotterCorpus(CorpusBase):
             fmri_smooth_factor: Optional[float] = 1.,
             fmri_skip_start_trs: int = 20,
             fmri_skip_end_trs: int = 15,
-            fmri_window_size_features: float = 8.,
-            fmri_min_duration_target: float = 7.8):
+            fmri_window_duration: float = 8.,
+            fmri_minimum_duration_required: float = 7.8,
+            fmri_sentence_mode: str = 'multiple'):
         """
         Loader for Harry Potter data
         Args:
@@ -60,13 +62,13 @@ class HarryPotterCorpus(CorpusBase):
             use_pca_meg: If True, the PCA'd data (one component per roi) is used,
                 otherwise the average of the dipoles within an roi are used
             separate_meg_axes: None, or one or more of ('subject', 'roi', 'time'). If not provided (the default), then
-                the MEG data is a dictionary with a single key ('MEG') that maps to an array of shape
+                the MEG data is a dictionary with a single key ('hp_meg') that maps to an array of shape
                 (word, subject, roi, 100ms slice) [Note that this shape may be modified by preprocessing]. If 'subject'
-                is provided, then the dictionary is keyed by 'MEG.<subject-id>', e.g. 'MEG.A", and the shape of each
-                value is (word, roi, 100ms slice). Similarly each separate axis that is provided causes the data array
-                to be further split and each resulting data array can be found under a more complex key. The keys are
-                generated in the order <subject-id>.<roi>.<time> all of which are optional. When time is in the key, it
-                is a multiple of 100 giving the ms start time of the window.
+                is provided, then the dictionary is keyed by 'hp_meg.<subject-id>', e.g. 'hp_meg.A", and the shape of
+                each value is (word, roi, 100ms slice). Similarly each separate axis that is provided causes the data
+                array to be further split and each resulting data array can be found under a more complex key. The
+                keys are generated in the order <subject-id>.<roi>.<time> all of which are optional. When time is in
+                the key, it is a multiple of 100 giving the ms start time of the window.
             group_meg_sentences_like_fmri: If False, examples for MEG are one sentence each. If True, then examples
                 are created as they would be for fMRI, i.e. including sentences as required by the
                 fmri_window_size_features parameter
@@ -78,14 +80,19 @@ class HarryPotterCorpus(CorpusBase):
                 TRs can be problematic
             fmri_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
                 problematic
-            fmri_window_size_features: The duration, in seconds, of the window of time preceding a TR from which to
+            fmri_window_duration: The duration of the window of time preceding a TR from which to
                 choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
-                which occurred with tr_time > word_time >= tr_time - 8 will be used to predict the TR.
-            fmri_min_duration_target: The minimum duration, in seconds, of the time between the earliest word used to
-                predict a TR and the occurrence of the TR required for the TR to be a legitimate target. For example,
-                if this is set to 7.5, then letting the time of the earliest word occurring in the
-                fmri_window_size_features seconds before the TR be min_word_time, if tr_time - min_word_time <
-                fmri_min_duration_target, the TR is not is not used for training or evaluation.
+                which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
+            fmri_minimum_duration_required: The minimum duration of the time between the earliest word used to
+                predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
+                target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
+                window_duration before the TR be min_word_time, if tr_time - min_word_time <
+                minimum_duration_required, the TR is not is not used to build any examples.
+            fmri_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
+                combination of sentences as described above. If 'single', changes the behavior of the function so that
+                the feature window is truncated by the start of a sentence, thus resulting in examples with one
+                sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
+                without consideration of the sentence boundaries
         """
         self.path = path
         self.fmri_subjects = fmri_subjects
@@ -96,8 +103,11 @@ class HarryPotterCorpus(CorpusBase):
         self.fmri_smooth_factor = fmri_smooth_factor
         self.fmri_skip_start_trs = fmri_skip_start_trs
         self.fmri_skip_end_trs = fmri_skip_end_trs
-        self.fmri_window_size_features = fmri_window_size_features
-        self.fmri_min_duration_target = fmri_min_duration_target
+        self.fmri_example_builder = FMRICombinedSentenceExamples(
+            window_duration=fmri_window_duration,
+            minimum_duration_required=fmri_minimum_duration_required,
+            use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
+            sentence_mode=fmri_sentence_mode)
 
     def _load(self, example_manager: CorpusExampleUnifier):
 
@@ -112,27 +122,41 @@ class HarryPotterCorpus(CorpusBase):
             fmri_examples = self._compute_examples_for_fmri()
             for example in fmri_examples:
                 key = tuple(w.index_in_all_words for w in example.words)
-                features = example_manager.add_example(key, [w.word for w in example.words], None, None)
+                features = example_manager.add_example(
+                    key,
+                    [w.word for w in example.full_sentences],
+                    [w.sentence_id for w in example.full_sentences],
+                    None,
+                    None,
+                    start=example.offset,
+                    stop=example.offset + len(example.words))
                 assert(all(w.run == example.words[0].run for w in example.words[1:]))
                 assert(features.unique_id == len(run_at_unique_id))
                 run_at_unique_id.append(example.words[0].run)
         meg_examples = None
         if self.include_meg:
-            if self.group_meg_sentences_like_fmri:
+            if not self.group_meg_sentences_like_fmri:
                 # add all of the sentences first to guarantee consistent example ids
                 sentences, _ = self._harry_potter_fmri_word_info(HarryPotterCorpus.static_run_lengths)
+                meg_examples = list()
                 for sentence_id, sentence in enumerate(sentences):
                     key = tuple(w.index_in_all_words for w in sentence)
-                    features = example_manager.add_example(key, [w.word for w in sentence], None, None)
+                    features = example_manager.add_example(
+                        key,
+                        [w.word for w in sentence],
+                        [w.sentence_id for w in sentence],
+                        None,
+                        None)
                     assert(all(w.run == sentence[0].run for w in sentence[1:]))
                     assert(features.unique_id <= len(run_at_unique_id))
                     if features.unique_id < len(run_at_unique_id):
                         assert(run_at_unique_id[features.unique_id] == sentence[0].run)
                     else:
                         run_at_unique_id.append(sentence[0].run)
-                meg_examples = sentences
+                    # tr_target is not going to be used, so we don't actually build it out
+                    meg_examples.append(FMRIExample(sentence, [sentence_id] * len(sentence), [], sentence, 0))
             else:
-                meg_examples = [ex.words for ex in fmri_examples]
+                meg_examples = fmri_examples
 
         run_at_unique_id = np.array(run_at_unique_id)
         run_at_unique_id.setflags(write=False)
@@ -223,7 +247,7 @@ class HarryPotterCorpus(CorpusBase):
         # example_id_words = example_id_words[not_plus]
 
         # data is (words, subjects, rois, 100ms_slices)
-        data = OrderedDict([('MEG', data)])
+        data = OrderedDict([('hp_meg', data)])
 
         subject_axis = 1
         roi_axis = 2
@@ -257,16 +281,19 @@ class HarryPotterCorpus(CorpusBase):
             data = separated_data
 
         for example in examples:
-            indices = np.array([w.index_in_all_words for w in example])
+            indices = np.array([w.index_in_all_words for w in example.full_sentences])
             # use these instead of the words given in example to ensure our indexing is not off
             # we will fail an assert below if we try to add something messed up
             example_stimuli = stimuli[new_indices[indices]]
 
             features = example_manager.add_example(
-                tuple(indices),
+                tuple(w.index_in_all_words for w in example.words),
                 [_clean_word(w) for w in example_stimuli],
+                [w.sentence_id for w in example.full_sentences],
                 [k for k in data],
                 new_indices[indices],
+                example.offset,
+                example.offset + len(example.words),
                 allow_new_examples=False)
             assert (features is not None)
 
@@ -379,13 +406,12 @@ class HarryPotterCorpus(CorpusBase):
             assert (len(time_images) > self.fmri_skip_start_trs + self.fmri_skip_end_trs)
             offset_increment = len(time_images)
             time_images = time_images[self.fmri_skip_start_trs:(len(time_images) - self.fmri_skip_end_trs)]
-            examples.extend(get_combined_sentence_examples_for_fmri_context(
+            examples.extend(self.fmri_example_builder(
                 run_words[run],
                 [w.time for w in run_words[run]],
                 [w.sentence_id for w in run_words[run]],
                 time_images,
-                self.fmri_window_size_features,
-                self.fmri_min_duration_target, tr_offset=tr_offset + self.fmri_skip_start_trs))
+                tr_offset=tr_offset + self.fmri_skip_start_trs))
             tr_offset += offset_increment
         return examples
 
@@ -438,11 +464,15 @@ class HarryPotterCorpus(CorpusBase):
                 else:
                     # keep only the first target if there are multiple
                     images.append(active_sentence_images_to_new_index[target_tr[0]])
+            pad_end = len(example.full_sentences) - len(example.words) - example.offset
             features = example_manager.add_example(
                 tuple(w.index_in_all_words for w in example.words),
-                [w.word for w in example.words],
+                [w.word for w in example.full_sentences],
+                [w.sentence_id for w in example.full_sentences],
                 [k for k in data],
-                images,
+                [-1] * example.offset + images + [-1] * pad_end,
+                example.offset,
+                example.offset + len(example.words),
                 is_apply_data_id_to_entire_group=True,
                 allow_new_examples=False)
             assert(features is not None)

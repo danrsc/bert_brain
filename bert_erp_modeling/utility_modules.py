@@ -2,7 +2,42 @@ import numpy as np
 import torch
 
 
-__all__ = ['GroupPool', 'Conv1DCausal']
+__all__ = ['GroupPool', 'Conv1DCausal', 'at_most_one_data_id']
+
+
+def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=False):
+
+    if len(data_ids.size()) != 2:
+        raise ValueError('data_ids must be 2D')
+
+    maxes, _ = torch.max(data_ids, dim=1)
+    repeated_maxes = torch.reshape(maxes, (-1, 1)).repeat((1, data_ids.size()[1]))
+    mins, _ = torch.min(torch.where(data_ids < 0, repeated_maxes, data_ids), dim=1)
+
+    if torch.sum(maxes != mins) > 0:
+        raise ValueError('More than one data_id exists for some examples')
+
+    if return_first_index or return_last_index:
+        index_array = torch.arange(data_ids.size()[1], device=data_ids.device).view(
+            (1, data_ids.size()[1])).repeat((data_ids.size()[0], 1))
+        indicator_valid = data_ids >= 0
+        first_index = None
+        if return_first_index:
+            first_index_array = torch.where(
+                indicator_valid, index_array, torch.full_like(index_array, data_ids.size()[1] + 1))
+            first_index, _ = torch.min(first_index_array, dim=1)
+        last_index = None
+        if return_last_index:
+            last_index_array = torch.where(indicator_valid, index_array, torch.full_like(index_array, -1))
+            last_index, _ = torch.max(last_index_array, dim=1)
+        if return_first_index and return_last_index:
+            return maxes, first_index, last_index
+        if return_first_index:
+            return maxes, first_index
+        if return_last_index:
+            return maxes, last_index
+
+    return maxes
 
 
 class GroupPool(torch.nn.Module):
@@ -15,17 +50,17 @@ class GroupPool(torch.nn.Module):
         example_ids = torch.arange(
             groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
         # -> (batch, sequence, 2): attach example_id to each group
-        groupby = torch.cat((groupby.view(groupby.size() + (1,)), example_ids), dim=2)
+        groupby = torch.cat((example_ids, groupby.view(groupby.size() + (1,))), dim=2)
 
         # -> (batch * sequence, 2)
         groupby = groupby.view((groupby.size()[0] * groupby.size()[1], groupby.size()[2]))
 
-        # each group is a (group, example_id) tuple
-        groups, group_indices = torch.unique(groupby, return_inverse=True, dim=0)
+        # each group is a (example_id, group) tuple
+        groups, group_indices = torch.unique(groupby, sorted=True, return_inverse=True, dim=0)
 
         # split the groups into the true groups and example_ids
-        example_ids = groups[:, 1]
-        groups = groups[:, 0]
+        example_ids = groups[:, 0]
+        groups = groups[:, 1]
 
         # -> (batch * sequence, 1, 1, ..., 1)
         group_indices = group_indices.view((x.size()[0] * x.size()[1],) + (1,) * (len(x.size()) - 2))

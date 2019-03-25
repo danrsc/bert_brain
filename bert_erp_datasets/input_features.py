@@ -42,6 +42,8 @@ class InputFeatures:
     head_location: Sequence[int]
     head_tokens: Sequence[str]
     head_token_ids: Sequence[int]
+    index_word_in_example: Sequence[int]  # useful for grouping tokens together in the model
+    index_token_in_sentence: Sequence[int]  # useful for positional embedding
     data_ids: Union[Mapping[str, Sequence[int]], Sequence[int]]
 
 

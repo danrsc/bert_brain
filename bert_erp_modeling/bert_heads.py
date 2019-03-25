@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel
 
-from bert_erp_modeling.utility_modules import GroupPool
+from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,12 @@ class KeyedLinear(torch.nn.Module):
             else:
                 p = p.view(p.size()[:1] + self.prediction_key_to_shape[k])
             result[k] = p
+            if not self.is_sequence and k not in batch:
+                # we are in data_ids mode, there must be at most one valid data_id per example
+                data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
+                indicator_valid = data_ids >= 0
+                result[k] = result[k][indicator_valid]
+                result[(k, 'data_ids')] = data_ids[indicator_valid]
         return result
 
 

@@ -87,6 +87,7 @@ class UclCorpus(CorpusBase):
             example_manager.add_example(
                 example_key=None,
                 words=[str(w[0]) for w in s],
+                sentence_ids=[i] * len(s),
                 data_key=erp_names,
                 data_ids=len(rows) + np.arange(len(s)))
 
@@ -170,6 +171,7 @@ class UclCorpus(CorpusBase):
             example_manager.add_example(
                 example_key=None,
                 words=words,
+                sentence_ids=[sentence_id] * len(words),
                 data_key=[k for k in data_keys],
                 data_ids=np.arange(len(words)) + data_offset,
                 allow_new_examples=allow_new_examples)

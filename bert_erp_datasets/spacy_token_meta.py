@@ -192,8 +192,11 @@ def bert_tokenize_with_spacy_meta(
         bert_tokenizer: BertTokenizer,
         unique_id: int,
         words: Sequence[str],
+        sentence_ids: Sequence[int],
         data_key: Optional[Union[str, Sequence[str]]],
         data_ids: Optional[Sequence[int]],
+        start: int = 0,
+        stop: Optional[int] = None,
         type_id: int = 0,
         is_apply_data_offset_entire_group: bool = False) -> InputFeatures:
     """
@@ -202,13 +205,18 @@ def bert_tokenize_with_spacy_meta(
     Args:
         spacy_model: The spacy model to use for spacy tokenization, part of speech analysis, etc. Generally from
             make_tokenizer_model()
-        bert_tokenizer: The bert tokenizer to use. Usually from data_loader.make_bert_tokenizer()
+        bert_tokenizer: The bert tokenizer to use. Usually from corpus_loader.make_bert_tokenizer()
         unique_id: The unique id for this example
         words: The words in this example. Generally a sentence, but it doesn't have to be.
+        sentence_ids: For each word, identifies which sentence the word belongs to. Used to compute
+            index_word_in_sentence
         data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
         data_ids: Sequence[Int]. Describes an indices into a separate data array for each word. For example, if the
             first word in words corresponds to fMRI image 17 in a separate data array, and the second word corresponds
             to image 19, then this parameter could start with [17, 19, ...].
+        start: Offset where the actual input features should start. It is best to compute spacy meta on full sentences,
+            then slice the resulting tokens. start and end are used to slice words, sentence_ids, data_key and data_ids
+        stop: Exclusive end point for the actual input features. If None, the full length is used
         type_id: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
             like question answering where type_id=0 is the question and type_id=1 is the answer.
         is_apply_data_offset_entire_group: If a word is broken into multiple tokens, generally a single token is
@@ -248,8 +256,10 @@ def bert_tokenize_with_spacy_meta(
     example_token_head = list()
     example_type_ids = list()
     example_data_ids = list()
+    example_index_word_in_example = list()
+    example_index_token_in_sentence = list()
 
-    def _append_special_token(special_token):
+    def _append_special_token(special_token, index_word_in_example_, index_token_in_sentence_):
         example_tokens.append(special_token)
         example_mask.append(1)
         example_is_stop.append(1)
@@ -260,16 +270,39 @@ def bert_tokenize_with_spacy_meta(
         example_token_head.append('[PAD]')
         example_type_ids.append(type_id)
         example_data_ids.append(-1)
+        example_index_word_in_example.append(index_word_in_example_)
+        example_index_token_in_sentence.append(index_token_in_sentence_)
 
-    _append_special_token('[CLS]')
+    _append_special_token(
+        '[CLS]', index_word_in_example_=0, index_token_in_sentence_=0)
+
+    index_token_in_sentence = 0
+    index_word_in_example = 0
+    last_sentence_id = None
 
     bert_token_groups_with_spacy = list()
     for spacy_token_group, bert_token_group, word in zip(spacy_token_groups, bert_token_groups, words):
         bert_token_groups_with_spacy.append(align_spacy_meta(spacy_token_group, bert_token_group, word, bert_tokenizer))
 
+    if start < 0:
+        start = len(words) + start
+    if stop is None:
+        stop = len(words)
+    elif stop < 0:
+        stop = len(words) + stop
+
     for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
+        if last_sentence_id is None or sentence_ids[idx_group] != last_sentence_id:
+            index_token_in_sentence = -1
+        last_sentence_id = sentence_ids[idx_group]
+        if idx_group < start:
+            continue
+        if idx_group >= stop:
+            break
+        index_word_in_example += 1
         idx_data = get_data_token_index(bert_tokens_with_spacy)
         for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
+            index_token_in_sentence += 1
             idx_head_group = _get_syntactic_head_group(spacy_token, bert_token_groups_with_spacy)
             head_token = '[PAD]'
             head_location = np.nan
@@ -287,13 +320,18 @@ def bert_tokenize_with_spacy_meta(
             is_continue_word_piece = t.startswith('##')
             example_is_begin_word_pieces.append(0 if is_continue_word_piece else 1)
             example_type_ids.append(type_id)
+            example_index_word_in_example.append(index_word_in_example)
+            example_index_token_in_sentence.append(index_token_in_sentence)
             # we follow the BERT paper and always use the first word-piece as the labeled one
             data_id = -1
             if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
                 data_id = data_ids[idx_group]
             example_data_ids.append(data_id)
 
-    _append_special_token('[SEP]')
+    _append_special_token(
+        '[SEP]',
+        index_word_in_example_=index_word_in_example + 1,
+        index_token_in_sentence_=index_token_in_sentence + 1)
 
     if data_key is None:
         data_key = dict()
@@ -319,4 +357,6 @@ def bert_tokenize_with_spacy_meta(
         head_location=_readonly(np.array(example_head_location)),
         head_tokens=tuple(example_token_head),
         head_token_ids=_readonly(np.array(bert_tokenizer.convert_tokens_to_ids(example_token_head))),
+        index_word_in_example=_readonly(np.array(example_index_word_in_example)),
+        index_token_in_sentence=_readonly(np.array(example_index_token_in_sentence)),
         data_ids=dict((k, example_data_ids) for k in data_key))

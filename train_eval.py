@@ -272,6 +272,8 @@ def train(
     else:
         param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta']
+    if settings.optimization_settings.is_train_prediction_heads_only:
+        param_optimizer = [(n, p) for n, p in param_optimizer if n.startswith('prediction_head.')]
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if n not in no_decay], 'weight_decay_rate': 0.01},
         {'params': [p for n, p in param_optimizer if n in no_decay], 'weight_decay_rate': 0.0}]
@@ -303,7 +305,9 @@ def train(
     else:
         epoch_range = range(int(settings.optimization_settings.num_train_epochs))
 
-    for _ in epoch_range:
+    for index_epoch in epoch_range:
+
+        logger.info('Starting epoch {}'.format(index_epoch))
 
         model.train()
 

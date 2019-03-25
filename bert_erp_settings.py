@@ -5,7 +5,7 @@ import numpy as np
 from bert_erp_datasets import CorpusKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_make_leave_out_fmri_run, PreparedDataView, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
-from bert_erp_modeling import CriticKeys, FMRIHead
+from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
 __all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'Settings']
@@ -33,6 +33,8 @@ class OptimizationSettings:
     gradient_accumulation_steps: int = 1
     # local_rank for distributed training on gpus; probably don't need this
     local_rank: int = -1
+    # If True, the bert parameters are not modified, only the parameters in the prediction heads
+    is_train_prediction_heads_only: bool = False
 
 
 @dataclass
@@ -79,7 +81,7 @@ def _default_preprocessors():
     return {
         ResponseKind.hp_fmri: PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode='content')),
+            PreprocessStandardize(stop_mode=None)),
         ResponseKind.hp_meg: PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
@@ -89,7 +91,7 @@ def _default_preprocessors():
         ResponseKind.ucl_self_paced: PreprocessMany(PreprocessLog(), preprocess_standardize),
         ResponseKind.ns_reaction_times: PreprocessMany(
             PreprocessClip(maximum=3000, value_beyond_max=np.nan), PreprocessLog(), preprocess_standardize),
-        ResponseKind.ns_froi: preprocess_standardize,
+        ResponseKind.ns_froi: PreprocessStandardize(stop_mode=None),
     }
 
 
@@ -101,14 +103,14 @@ def _default_prediction_heads():
 
     return {
         ResponseKind.hp_fmri: PredictionHeadSettings(
-            ResponseKind.hp_fmri, FMRIHead, dict(
+            ResponseKind.hp_fmri, FMRIConvConvWithDilationHead, dict(
                 hidden_channels=10,
                 hidden_kernel_size=5,
                 out_kernel_size=5,
                 out_dilation=5,
                 memory_efficient=False)),
         ResponseKind.ns_froi: PredictionHeadSettings(
-            ResponseKind.ns_froi, FMRIHead, dict(
+            ResponseKind.ns_froi, FMRIConvConvWithDilationHead, dict(
                 hidden_channels=10,
                 hidden_kernel_size=5,
                 out_kernel_size=5,

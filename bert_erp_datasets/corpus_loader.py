@@ -318,6 +318,8 @@ def _populate_default_field_specs(raw_data):
         'head_token_ids': FieldSpec(tensor_dtype=torch.long),
         'type_ids': FieldSpec(tensor_dtype=torch.long),
         'data_ids': FieldSpec(fill_value=-1, tensor_dtype=torch.long),
+        'index_word_in_example': FieldSpec(fill_value=-1, tensor_dtype=torch.long),
+        'index_token_in_sentence': FieldSpec(fill_value=0, tensor_dtype=torch.long)
     }
 
     if raw_data.field_specs is None:
