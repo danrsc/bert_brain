@@ -1,3 +1,4 @@
+import os
 import gc
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -171,6 +172,7 @@ def train(
         settings: Settings,
         output_validation_path: str,
         output_test_path: str,
+        output_model_path: str,
         train_data_set: PreparedDataDataset,
         validation_data_set: PreparedDataDataset,
         test_data_set: Optional[PreparedDataDataset],
@@ -408,6 +410,11 @@ def train(
 
     write_predictions(output_validation_path, all_validation, validation_data_set, settings)
     write_predictions(output_test_path, all_test, test_data_set, settings)
+
+    # Save a trained model and the associated configuration
+    if not os.path.exists(output_model_path):
+        os.makedirs(output_model_path)
+    model.save(output_model_path)
 
     # clean up after we're done to try to release CUDA resources to other people when there are no more tasks
     gc.collect()
