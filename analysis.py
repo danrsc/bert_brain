@@ -3,6 +3,7 @@ import warnings
 from functools import partial
 from collections import OrderedDict
 import dataclasses
+import inspect
 
 import numpy as np
 from scipy.misc import logsumexp
@@ -66,6 +67,10 @@ class Aggregator:
     def __contains__(self, item):
         return item in self._field_values
 
+    def __iter__(self):
+        for k in self._field_values:
+            yield k
+
     def value_dict(self, names=None, fn=None, value_on_key_error=None):
         if names is None:
             if fn is None:
@@ -90,7 +95,8 @@ class Aggregator:
         return self._counts[name]
 
 
-def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, compute_scalar=True):
+def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
+                           compute_scalar=True, **loss_handler_kwargs):
     output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
     aggregated = dict()
     losses = dict()
@@ -119,7 +125,7 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
                     assert (losses[name] == output_result.critic_type)
                 run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
         for name in run_aggregated:
-            handler = make_prediction_handler(losses[name])
+            handler = make_prediction_handler(losses[name], loss_handler_kwargs)
             result_dict = handler(run_aggregated[name])
             if compute_scalar:
                 result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
@@ -130,9 +136,11 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
     return aggregated, count_runs
 
 
-def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2):
+def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2,
+                            **loss_handler_kwargs):
 
-    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs)
+    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
+                                                    **loss_handler_kwargs)
 
     metrics = list()
     for metric in output_order:
@@ -220,7 +228,7 @@ def nan_pearson(x, y, axis=0, keepdims=False):
     return result
 
 
-def regression_handler(aggregator):
+def regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
 
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
@@ -261,6 +269,15 @@ def regression_handler(aggregator):
         povu=(mse / variance),
         variance=variance,
         r_seq=seq_r)
+
+    if k_vs_k_num_samples > 0:
+        k_vs_k_mask = np.reshape(mask, (mask.shape[0], -1))
+        if not np.all(k_vs_k_mask == k_vs_k_mask[:, 0:1]):
+            raise ValueError('For k_vs_k, the mask must be the same for all features')
+        k_vs_k_mask = k_vs_k_mask[:, 0]
+        accuracy = k_vs_k(
+            predictions[k_vs_k_mask], target[k_vs_k_mask], k=k_vs_k_k, num_samples=k_vs_k_num_samples)
+        result['{0}_vs_{0}'.format(k_vs_k_k)] = np.mean(accuracy, axis=0)
 
     return result
 
@@ -448,4 +465,76 @@ def make_prediction_handler(which_loss, loss_kwargs=None):
     if isinstance(factory, tuple):
         factory, factory_kwargs = factory
         loss_kwargs.update(factory_kwargs)
+    factory_signature = inspect.signature(factory)
+    bad_keys = [k for k in loss_kwargs if k not in factory_signature.parameters]
+    for k in bad_keys:
+        del loss_kwargs[k]
     return partial(factory, **loss_kwargs)
+
+
+def k_vs_k(predictions, target, k=20, num_samples=1000, pair_samples=None):
+    """
+    Estimates how accurate a classifier would be if the classifier chose between
+    1) the concatenated predictions of (e.g.) brain activity for the k examples corresponding to the true k examples
+    and
+    2) the concatenated predictions of k distractor examples
+    by looking to see whether the vector formed by the k true or k distractor example predictions is closer to the
+    vector formed by the k true target examples
+    Args:
+        predictions: The predictions output by a model. Should have shape (examples, ..., features) where examples is
+            typically 1 per word, and features is typically voxels in fMRI or sensors in MEG. Accuracy is scored
+            separately for each feature on the feature axis.
+        target:  The true values for the features. Must have the same shape as predictions
+        k: How many examples to combine together for the classifier
+        num_samples: The number of samples of k-concatenations to use for estimating accuracy
+        pair_samples: If present, must be a 1-D array with len(pair_samples) == len(predictions). pair_samples[i] gives
+            the id of a group, or a negative value indicates that the word at index i is never used. When a group id
+            is given, the distractor will contain a word with the same group id at the position in the concatenated
+            vector where word i is. Letting distractor_word_indices be the set of indices used in the distractor, and
+            true_word_indices be the indices used in the true k examples, then:
+            pair_samples[true_word_indices[j]] == pair_samples[distractor_word_indices[j]]
+
+    Returns:
+        An accuracy array of shape (num_samples, features)
+    """
+
+    if not np.array_equal(predictions.shape, target.shape):
+        raise ValueError('predictions and target must have the same shape')
+
+    # predictions, target data with the same shape: (words, ..., features)
+    # k = how many words to classify at once
+    # num_samples = how many words to classify
+    accuracy = np.full((num_samples, target.shape[-1] if len(target.shape) > 1 else 1), np.nan)
+
+    if pair_samples is not None and len(pair_samples) > 0:
+        if len(pair_samples) != len(predictions):
+            raise ValueError('When specified, pair_samples must have 1 value per example')
+        predictions = predictions[pair_samples >= 0]
+        target = target[pair_samples >= 0]
+        pair_samples = pair_samples[pair_samples >= 0]
+
+    for index_sample in range(num_samples):
+        indices_true = np.random.choice(len(target), k)
+        sample_target = np.reshape(target[indices_true], (-1, target.shape[-1]))
+        sample_predictions_correct = np.reshape(predictions[indices_true], (-1, predictions.shape[-1]))
+        if pair_samples is not None and len(pair_samples) > 0:
+            indices_distractor = _find_restricted_distractor_indices(indices_true, pair_samples)
+        else:
+            indices_distractor = np.random.choice(len(target), k)
+        sample_predictions_incorrect = np.reshape(predictions[indices_distractor], (-1, predictions.shape[-1]))
+
+        distance_correct = np.sum((sample_target - sample_predictions_correct) ** 2, axis=0)
+        distance_incorrect = np.sum((sample_target - sample_predictions_incorrect) ** 2, axis=0)
+        accuracy[index_sample] = \
+            (distance_correct < distance_incorrect) * 1.0 + (distance_correct == distance_incorrect) * 0.5
+    return accuracy
+
+
+def _find_restricted_distractor_indices(indices_true, pair_samples):
+    indices_distractor = np.zeros_like(indices_true)
+    for i, w in enumerate(indices_true):
+        id_group = pair_samples[w]
+        other_words = np.where(pair_samples == id_group)[0]
+        assert len(other_words) > 1
+        indices_distractor[i] = np.random.permutation(np.setdiff1d(other_words, np.array(w)))[0]
+    return indices_distractor
