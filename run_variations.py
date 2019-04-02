@@ -125,13 +125,16 @@ def run_variation(
         if os.path.exists(output_validation_path) and os.path.exists(output_test_path):
             continue
 
+        output_model_path = os.path.join(model_path, 'run_{}'.format(index_run))
+
         seed = _seed(settings.seed, index_run, n_gpu)
         data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
             data_id_in_batch_keys=settings.data_id_in_batch_keys)
 
-        train(settings, output_validation_path, output_test_path, train_data, validation_data, test_data, n_gpu, device)
+        train(settings, output_validation_path, output_test_path, output_model_path,
+              train_data, validation_data, test_data, n_gpu, device)
 
 
 def iterate_powerset(items):
@@ -163,9 +166,38 @@ def named_variations(name):
         training_variations = [('ns_spr',),
                                erp_tasks + ('ns_spr',),
                                ns_froi_tasks + ('ns_spr',),
+                               erp_tasks + ns_froi_tasks,
                                erp_tasks + ns_froi_tasks + ('ns_spr',)]
-        settings = Settings(corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.ucl))
-        num_runs = 100
+        settings = Settings(
+            corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.ucl),
+            optimization_settings=OptimizationSettings(num_train_epochs=50))
+        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
+            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.natural_stories] = dict(
+            froi_window_duration=10.,
+            froi_minimum_duration_required=9.5,
+            froi_use_word_unit_durations=False,
+            froi_sentence_mode='ignore')
+        num_runs = 10
+        min_memory = 4 * 1024 ** 3
+    elif name == 'ns_hp':
+        training_variations = [('hp_fmri_I',),
+                               ns_froi_tasks,
+                               ns_froi_tasks + ('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.harry_potter),
+            optimization_settings=OptimizationSettings(num_train_epochs=50))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
+            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.natural_stories] = dict(
+            froi_sentence_mode='ignore', froi_window_duration=10., froi_minimum_duration_required=9.5,
+            froi_use_word_unit_durations=False)
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+        num_runs = 10
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
@@ -176,7 +208,9 @@ def named_variations(name):
     elif name == 'number_agreement':
         agr = ('colorless', 'linzen_agree')
         training_variations = [agr, erp_tasks + agr, erp_tasks]
-        settings = Settings(corpus_keys=(CorpusKeys.colorless_green, CorpusKeys.linzen_agreement, CorpusKeys.ucl))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.colorless_green, CorpusKeys.linzen_agreement, CorpusKeys.ucl),
+            optimization_settings=OptimizationSettings(num_train_epochs=50))
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri':
@@ -190,7 +224,31 @@ def named_variations(name):
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=20))
+            optimization_settings=OptimizationSettings(num_train_epochs=50))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_meg':
+        training_variations = [('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=50))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_20_linear':
+        training_variations = [('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=50, is_train_prediction_heads_only=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -234,6 +292,7 @@ def main():
                 args.name))
             if answer in {'Y', 'y', 'N', 'n'}:
                 if answer == 'N' or answer == 'n':
+                    print('No action taken')
                     sys.exit(0)
                 break
 

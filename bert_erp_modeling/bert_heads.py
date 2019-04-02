@@ -1,10 +1,13 @@
+import os
 from collections import OrderedDict
 import logging
+import pickle
+import inspect
 
 import numpy as np
 import torch
 from torch import nn
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel
+from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME
 
 from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id
 
@@ -115,7 +118,20 @@ class MultiPredictionHead(torch.nn.Module):
             token_supplemental_skip_dropout_keys=None,
             pooled_supplemental_key_to_shape=None,
             pooled_supplemental_skip_dropout_keys=None):
+
         super().__init__()
+
+        def _maybe_copy(x):
+            return type(x)(x) if x is not None else None
+
+        self._save_kwargs = dict(
+            in_channels=in_channels,
+            supplemental_dropout_prob=supplemental_dropout_prob,
+            prediction_head_settings=list(prediction_head_settings),
+            token_supplemental_key_to_shape=_maybe_copy(token_supplemental_key_to_shape),
+            token_supplemental_skip_dropout_keys=_maybe_copy(token_supplemental_skip_dropout_keys),
+            pooled_supplemental_key_to_shape=_maybe_copy(pooled_supplemental_key_to_shape),
+            pooled_supplemental_skip_dropout_keys=_maybe_copy(pooled_supplemental_skip_dropout_keys))
 
         in_sequence_channels = in_channels
         in_pooled_channels = in_channels
@@ -169,6 +185,15 @@ class MultiPredictionHead(torch.nn.Module):
 
         return predictions
 
+    def save_kwargs(self, output_model_path):
+        with open(os.path.join(output_model_path, 'kwargs.pkl'), 'wb') as f:
+            pickle.dump(self._save_kwargs, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @staticmethod
+    def load_kwargs(model_path):
+        with open(os.path.join(model_path, 'kwargs.pkl'), 'rb') as f:
+            return pickle.load(f)
+
 
 class BertMultiPredictionHead(BertPreTrainedModel):
 
@@ -193,6 +218,27 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             pooled_supplemental_key_to_shape,
             pooled_supplemental_skip_dropout_keys)
         self.apply(self.init_bert_weights)
+
+    def save(self, output_model_path):
+        output_model_file = os.path.join(output_model_path, WEIGHTS_NAME)
+        torch.save(self.state_dict(), output_model_file)
+        output_config_file = os.path.join(output_model_path, CONFIG_NAME)
+        with open(output_config_file, 'w') as f:
+            f.write(self.config.to_json_string())
+        self.prediction_head.save_kwargs(output_model_path)
+
+    @classmethod
+    def load(cls, model_path):
+        config = BertConfig(os.path.join(model_path, CONFIG_NAME))
+        kwargs = MultiPredictionHead.load_kwargs(model_path)
+        signature = inspect.signature(cls.__init__)
+        bad_keys = [k for k in kwargs if k not in signature.parameters]
+        for k in bad_keys:
+            del kwargs[k]
+        bound = signature.bind_partial(**kwargs)
+        model = cls(config, **bound.kwargs)
+        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME)))
+        return model
 
     def forward(self, batch, dataset):
         sequence_output, pooled_output = self.bert(
