@@ -14,13 +14,13 @@ from tqdm import tqdm, trange
 from bert_erp_datasets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
 from bert_erp_modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
 from bert_erp_settings import Settings, PredictionHeadSettings
-from result_output import write_predictions
+from result_output import write_predictions, write_loss_curve
 
 
 logger = logging.getLogger(__name__)
 
 
-__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'make_datasets']
+__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'make_datasets', 'setup_prediction_heads_and_losses']
 
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -168,44 +168,30 @@ def _raise_if_head_settings_inconsistent(head_a, head_b):
             raise ValueError('Inconsistent kwargs in prediction head settings with same key: {}'.format(head_b.key))
 
 
-def train(
-        settings: Settings,
-        output_validation_path: str,
-        output_test_path: str,
-        output_model_path: str,
-        train_data_set: PreparedDataDataset,
-        validation_data_set: PreparedDataDataset,
-        test_data_set: Optional[PreparedDataDataset],
-        n_gpu: int,
-        device):
-
-    num_train_steps = int(
-        len(train_data_set) /
-        settings.optimization_settings.train_batch_size /
-        settings.optimization_settings.gradient_accumulation_steps * settings.optimization_settings.num_train_epochs)
+def setup_prediction_heads_and_losses(settings, data_set):
 
     loss_example_counts = dict()
     loss_handlers = list()
 
-    all_kinds = set([train_data_set.response_data_kind(k) for k in train_data_set.fields
-                     if train_data_set.response_data_kind(k) is not None])
+    all_kinds = set([data_set.response_data_kind(k) for k in data_set.fields
+                     if data_set.response_data_kind(k) is not None])
 
     for k in settings.loss_tasks:
-        if k not in all_kinds and k not in train_data_set.fields:
+        if k not in all_kinds and k not in data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
     prediction_heads = dict()
-    for k in train_data_set.fields:
-        kind = train_data_set.response_data_kind(k) if train_data_set.is_response_data(k) else None
-        corpus_key = train_data_set.data_set_key_for_field(k)
-        if k in settings.loss_tasks or k in settings.non_response_outputs or train_data_set.is_response_data(k):
+    for k in data_set.fields:
+        kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
+        corpus_key = data_set.data_set_key_for_field(k)
+        if k in settings.loss_tasks or k in settings.non_response_outputs or data_set.is_response_data(k):
             if k in settings.loss_tasks or kind in settings.loss_tasks:
-                loss_example_counts[k] = train_data_set.num_examples_for_field(k)
-            critic_settings = settings.get_critic(k, train_data_set)
+                loss_example_counts[k] = data_set.num_examples_for_field(k)
+            critic_settings = settings.get_critic(k, data_set)
             handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
             loss_handlers.append(handler)
 
-            prediction_shape = handler.shape_adjust(train_data_set.value_shape(k))
+            prediction_shape = handler.shape_adjust(data_set.value_shape(k))
             prediction_head_settings = None
             if k in settings.prediction_heads:
                 prediction_head_settings = settings.prediction_heads[k]
@@ -215,7 +201,7 @@ def train(
                 prediction_head_settings = settings.prediction_heads[corpus_key]
 
             if prediction_head_settings is None:
-                if train_data_set.is_sequence(k):
+                if data_set.is_sequence(k):
                     prediction_head_settings = PredictionHeadSettings(
                         '__default_sequence__', KeyedLinear, dict(is_sequence=True))
                 else:
@@ -239,12 +225,37 @@ def train(
     token_supplemental_key_to_shape = OrderedDict()
     pooled_supplemental_key_to_shape = OrderedDict()
 
-    for k in train_data_set.fields:
+    for k in data_set.fields:
         if k in settings.supplemental_fields:
-            if train_data_set.is_sequence(k):
-                token_supplemental_key_to_shape[k] = train_data_set.value_shape(k)
+            if data_set.is_sequence(k):
+                token_supplemental_key_to_shape[k] = data_set.value_shape(k)
             else:
-                pooled_supplemental_key_to_shape[k] = train_data_set.value_shape(k)
+                pooled_supplemental_key_to_shape[k] = data_set.value_shape(k)
+
+    return prediction_heads, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers
+
+
+def train(
+        settings: Settings,
+        output_validation_path: str,
+        output_test_path: str,
+        output_model_path: str,
+        train_data_set: PreparedDataDataset,
+        validation_data_set: PreparedDataDataset,
+        test_data_set: Optional[PreparedDataDataset],
+        n_gpu: int,
+        device):
+
+    output_train_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'train_curve.npz')
+    output_validation_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'validation_curve.npz')
+
+    num_train_steps = int(
+        len(train_data_set) /
+        settings.optimization_settings.train_batch_size /
+        settings.optimization_settings.gradient_accumulation_steps * settings.optimization_settings.num_train_epochs)
+
+    prediction_heads, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
+        setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
     model = BertMultiPredictionHead.from_pretrained(
@@ -386,8 +397,10 @@ def train(
             gc.collect()
             torch.cuda.empty_cache()
 
+        write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
             evaluate(settings, model, loss_handlers, device, global_step, validation_results, validation_data_set)
+            write_loss_curve(output_validation_curve_path, validation_results)
 
     logger.info("***** Running predictions *****")
     logger.info("  Num orig examples = %d", len(validation_data_set))

@@ -36,7 +36,7 @@ from bert_erp_paths import Paths
 from bert_erp_modeling import KeyedLinear
 from train_eval import train, make_datasets
 
-__all__ = ['task_hash', 'named_variations', 'run_variation', 'iterate_powerset']
+__all__ = ['task_hash', 'named_variations', 'run_variation', 'iterate_powerset', 'set_random_seeds']
 
 
 replace_root_logger_handler()
@@ -50,7 +50,7 @@ def task_hash(loss_tasks):
     return hash_.hexdigest()
 
 
-def _seed(seed, index_run, n_gpu):
+def set_random_seeds(seed, index_run, n_gpu):
     hash_ = hashlib.sha256('{}'.format(seed).encode())
     hash_.update('{}'.format(index_run).encode())
     seed = np.frombuffer(hash_.digest(), dtype='uint32')
@@ -127,7 +127,7 @@ def run_variation(
 
         output_model_path = os.path.join(model_path, 'run_{}'.format(index_run))
 
-        seed = _seed(settings.seed, index_run, n_gpu)
+        seed = set_random_seeds(settings.seed, index_run, n_gpu)
         data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
@@ -180,6 +180,22 @@ def named_variations(name):
             froi_sentence_mode='ignore')
         num_runs = 10
         min_memory = 4 * 1024 ** 3
+    elif name == 'ns_froi':
+        training_variations = [ns_froi_tasks]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.natural_stories,),
+            optimization_settings=OptimizationSettings(num_train_epochs=3))
+        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
+            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.natural_stories] = dict(
+            froi_sentence_mode='ignore',
+            froi_window_duration=10.,
+            froi_minimum_duration_required=9.5,
+            froi_use_word_unit_durations=False,
+            froi_minimum_story_count=2,
+            include_reaction_times=False)
+        num_runs = 7  # there are 7 stories that have been recorded in froi
+        min_memory = 4 * 1024 ** 3
     elif name == 'ns_hp':
         training_variations = [('hp_fmri_I',),
                                ns_froi_tasks,
@@ -192,11 +208,17 @@ def named_variations(name):
         settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
             ResponseKind.ns_froi, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.natural_stories] = dict(
-            froi_sentence_mode='ignore', froi_window_duration=10., froi_minimum_duration_required=9.5,
-            froi_use_word_unit_durations=False)
+            froi_sentence_mode='ignore',
+            froi_window_duration=10.,
+            froi_minimum_duration_required=9.5,
+            froi_use_word_unit_durations=False,
+            froi_minimum_story_count=2,
+            include_reaction_times=False)
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
             fmri_subjects='I',
-            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.,
+            fmri_minimum_duration_required=9.5)
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
@@ -241,7 +263,11 @@ def named_variations(name):
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
             fmri_subjects='I',
-            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.,
+            fmri_minimum_duration_required=9.5,
+            group_meg_sentences_like_fmri=True,
+            use_pca_meg=False)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':

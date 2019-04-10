@@ -282,7 +282,8 @@ class NaturalStoriesCorpus(CorpusBase):
             froi_window_duration: float = 8.,
             froi_minimum_duration_required: float = 7.8,
             froi_use_word_unit_durations: bool = False,
-            froi_sentence_mode: str = 'multiple'):
+            froi_sentence_mode: str = 'multiple',
+            froi_minimum_story_count: int = 1):
         """
 
         Args:
@@ -312,6 +313,8 @@ class NaturalStoriesCorpus(CorpusBase):
                 the feature window is truncated by the start of a sentence, thus resulting in examples with one
                 sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
                 without consideration of the sentence boundaries
+            froi_minimum_story_count: A participant must have heard at least this many stories in the scanner to be
+                included
         """
         self.path = path
         self.include_reaction_times = include_reaction_times
@@ -324,6 +327,7 @@ class NaturalStoriesCorpus(CorpusBase):
             minimum_duration_required=froi_minimum_duration_required,
             use_word_unit_durations=froi_use_word_unit_durations,
             sentence_mode=froi_sentence_mode)
+        self.froi_minimum_story_count = froi_minimum_story_count
 
     def _load(self, example_manager: CorpusExampleUnifier):
 
@@ -331,6 +335,8 @@ class NaturalStoriesCorpus(CorpusBase):
         story_ids = list()
 
         froi_examples = None
+        froi_subject_stories_subjects = None
+        froi_subject_stories_stories = None
         if ((self.include_reaction_times and self.group_reaction_time_sentences_like_froi)
                 or self.froi_subjects is None  # None means all subjects
                 or len(self.froi_subjects)) > 0:
@@ -338,7 +344,8 @@ class NaturalStoriesCorpus(CorpusBase):
             froi_response_data = None
             item_to_num_images = None
             if self.froi_subjects is None or len(self.froi_subjects) > 0:
-                froi_response_data, item_to_num_images, _ = self._read_froi_response_data()
+                froi_response_data, item_to_num_images, _, froi_subject_stories = self._read_froi_response_data()
+                froi_subject_stories_subjects, froi_subject_stories_stories = froi_subject_stories
                 for k in froi_response_data:
                     data[k] = KindData(ResponseKind.ns_froi, froi_response_data[k])
 
@@ -391,12 +398,17 @@ class NaturalStoriesCorpus(CorpusBase):
 
         story_ids = np.array(story_ids)
         story_ids.setflags(write=False)
+        froi_subject_stories_subjects.setflags(write=False)
+        froi_subject_stories_stories.setflags(write=False)
 
         for k in data:
             data[k].data.setflags(write=False)
 
         return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1,
-                       metadata=dict(story_ids=story_ids))
+                       metadata=dict(
+                           story_ids=story_ids,
+                           froi_subject_stories_subjects=froi_subject_stories_subjects,
+                           froi_subject_stories_stories=froi_subject_stories_stories))
 
     def _read_reaction_time_batches(self):
         groups = dict()
@@ -521,7 +533,7 @@ class NaturalStoriesCorpus(CorpusBase):
                 word_times=word_times,
                 word_sentence_ids=[w.sentence for w in item_words[item]],
                 tr_times=time_images,
-                tr_offset=item_tr_offsets[item]))
+                tr_offset=item_tr_offsets[item] + self.froi_skip_start_trs))
 
         return examples
 
@@ -547,16 +559,16 @@ class NaturalStoriesCorpus(CorpusBase):
         num_rois = None
 
         for subject in froi_subjects:
-            collated_data[subject] = dict()
             subject_path = os.path.join(froi_path, subject + suffix)
             data = loadmat(subject_path)
             data = data['data']['stories'][0, 0]
             stories = data.dtype.fields.keys()
-
+            # Tree is not part of the natural stories corpus
+            stories = [s for s in stories if s != 'Tree']
+            if len(stories) < self.froi_minimum_story_count:
+                continue
+            collated_data[subject] = dict()
             for story in stories:
-                if story == 'Tree':
-                    # not part of the natural stories corpus
-                    continue
                 # (roi, image)
                 # Note that these time-series begin with 16s (8 time points) of fixation,
                 # and end with either 16 or 32s (8 or 16 time points) of fixation
@@ -578,15 +590,25 @@ class NaturalStoriesCorpus(CorpusBase):
 
         # transform collated data into an (image, subject, roi) array
         data = np.full((sum(item_to_num_images[i] for i in item_to_num_images), len(collated_data), num_rois), np.nan)
+        subject_stories = (list(), list())
         subjects = sorted(collated_data)
-        items = sorted(item_to_num_images)
+        item_to_num_images = OrderedDict((k, item_to_num_images[k]) for k in sorted(item_to_num_images))
         data_offset = 0
-        for item in items:
+        for index_item, item in enumerate(item_to_num_images):
             for index_subject, subject in enumerate(subjects):
                 if item in collated_data[subject]:
+                    # keep track of which subjects have read which stories, so we can use this in
+                    # the train/test split scheme later
+                    subject_stories[0].append(subject)
+                    subject_stories[1].append(item)
+
+                    # set the data
                     data[data_offset:(data_offset + item_to_num_images[item]), index_subject] = collated_data[subject][
                         item]
+
             data_offset += item_to_num_images[item]
+
+        subject_stories = (np.array(subject_stories[0]), np.array(subject_stories[1]))
 
         # get rois in order; tuples are abbreviations, followed by full name
         hemisphere_rois = [
@@ -608,7 +630,7 @@ class NaturalStoriesCorpus(CorpusBase):
             (n, np.squeeze(d, axis=2))
             for n, d in zip(data_keys, np.split(data, data.shape[2], axis=2)))
 
-        return data, item_to_num_images, subjects
+        return data, item_to_num_images, subjects, subject_stories
 
     def _add_froi_targets(
             self, example_manager: CorpusExampleUnifier, examples, froi_response_data, item_to_num_images):
@@ -673,26 +695,32 @@ def natural_stories_make_leave_stories_out(index_variation_run):
 def natural_stories_leave_stories_out(raw_data, index_variation_run, random_state=None, shuffle=True):
     story_ids = raw_data.metadata['story_ids']
     stories_with_froi = set()
-    froi_response_keys = [k for k in raw_data.response_data if raw_data.response_data[k].kind == ResponseKind.ns_froi]
+    stories_without_froi = set()
+    froi_response_keys = set(
+        k for k in raw_data.response_data if raw_data.response_data[k].kind == ResponseKind.ns_froi)
     for example in raw_data.input_examples:
-        for k in froi_response_keys:
+        for k in raw_data.response_data:
             if np.any(example.data_ids[k] >= 0):
-                stories_with_froi.add(story_ids[example.unique_id])
-                break
+                if k in froi_response_keys:
+                    stories_with_froi.add(story_ids[example.unique_id])
+                else:
+                    stories_without_froi.add(story_ids[example.unique_id])
 
-    stories_without_froi = np.array([s for s in np.unique(story_ids) if s not in stories_with_froi])
-    stories_with_froi = np.array(list(sorted(stories_with_froi)))
+    stories_without_froi = list(sorted(stories_without_froi))
+    stories_with_froi = list(sorted(stories_with_froi))
 
-    if random_state:
-        random_state.shuffle(stories_with_froi)
-        random_state.shuffle(stories_without_froi)
+    if len(stories_with_froi) == 0:
+        folds = stories_without_froi
+    elif len(stories_without_froi) == 0:
+        folds = stories_with_froi
     else:
-        np.random.shuffle(stories_with_froi)
-        np.random.shuffle(stories_without_froi)
+        folds = list(itertools.product(stories_without_froi, stories_with_froi))
 
-    folds = list(itertools.product(stories_with_froi, stories_without_froi))
-
-    validation_stories = set(folds[index_variation_run % len(folds)])
+    validation_stories = folds[index_variation_run % len(folds)]
+    if np.isscalar(validation_stories):
+        validation_stories = {validation_stories}
+    else:
+        validation_stories = set(validation_stories)
 
     train_examples = list()
     validation_examples = list()

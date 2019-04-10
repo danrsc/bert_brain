@@ -71,6 +71,9 @@ class Aggregator:
         for k in self._field_values:
             yield k
 
+    def __getitem__(self, item):
+        return self._field_values[item]
+
     def value_dict(self, names=None, fn=None, value_on_key_error=None):
         if names is None:
             if fn is None:
@@ -134,6 +137,53 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
             aggregated[name].update(result_dict, is_sequence=False)
 
     return aggregated, count_runs
+
+
+def print_variation_results_sliced(
+        paths, variation_set_name, training_variation, aux_loss, num_runs, metric='pove',
+        field_precision=2, num_values_per_table=10, **loss_handler_kwargs):
+
+    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
+                                                    compute_scalar=False, **loss_handler_kwargs)
+
+    values = OrderedDict((name, np.nanmean(aggregated[name].values(metric), axis=0)) for name in aggregated)
+
+    grouped_by_shape = OrderedDict()
+    for name in values:
+        if values[name].shape not in grouped_by_shape:
+            grouped_by_shape[values[name].shape] = [name]
+        else:
+            grouped_by_shape[values[name].shape].append(name)
+
+    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, ', '.join(sorted(training_variation))))
+
+    for shape in grouped_by_shape:
+        num_tables = int(np.ceil(np.prod(shape) / num_values_per_table))
+        for i in range(num_tables):
+            indices = np.arange(num_values_per_table) + i * num_values_per_table
+            indices = indices[indices < np.prod(shape)]
+            indices = np.unravel_index(indices, shape)
+
+            text_grid = TextGrid()
+            text_grid.append_value('name', column_padding=2)
+            # indices is a tuple of arrays, length 1 is a special case
+            for index in indices[0] if len(indices) == 1 else zip(indices):
+                text_grid.append_value('{}'.format(index), line_style=TextWrapStyle.right_justify, column_padding=2)
+            text_grid.next_row()
+            value_format = '{' + ':.{}f'.format(field_precision) + '}'
+            for name in grouped_by_shape[shape]:
+                text_grid.append_value(name, column_padding=2)
+                current_values = values[name][indices]
+                for value in current_values:
+                    text_grid.append_value(
+                        value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
+                text_grid.next_row()
+
+            write_text_grid_to_console(text_grid, width='tight')
+            print('')
+
+    print('')
+    print('')
 
 
 def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2,
@@ -472,7 +522,7 @@ def make_prediction_handler(which_loss, loss_kwargs=None):
     return partial(factory, **loss_kwargs)
 
 
-def k_vs_k(predictions, target, k=20, num_samples=1000, pair_samples=None):
+def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
     """
     Estimates how accurate a classifier would be if the classifier chose between
     1) the concatenated predictions of (e.g.) brain activity for the k examples corresponding to the true k examples
@@ -487,12 +537,12 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_samples=None):
         target:  The true values for the features. Must have the same shape as predictions
         k: How many examples to combine together for the classifier
         num_samples: The number of samples of k-concatenations to use for estimating accuracy
-        pair_samples: If present, must be a 1-D array with len(pair_samples) == len(predictions). pair_samples[i] gives
-            the id of a group, or a negative value indicates that the word at index i is never used. When a group id
-            is given, the distractor will contain a word with the same group id at the position in the concatenated
-            vector where word i is. Letting distractor_word_indices be the set of indices used in the distractor, and
-            true_word_indices be the indices used in the true k examples, then:
-            pair_samples[true_word_indices[j]] == pair_samples[distractor_word_indices[j]]
+        pair_examples: If present, must be a 1-D array with len(pair_examples) == len(predictions). pair_examples[i]
+            gives the id of a group, or a negative value indicates that the word at index i should never be used. When
+            a group id is given, the distractor will contain a word with the same group id at the position in the
+            concatenated vector where word i is. Letting distractor_word_indices be the set of indices used in the
+            distractor, and true_word_indices be the indices used in the true k examples, then:
+            pair_examples[true_word_indices[j]] == pair_examples[distractor_word_indices[j]]
 
     Returns:
         An accuracy array of shape (num_samples, features)
@@ -506,19 +556,19 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_samples=None):
     # num_samples = how many words to classify
     accuracy = np.full((num_samples, target.shape[-1] if len(target.shape) > 1 else 1), np.nan)
 
-    if pair_samples is not None and len(pair_samples) > 0:
-        if len(pair_samples) != len(predictions):
-            raise ValueError('When specified, pair_samples must have 1 value per example')
-        predictions = predictions[pair_samples >= 0]
-        target = target[pair_samples >= 0]
-        pair_samples = pair_samples[pair_samples >= 0]
+    if pair_examples is not None and len(pair_examples) > 0:
+        if len(pair_examples) != len(predictions):
+            raise ValueError('When specified, pair_examples must have 1 value per example')
+        predictions = predictions[pair_examples >= 0]
+        target = target[pair_examples >= 0]
+        pair_examples = pair_examples[pair_examples >= 0]
 
     for index_sample in range(num_samples):
         indices_true = np.random.choice(len(target), k)
         sample_target = np.reshape(target[indices_true], (-1, target.shape[-1]))
         sample_predictions_correct = np.reshape(predictions[indices_true], (-1, predictions.shape[-1]))
-        if pair_samples is not None and len(pair_samples) > 0:
-            indices_distractor = _find_restricted_distractor_indices(indices_true, pair_samples)
+        if pair_examples is not None and len(pair_examples) > 0:
+            indices_distractor = _find_restricted_distractor_indices(indices_true, pair_examples)
         else:
             indices_distractor = np.random.choice(len(target), k)
         sample_predictions_incorrect = np.reshape(predictions[indices_distractor], (-1, predictions.shape[-1]))
@@ -530,11 +580,21 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_samples=None):
     return accuracy
 
 
-def _find_restricted_distractor_indices(indices_true, pair_samples):
+def _find_restricted_distractor_indices(indices_true, pair_examples):
     indices_distractor = np.zeros_like(indices_true)
     for i, w in enumerate(indices_true):
-        id_group = pair_samples[w]
-        other_words = np.where(pair_samples == id_group)[0]
+        id_group = pair_examples[w]
+        other_words = np.where(pair_examples == id_group)[0]
         assert len(other_words) > 1
         indices_distractor[i] = np.random.permutation(np.setdiff1d(other_words, np.array(w)))[0]
     return indices_distractor
+
+
+def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None):
+    from matplotlib import cm, colors
+    cmap = cm.ScalarMappable(colors.Normalize(vmin=vmin, vmax=vmax), cmap=cmap)
+    fmt = '<span style="background-color:{hex}{text_color}">{word}</span>'
+    fmt = fmt.format(hex='{hex}', word='{word}', text_color='' if text_color is None else ';color:{text_color}')
+    word_colors = cmap.to_rgba(scores)
+    return '&nbsp;'.join(
+        [fmt.format(word=w, hex=colors.to_hex(c), text_color=text_color) for w, c in zip(words, word_colors)])

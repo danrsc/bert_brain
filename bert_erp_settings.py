@@ -81,11 +81,15 @@ def _default_preprocessors():
     return {
         ResponseKind.hp_fmri: PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None)),
+            PreprocessStandardize(stop_mode=None, average_axis=None)),
         ResponseKind.hp_meg: PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
             PreprocessStandardize(average_axis=None, stop_mode='content')),
+        # ResponseKind.hp_meg: PreprocessMany(
+        #     PreprocessDetrend(stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+        #     PreprocessStandardize(stop_mode='content', average_axis=None)),
+
         ResponseKind.ucl_erp: preprocess_standardize,
         ResponseKind.ucl_eye: PreprocessMany(PreprocessLog(), preprocess_standardize),
         ResponseKind.ucl_self_paced: PreprocessMany(PreprocessLog(), preprocess_standardize),

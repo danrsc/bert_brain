@@ -164,9 +164,10 @@ class HarryPotterCorpus(CorpusBase):
         metadata = dict(fmri_runs=run_at_unique_id)
 
         if self.include_meg:
-            meg = self._read_meg(example_manager, meg_examples)
+            meg, block_metadata = self._read_meg(example_manager, meg_examples)
             for k in meg:
                 data[k] = KindData(ResponseKind.hp_meg, meg[k])
+            metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
             fmri = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
@@ -193,7 +194,8 @@ class HarryPotterCorpus(CorpusBase):
 
         # see make_harry_potter.ipynb for how these are constructed
         meg_path = os.path.join(
-            self.path, 'harry_potter_meg_100ms.npz' if not self.use_pca_meg else 'harry_potter_meg_100ms_pca.npz')
+            self.path, 'harry_potter_meg_100ms_mean_flip.npz'
+            if not self.use_pca_meg else 'harry_potter_meg_100ms_pca.npz')
 
         loaded = np.load(meg_path)
 
@@ -202,9 +204,9 @@ class HarryPotterCorpus(CorpusBase):
         assert(stimuli[2364] == '..."')
         stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
 
-        # blocks should be int, but is stored as float; blocks are not currently used, but are available
-        # blocks = loaded['blocks']
-        # blocks = np.round(blocks).astype(np.int64)
+        # blocks should be int, but is stored as float
+        blocks = loaded['blocks']
+        blocks = np.round(blocks).astype(np.int64)
         # (subjects, words, rois, 100ms_slices)
         data = loaded['data']
         rois = loaded['rois']
@@ -240,10 +242,10 @@ class HarryPotterCorpus(CorpusBase):
         not_plus = np.logical_not(indicator_plus)
         data = data[not_plus]
         stimuli = stimuli[not_plus]
+        blocks = blocks[not_plus]
 
         new_indices[not_plus] = np.arange(len(data))
 
-        # blocks = blocks[not_plus]
         # example_id_words = example_id_words[not_plus]
 
         # data is (words, subjects, rois, 100ms_slices)
@@ -280,6 +282,8 @@ class HarryPotterCorpus(CorpusBase):
                     separated_data[k_new] = np.take(data[k], idx_time, axis=time_axis)
             data = separated_data
 
+        block_metadata = np.full(len(example_manager), -1, dtype=np.int64)
+
         for example in examples:
             indices = np.array([w.index_in_all_words for w in example.full_sentences])
             # use these instead of the words given in example to ensure our indexing is not off
@@ -297,7 +301,13 @@ class HarryPotterCorpus(CorpusBase):
                 allow_new_examples=False)
             assert (features is not None)
 
-        return data
+            example_blocks = blocks[new_indices[indices]]
+            assert(np.all(example_blocks == example_blocks[0]))
+            block_metadata[features.unique_id] = example_blocks[0]
+
+        assert(np.all(block_metadata) >= 0)
+
+        return data, block_metadata
 
     def _read_harry_potter_fmri_files(self):
         # noinspection PyPep8

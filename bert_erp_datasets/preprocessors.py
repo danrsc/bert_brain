@@ -122,8 +122,21 @@ class PreprocessDetrend:
             x = x[indicator_train]
             to_fit = to_fit[indicator_train]
 
-        to_fit = np.ma.masked_invalid(to_fit)
-        p = np.ma.polyfit(x, np.reshape(to_fit, (to_fit.shape[0], -1)), deg=1)
+        if len(to_fit) == 0:
+            return arr
+
+        to_fit = np.reshape(np.ma.masked_invalid(to_fit), (to_fit.shape[0], -1))
+
+        # some columns might not have any data
+        indicator_can_fit = np.logical_not(np.all(to_fit.mask, axis=0))
+        to_fit = to_fit[:, indicator_can_fit]
+
+        p = np.ma.polyfit(x, to_fit, deg=1)
+
+        filled_p = np.zeros((p.shape[0], len(indicator_can_fit)), p.dtype)
+        filled_p[:, indicator_can_fit] = p
+        p = filled_p
+
         #      (1, num_columns)            (num_rows, 1)
         lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(arr)), (-1, 1)) + np.reshape(p[1], (1, -1))
         lines = np.reshape(lines, arr.shape)

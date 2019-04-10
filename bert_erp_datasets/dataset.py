@@ -294,6 +294,9 @@ class PreparedDataDataset(torch.utils.data.Dataset):
     def is_sequence(self, field):
         return self._field_specs[field].is_sequence
 
+    def fill_value(self, field):
+        return self._field_specs[field].fill_value
+
     def __getitem__(self, item):
         result = OrderedDict((k, self._example_tensors[k][item]) for k in self._example_tensors)
         # we assemble the response data JIT to reduce the memory footprint
@@ -334,7 +337,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
     def data_set_key_for_id(self, data_set_id):
         if isinstance(data_set_id, torch.Tensor):
             data_set_id = data_set_id.cpu().item()
-        elif isinstance(data_set_id, np.array):
+        elif isinstance(data_set_id, np.ndarray):
             data_set_id = data_set_id.item()
         return self._data_set_id_to_data_set_key[data_set_id]
 
@@ -346,11 +349,11 @@ class PreparedDataDataset(torch.utils.data.Dataset):
     def get_tokens(self, data_set_id, item_id):
         if isinstance(data_set_id, torch.Tensor):
             data_set_id = data_set_id.cpu().item()
-        elif isinstance(data_set_id, np.array):
+        elif isinstance(data_set_id, np.ndarray):
             data_set_id = data_set_id.item()
         if isinstance(item_id, torch.Tensor):
             item_id = item_id.cpu().item()
-        elif isinstance(item_id, np.array):
+        elif isinstance(item_id, np.ndarray):
             item_id = item_id.item()
         key = (data_set_id, item_id)
         if key not in self._data_id_to_tokens:
