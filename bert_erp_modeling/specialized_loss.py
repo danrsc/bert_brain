@@ -26,7 +26,8 @@ __all__ = [
     'NamedTargetSingleSoftLabelCrossEntropy',
     'CriticMapping',
     'CriticKeys',
-    'make_loss_handler']
+    'make_loss_handler',
+    'DetailedResult']
 
 
 class NoValidInputs(Exception):
@@ -189,9 +190,9 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
 
 @dataclass
 class DetailedResult:
-    mask: Optional[np.array]
-    prediction: np.array
-    target: np.array
+    mask: Optional[np.ndarray]
+    prediction: np.ndarray
+    target: np.ndarray
     sequence_type: str
     data_set_id: Optional[int] = None
     unique_id: Optional[int] = None

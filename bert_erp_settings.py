@@ -81,7 +81,7 @@ def _default_preprocessors():
     return {
         ResponseKind.hp_fmri: PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, average_axis=None)),
+            PreprocessStandardize(stop_mode=None)),
         ResponseKind.hp_meg: PreprocessMany(
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),

@@ -3,9 +3,9 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Mapping, Sequence, Optional, Union
 from functools import partial
+
 import numpy as np
 from scipy.spatial.distance import cdist
-
 from scipy.io import loadmat
 from scipy.ndimage.filters import gaussian_filter1d
 
@@ -604,8 +604,8 @@ def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, di
     slice_coord = np.concatenate([x * max_x, y * max_y, z * max_z], axis=1)
 
     mask_z, mask_y, mask_x = np.where(mask)
-    mask_coord = np.concatenate([np.expand_dims(mask_x, 1), np.expand_dims(mask_y, 1), np.expand_dims(mask_z, 1)],
-                                axis=1)
+    mask_coord = np.concatenate(
+        [np.expand_dims(mask_x, 1), np.expand_dims(mask_y, 1), np.expand_dims(mask_z, 1)], axis=1)
 
     distances = cdist(slice_coord, mask_coord)
 
@@ -637,4 +637,4 @@ def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, di
         compressed_indices = np.squeeze(compressed_indices, axis=0)
         compressed_distances = np.squeeze(compressed_distances, axis=0)
 
-    return compressed_indices, compressed_distances
+    return compressed_indices, compressed_distances, mask_coord.shape[0]

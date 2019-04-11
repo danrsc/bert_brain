@@ -228,7 +228,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         self.prediction_head.save_kwargs(output_model_path)
 
     @classmethod
-    def load(cls, model_path):
+    def load(cls, model_path, map_location=None):
         config = BertConfig(os.path.join(model_path, CONFIG_NAME))
         kwargs = MultiPredictionHead.load_kwargs(model_path)
         signature = inspect.signature(cls.__init__)
@@ -237,7 +237,9 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             del kwargs[k]
         bound = signature.bind_partial(**kwargs)
         model = cls(config, **bound.kwargs)
-        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME)))
+
+        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location))
+
         return model
 
     def forward(self, batch, dataset):
