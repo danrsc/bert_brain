@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence, Optional, Union
 from functools import partial
 import numpy as np
+from scipy.spatial.distance import cdist
 
 from scipy.io import loadmat
 from scipy.ndimage.filters import gaussian_filter1d
@@ -18,7 +19,7 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
-           'harry_potter_make_leave_out_fmri_run']
+           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates']
 
 
 @dataclass
@@ -587,3 +588,53 @@ def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=
             np.random.shuffle(validation_examples)
     test_examples = list()
     return train_examples, validation_examples, test_examples
+
+
+def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, distance=None):
+
+    mask = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+
+    max_z, max_y, max_x = mask.shape
+
+    is_single = np.isscalar(x) and np.isscalar(y) and np.isscalar(z)
+
+    x, y, z = np.reshape(np.asarray(x), (-1, 1)), np.reshape(np.asarray(y), (-1, 1)), np.reshape(np.asarray(z), (-1, 1))
+
+    # transform from normalized coordinates to voxel space
+    slice_coord = np.concatenate([x * max_x, y * max_y, z * max_z], axis=1)
+
+    mask_z, mask_y, mask_x = np.where(mask)
+    mask_coord = np.concatenate([np.expand_dims(mask_x, 1), np.expand_dims(mask_y, 1), np.expand_dims(mask_z, 1)],
+                                axis=1)
+
+    distances = cdist(slice_coord, mask_coord)
+
+    if distance is not None:
+        distances[distances > distance] = np.nan
+    if closest_k is None:
+        closest_k = distances.shape[1]
+    max_valid = np.max(np.sum(np.logical_not(np.isnan(distances)), axis=1))
+    closest_k = min(max_valid, closest_k)
+
+    # nan sorts last
+    closest_indices = np.take(np.argsort(distances, axis=1), np.arange(closest_k), axis=1)
+    axis_0_indices = np.tile(np.reshape(np.arange(len(closest_indices)), (-1, 1, 1)), (1, closest_indices.shape[1], 1))
+    axis_1_compressed_indices = np.tile(np.reshape(np.arange(closest_k), (1, -1, 1)), (closest_indices.shape[0], 1, 1))
+    closest_indices = np.reshape(
+        np.concatenate([axis_0_indices, np.expand_dims(closest_indices, 2), axis_1_compressed_indices], axis=2),
+        (-1, 3))
+    axis_0, indices, axis_1 = np.split(closest_indices, 3, axis=1)
+
+    compressed_distances = np.full((distances.shape[0], closest_k), np.nan)
+    compressed_indices = np.full((distances.shape[0], closest_k), -1)
+
+    compressed_distances[axis_0, axis_1] = distances[axis_0, indices]
+    compressed_indices[axis_0, axis_1] = indices
+
+    compressed_indices[np.isnan(compressed_distances)] = -1
+
+    if is_single:
+        compressed_indices = np.squeeze(compressed_indices, axis=0)
+        compressed_distances = np.squeeze(compressed_distances, axis=0)
+
+    return compressed_indices, compressed_distances
