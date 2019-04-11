@@ -355,17 +355,36 @@ class OcclusionSensitivity:
     sensitivity: Sequence[float]
 
 
-def occlusion_sensitivity(occlusion_results, mask=None):
+def sensitivity_delta_mse(prediction, target):
+    sq_err = np.square(target - prediction)
+    # the 0th item is non-occluded;
+    # take the squared diff between it (using slice to keep the 1st axis) and each other item
+    return np.nanmean(sq_err[:1] - sq_err[1:], axis=1)
+
+
+def occlusion_sensitivity(occlusion_results, mask=None, sensitivity_fn=None):
     indices = np.where(np.reshape(mask, -1))[0]
     sensitivities = list()
+    min_sensitivity = None
+    max_sensitivity = None
     for occlusion_result in occlusion_results:
         target = np.reshape(occlusion_result.target, (1, -1))[:, indices]
         prediction = np.reshape(occlusion_result.prediction, (occlusion_result.prediction.shape[0], -1))[:, indices]
-        sq_err = np.square(target - prediction)
-        # the 0th item is non-occluded;
-        # take the squared diff between it (using slice to keep the 1st axis) and each other item
-        sensitivity = np.nanmean(np.square(sq_err[:1] - sq_err[1:]), axis=1)
-        sensitivity = sensitivity / np.sum(sensitivity, keepdims=True)
+        if sensitivity_fn is None:
+            sq_err = np.square(target - prediction)
+            # the 0th item is non-occluded;
+            # take the squared diff between it (using slice to keep the 1st axis) and each other item
+            sensitivity = np.nanmean(np.square(sq_err[:1] - sq_err[1:]), axis=1)
+            sensitivity = sensitivity / np.sum(sensitivity, keepdims=True)
+        else:
+            sensitivity = sensitivity_fn(prediction, target)
+        current_min = np.nanmin(sensitivity)
+        current_max = np.nanmax(sensitivity)
+        if min_sensitivity is None:
+            min_sensitivity, max_sensitivity = current_min, current_max
+        else:
+            min_sensitivity = min(min_sensitivity, current_min)
+            max_sensitivity = max(max_sensitivity, current_max)
         sensitivities.append(
             OcclusionSensitivity(
                 occlusion_result.name,
@@ -373,4 +392,4 @@ def occlusion_sensitivity(occlusion_results, mask=None):
                 occlusion_result.data_key,
                 occlusion_result.tokens,
                 sensitivity))
-    return sensitivities
+    return sensitivities, min_sensitivity, max_sensitivity

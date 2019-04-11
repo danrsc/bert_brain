@@ -590,11 +590,15 @@ def _find_restricted_distractor_indices(indices_true, pair_examples):
     return indices_distractor
 
 
-def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None):
+def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None, prefix_min_max=False):
     from matplotlib import cm, colors
     cmap = cm.ScalarMappable(colors.Normalize(vmin=vmin, vmax=vmax), cmap=cmap)
     fmt = '<span style="background-color:{hex}{text_color}">{word}</span>'
     fmt = fmt.format(hex='{hex}', word='{word}', text_color='' if text_color is None else ';color:{text_color}')
     word_colors = cmap.to_rgba(scores)
-    return '&nbsp;'.join(
+    result = '&nbsp;'.join(
         [fmt.format(word=w, hex=colors.to_hex(c), text_color=text_color) for w, c in zip(words, word_colors)])
+    if prefix_min_max:
+        result = '<span>{:.2f}</span>&nbsp;<span>{:.2f}</span>&nbsp;'.format(min(scores), max(scores)) + result
+    return result
+
