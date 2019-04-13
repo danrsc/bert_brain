@@ -1,7 +1,7 @@
 import logging
 import os
 import itertools
-from dataclasses import replace, dataclass
+import dataclasses
 from collections import OrderedDict
 from typing import Sequence, Any, Mapping, Union
 from tqdm import trange
@@ -19,6 +19,7 @@ from bert_erp_modeling import BertMultiPredictionHead
 
 from train_eval import setup_prediction_heads_and_losses, make_datasets, collate_fn
 from run_variations import named_variations, task_hash, set_random_seeds
+from analysis import make_prediction_handler
 
 
 replace_root_logger_handler()
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel('INFO')
 
 
-@dataclass
+@dataclasses.dataclass
 class OcclusionResult:
     name: str
     critic_type: str
@@ -138,7 +139,7 @@ def _run_occlusion_for_variation(model_path, data, tokenizer, settings: Settings
     return all_results
 
 
-def run_occlusion(variation_set_name):
+def run_occlusion(variation_set_name, index_run=None):
 
     def io_setup():
         temp_paths = Paths()
@@ -180,11 +181,15 @@ def run_occlusion(variation_set_name):
         corpus_loader, result_path, model_path = io_setup()
         loss_tasks = set(training_variation)
         loss_tasks.update(aux_loss_tasks)
-        settings = replace(settings, loss_tasks=loss_tasks)
+        settings = dataclasses.replace(settings, loss_tasks=loss_tasks)
         data = corpus_loader.load(settings.corpus_keys)
         tokenizer = corpus_loader.make_bert_tokenizer()
 
-        for index_run in trange(num_runs, desc='Runs'):
+        run_iterator = trange(num_runs, desc='Runs')
+        if index_run is not None:
+            run_iterator = trange(index_run, index_run + 1, desc='Runs')
+
+        for index_run in run_iterator:
             run_results = _run_occlusion_for_variation(model_path, data, tokenizer, settings, index_run, device, n_gpu)
             write_occlusion_predictions(
                 os.path.join(result_path, 'run_{}'.format(index_run), 'output_validation_occlusion.npz'),
@@ -346,12 +351,13 @@ def read_occlusion_predictions(output_path):
     return result
 
 
-@dataclass
+@dataclasses.dataclass
 class OcclusionSensitivity:
     name: str
     unique_id: int
     data_key: str
     tokens: Sequence[str]
+    metrics: Mapping[str, float]
     sensitivity: Sequence[float]
 
 
@@ -359,22 +365,42 @@ def sensitivity_delta_mse(prediction, target):
     sq_err = np.square(target - prediction)
     # the 0th item is non-occluded;
     # take the squared diff between it (using slice to keep the 1st axis) and each other item
-    return np.nanmean(sq_err[:1] - sq_err[1:], axis=1)
+    return np.nanmean(sq_err[:1] - sq_err[1:], axis=-1)
 
 
-def occlusion_sensitivity(occlusion_results, mask=None, sensitivity_fn=None):
+def occlusion_sensitivity(occlusion_results, mask=None, sensitivity_fn=None, **loss_handler_kwargs):
     indices = np.where(np.reshape(mask, -1))[0]
     sensitivities = list()
     min_sensitivity = None
     max_sensitivity = None
+    loss_handlers = dict()
+    loss_handler_kwargs = dict(loss_handler_kwargs) if loss_handler_kwargs is not None else {}
+    loss_handler_kwargs.update(is_single_example=True)
     for occlusion_result in occlusion_results:
-        target = np.reshape(occlusion_result.target, (1, -1))[:, indices]
-        prediction = np.reshape(occlusion_result.prediction, (occlusion_result.prediction.shape[0], -1))[:, indices]
+
+        if occlusion_result.sequence_type == 'single':
+            target = np.reshape(occlusion_result.target, (1, -1))[:, indices]
+            result_mask = np.reshape(occlusion_result.mask, (1, -1))[:, indices]
+            prediction = np.reshape(occlusion_result.prediction, (occlusion_result.prediction.shape[0], -1))[:, indices]
+        else:
+            target = np.reshape(occlusion_result.target, (1, occlusion_result.target.shape[0], -1))[:, :, indices]
+            result_mask = np.reshape(occlusion_result.mask, (1, occlusion_result.mask.shape[0], -1))[:, :, indices]
+            prediction = np.reshape(
+                occlusion_result.prediction, occlusion_result.prediction.shape[:2] + (-1,))[:, :, indices]
+
+        if occlusion_result.name not in loss_handlers:
+            loss_handlers[occlusion_result.name] = make_prediction_handler(
+                occlusion_result.critic_type, loss_handler_kwargs, using_aggregator=False)
+
+        metrics = loss_handlers[occlusion_result.name](prediction[0], target[0], result_mask)
+        for k in metrics:
+            metrics[k] = np.nanmean(metrics[k])
+
         if sensitivity_fn is None:
             sq_err = np.square(target - prediction)
             # the 0th item is non-occluded;
             # take the squared diff between it (using slice to keep the 1st axis) and each other item
-            sensitivity = np.nanmean(np.square(sq_err[:1] - sq_err[1:]), axis=1)
+            sensitivity = np.nanmean(np.square(sq_err[:1] - sq_err[1:]), axis=-1)
             sensitivity = sensitivity / np.sum(sensitivity, keepdims=True)
         else:
             sensitivity = sensitivity_fn(prediction, target)
@@ -391,5 +417,6 @@ def occlusion_sensitivity(occlusion_results, mask=None, sensitivity_fn=None):
                 occlusion_result.unique_id,
                 occlusion_result.data_key,
                 occlusion_result.tokens,
+                metrics,
                 sensitivity))
     return sensitivities, min_sensitivity, max_sensitivity

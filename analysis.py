@@ -278,8 +278,7 @@ def nan_pearson(x, y, axis=0, keepdims=False):
     return result
 
 
-def regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
-
+def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
@@ -288,12 +287,22 @@ def regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
     prediction_counts = np.array(aggregator.counts('prediction'))
     assert(np.array_equal(target_counts, prediction_counts))
 
-    splits = np.cumsum(target_counts)[:-1]
-
+    splits = None
     if np.any(target_counts > 1):
+        splits = np.cumsum(target_counts)[:-1]
+
+    return regression_handler(predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, splits, is_single_example=False)
+
+
+def regression_handler(
+        predictions, target, mask, k_vs_k_num_samples=0, k_vs_k_k=20, splits=None, is_single_example=False):
+
+    if is_single_example and len(target) > 1:
+        seq_r = nan_pearson(predictions, target)
+    elif splits is not None:
         seq_r = list()
-        for seq_target, seq_predictions in zip(np.split(target, splits), np.split(predictions, splits)):
-            seq_r.append(nan_pearson(seq_target, seq_predictions))
+        for seq_predictions, seq_target in zip(np.split(predictions, splits), np.split(target, splits)):
+            seq_r.append(nan_pearson(seq_predictions, seq_target))
         seq_r = np.array(seq_r)
         with warnings.catch_warnings():
             # filter mean of empty slice
@@ -363,11 +372,18 @@ def bincount_axis(x, weights=None, minlength=None, axis=-1):
     return np.transpose(x, transpose_axes)
 
 
-def class_handler(aggregator, pos_weight=None, is_binary=False):
+def aggregator_class_handler(aggregator, pos_weight=None, is_binary=False):
 
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
+
+    return class_handler(predictions, target, mask, pos_weight, is_binary)
+
+
+def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, is_single_example=False):
+    # is_single_example is not currently used; it is there so the caller can pass it without knowing
+    # what the loss handler is
 
     if len(mask) != 0:
         assert(len(mask) == len(target))
@@ -496,6 +512,18 @@ def class_handler(aggregator, pos_weight=None, is_binary=False):
 
 
 _prediction_handlers = dataclasses.asdict(CriticMapping(
+    mse=aggregator_regression_handler,
+    pearson=aggregator_regression_handler,
+    cross_entropy=aggregator_class_handler,
+    binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
+    soft_label_cross_entropy=aggregator_class_handler,
+    single_mse=aggregator_regression_handler,
+    single_cross_entropy=aggregator_class_handler,
+    single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
+    single_soft_label_cross_entropy=aggregator_class_handler), dict_factory=OrderedDict)
+
+
+_no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=regression_handler,
     pearson=regression_handler,
     cross_entropy=class_handler,
@@ -507,10 +535,11 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
     single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
 
 
-def make_prediction_handler(which_loss, loss_kwargs=None):
-    if which_loss not in _prediction_handlers:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(_prediction_handlers.keys()))
-    factory = _prediction_handlers[which_loss]
+def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True):
+    handler_map = _prediction_handlers if using_aggregator else _no_aggregator_prediction_handlers
+    if which_loss not in handler_map:
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(handler_map.keys()))
+    factory = handler_map[which_loss]
     loss_kwargs = {} if loss_kwargs is None else dict(loss_kwargs)
     if isinstance(factory, tuple):
         factory, factory_kwargs = factory
@@ -590,15 +619,11 @@ def _find_restricted_distractor_indices(indices_true, pair_examples):
     return indices_distractor
 
 
-def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None, prefix_min_max=False):
+def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None):
     from matplotlib import cm, colors
     cmap = cm.ScalarMappable(colors.Normalize(vmin=vmin, vmax=vmax), cmap=cmap)
     fmt = '<span style="background-color:{hex}{text_color}">{word}</span>'
     fmt = fmt.format(hex='{hex}', word='{word}', text_color='' if text_color is None else ';color:{text_color}')
     word_colors = cmap.to_rgba(scores)
-    result = '&nbsp;'.join(
+    return '&nbsp;'.join(
         [fmt.format(word=w, hex=colors.to_hex(c), text_color=text_color) for w, c in zip(words, word_colors)])
-    if prefix_min_max:
-        result = '<span>{:.2f}</span>&nbsp;<span>{:.2f}</span>&nbsp;'.format(min(scores), max(scores)) + result
-    return result
-

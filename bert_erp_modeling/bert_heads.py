@@ -45,6 +45,8 @@ class KeyedLinear(torch.nn.Module):
                 indicator_valid = data_ids >= 0
                 result[k] = result[k][indicator_valid]
                 result[(k, 'data_ids')] = data_ids[indicator_valid]
+                result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
+
         return result
 
 

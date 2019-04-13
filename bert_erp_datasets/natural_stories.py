@@ -1,3 +1,4 @@
+import logging
 import os
 import itertools
 import csv
@@ -19,6 +20,9 @@ from .praat_textgrid import TextGrid
 
 __all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus', 'natural_stories_leave_stories_out',
            'natural_stories_make_leave_stories_out']
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -709,6 +713,11 @@ def natural_stories_leave_stories_out(raw_data, index_variation_run, random_stat
     stories_without_froi = list(sorted(stories_without_froi))
     stories_with_froi = list(sorted(stories_with_froi))
 
+    item_to_story = dict(
+        (i + 1, s) for i, s in enumerate(
+            ['Boar', 'Aqua', 'MatchstickSeller', 'KingOfBirds', 'Elvis',
+             'MrSticky', 'HighSchool', 'Roswell', 'Tulips', 'Tourette']))
+
     if len(stories_with_froi) == 0:
         folds = stories_without_froi
     elif len(stories_without_froi) == 0:
@@ -721,6 +730,9 @@ def natural_stories_leave_stories_out(raw_data, index_variation_run, random_stat
         validation_stories = {validation_stories}
     else:
         validation_stories = set(validation_stories)
+
+    validation_story_names = [item_to_story[s] for s in sorted(validation_stories)]
+    logger.info('Validation stories: {}'.format(validation_story_names))
 
     train_examples = list()
     validation_examples = list()
