@@ -160,6 +160,7 @@ def write_loss_curve(output_path, task_results):
     keys = [k for k in task_results.results]
     output_dict['__keys__'] = keys
     for key in keys:
+        output_dict['epochs_{}'.format(key)] = np.array([tr.epoch for tr in task_results.results[key]])
         output_dict['steps_{}'.format(key)] = np.array([tr.step for tr in task_results.results[key]])
         output_dict['values_{}'.format(key)] = np.array([tr.value for tr in task_results.results[key]])
     np.savez(output_path, **output_dict)
@@ -170,5 +171,5 @@ def read_loss_curve(output_path):
     keys = npz['__keys__']
     result = OrderedDict()
     for key in keys:
-        result[key] = (npz['steps_{}'.format(key)], npz['values_{}'.format(key)])
+        result[key] = (npz['epochs_{}'.format(key)], npz['steps_{}'.format(key)], npz['values_{}'.format(key)])
     return result

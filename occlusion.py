@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import itertools
@@ -420,3 +421,20 @@ def occlusion_sensitivity(occlusion_results, mask=None, sensitivity_fn=None, **l
                 metrics,
                 sensitivity))
     return sensitivities, min_sensitivity, max_sensitivity
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        'Runs occlusion sensitivity on a BERT model')
+    parser.add_argument('--log_level', action='store', required=False, default='WARNING',
+                        help='Sets the log-level. Defaults to WARNING')
+    parser.add_argument(
+        '--name', action='store', required=False, default='erp', help='Which set to run')
+    args = parser.parse_args()
+    logging.getLogger().setLevel(level=args.log_level.upper())
+
+    run_occlusion(args.name)
+
+
+if __name__ == '__main__':
+    main()

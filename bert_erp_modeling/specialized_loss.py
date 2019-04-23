@@ -17,16 +17,20 @@ __all__ = [
     'masked_soft_label_cross_entropy',
     'stop_word_and_target_not_nan_mask',
     'NamedTargetStopWordAwareMSE',
+    'NamedTargetStopWordAwareKLeastSE',
     'NamedTargetStopWordAwarePearsonDistance',
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
     'NamedTargetStopWordAwareCrossEntropy',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
+    'NamedTargetSingleMSE',
+    'NamedTargetSingleKLeastSE',
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
     'NamedTargetSingleCrossEntropy',
     'NamedTargetSingleSoftLabelCrossEntropy',
     'CriticMapping',
     'CriticKeys',
     'make_loss_handler',
+    'KLeastSEHalvingEpochs',
     'DetailedResult']
 
 
@@ -71,31 +75,34 @@ def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
     if valid_count == 0:
         raise NoValidInputs()
 
-    # this way of computing is more numerically stable then some alternatives
+    # convert type on counts for computations
+    valid_counts_per_example = valid_counts_per_example.type(target.dtype)
+
+    # this way of computing is more numerically stable than some alternatives
 
     # replace masked values with zero
     predictions = _values_or_zeros(mask, predictions)
     target = _values_or_zeros(mask, target)
 
     # compute the mean
-    mean_input = predictions.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
-    mean_target = predictions.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
+    mean_predictions = predictions.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
+    mean_target = target.sum(dim=sequence_axis, keepdim=True) / valid_counts_per_example
 
     # remove the mean, and re-mask
-    predictions = _values_or_zeros(mask, predictions - mean_input)
+    predictions = _values_or_zeros(mask, predictions - mean_predictions)
     target = _values_or_zeros(mask, target - mean_target)
 
     # compute the variance
-    var_input = (predictions ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
+    var_predictions = (predictions ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
     var_target = (target ** 2).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
 
     # min_value is an epsilon to avoid divide-by-zero, and to prevent sqrt from blowing up numerically
-    min_value = torch.zeros((), dtype=var_input.dtype, device=var_input.device) + 1e-8
-    var_input = torch.max(var_input, min_value)
+    min_value = torch.zeros((), dtype=var_predictions.dtype, device=var_predictions.device) + 1e-8
+    var_predictions = torch.max(var_predictions, min_value)
     var_target = torch.max(var_target, min_value)
 
     # scale by the std
-    predictions = predictions / torch.sqrt(var_input)
+    predictions = predictions / torch.sqrt(var_predictions)
     target = target / torch.sqrt(var_target)
 
     # now r is straightforward to compute
@@ -104,7 +111,7 @@ def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
     # convert to distance
     distance = 1 - r
 
-    return distance, valid_count, var_input, var_target, mean_input, mean_target
+    return distance, valid_count, var_predictions, var_target, mean_predictions, mean_target
 
 
 def masked_cross_entropy(mask, predictions, target):
@@ -188,6 +195,78 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
             return logical_not(torch.isnan(target))
 
 
+def k_least_squared_error(
+        is_eval, is_sequence, k, mask, predictions, target, accumulator, active_mask, moving_average_decay):
+
+    if is_eval:
+        print(k)
+
+    if is_sequence:
+        flat_shape = (target.size()[0] * target.size()[1], -1)
+    else:
+        flat_shape = (target.size()[0], -1)
+
+    sq_err = (torch.masked_select(predictions, mask) - torch.masked_select(target, mask)) ** 2
+    sq_err_or_zeros = torch.zeros_like(target)
+    sq_err_or_zeros.masked_scatter_(mask, sq_err)
+    sq_err_or_zeros = sq_err_or_zeros.detach()
+
+    sq_err_or_zeros = torch.reshape(sq_err_or_zeros, flat_shape)
+
+    flat_mask = torch.reshape(mask, flat_shape)
+
+    if not is_eval:
+        flat_mask_float = flat_mask.type(sq_err_or_zeros.dtype)
+        indices_terms = (torch.cumsum(flat_mask.type(torch.long), dim=0) - 1) * flat_mask.type(torch.long)
+        num_terms = flat_mask.sum(dim=0, keepdim=True)
+
+        # alpha^(num_terms - 1) * x_0 + \sum_i alpha^(num_terms - i - 1) (1 - alpha) x_i
+
+        one_minus_alpha_coeff = (1 - moving_average_decay) * flat_mask_float
+
+        if accumulator is None:
+            assert(active_mask is None)
+            first_terms = (indices_terms == 0) & flat_mask
+            one_minus_alpha_coeff.masked_scatter_(first_terms, torch.ones_like(one_minus_alpha_coeff))
+            indices_terms = indices_terms - 1
+            num_terms = num_terms - 1
+            alpha_coeff = torch.pow(
+                moving_average_decay,
+                num_terms.type(flat_mask_float.dtype) - indices_terms.type(flat_mask_float.dtype) - 1) * flat_mask_float
+            alpha_coeff.masked_scatter_(first_terms, torch.ones_like(alpha_coeff))
+
+            accumulator = torch.sum(alpha_coeff * one_minus_alpha_coeff * sq_err_or_zeros, dim=0, keepdim=True)
+            active_mask = torch.sum(flat_mask, dim=0, keepdim=True) > 0
+        else:
+            alpha_coeff = torch.pow(
+                moving_average_decay,
+                num_terms.type(flat_mask_float.dtype) - indices_terms.type(flat_mask_float.dtype) - 1) * flat_mask_float
+
+            accumulator = accumulator + torch.sum(
+                alpha_coeff * one_minus_alpha_coeff * sq_err_or_zeros, dim=0, keepdim=True)
+            current_active = torch.sum(flat_mask, dim=0, keepdim=True) > 0
+            active_mask = active_mask | current_active
+    elif accumulator is None:
+        raise RuntimeError('Cannot call k_least_squared_error with is_eval=True and accumulator=None')
+
+    # set scores to a value greater than everything in the accumulator
+    scores = torch.zeros_like(accumulator) + accumulator.max() + 1
+    # set scores to accumulator where it is valid
+    scores.masked_scatter_(active_mask, accumulator)
+
+    _, top_k = torch.topk(scores, k, len(scores.size()) - 1, largest=False, sorted=False)
+
+    top_k_mask = torch.zeros(scores.size(), dtype=mask.dtype, device=mask.device)
+    top_k_mask.scatter_(
+        len(top_k_mask.size()) - 1, top_k, torch.ones(top_k.size(), dtype=mask.dtype, device=mask.device))
+
+    top_k_mask = top_k_mask.repeat((sq_err_or_zeros.size()[0],) + (1,) * (len(top_k_mask.size()) - 1))
+    top_k_mask = torch.reshape(top_k_mask, mask.size())
+    mask = mask & top_k_mask
+
+    return accumulator, active_mask, masked_squared_error(mask, predictions, target)
+
+
 @dataclass
 class DetailedResult:
     mask: Optional[np.ndarray]
@@ -232,13 +311,23 @@ class _NamedTargetMaskedLoss:
         return loss
 
     def __call__(
-            self, batch, prediction_dict, return_detailed=False, reduction='mean', as_numpy=False, apply_weight=True):
+            self,
+            is_eval,
+            epoch,
+            global_step,
+            batch,
+            prediction_dict,
+            return_detailed=False,
+            reduction='mean',
+            as_numpy=False,
+            apply_weight=True):
+
         predictions = prediction_dict[self.field]
         target = batch[self.field]
-        mask = self._get_mask(batch, predictions, target)
+        mask = self._get_mask(is_eval, epoch, global_step, batch, predictions, target)
 
         try:
-            result, valid_count = self._masked_loss(mask, predictions, target)
+            result, valid_count = self._masked_loss(is_eval, epoch, global_step, mask, predictions, target)
             result = _masked_reduce(result, valid_count, reduction, as_numpy)
         except NoValidInputs:
             if reduction == 'mean' or reduction == 'sum':
@@ -304,10 +393,10 @@ class _NamedTargetMaskedLoss:
             return result, detailed_result
         return result
 
-    def _get_mask(self, batch, predictions, target):
+    def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
         return logical_not(torch.isnan(target))
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
     @classmethod
@@ -324,11 +413,11 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
         super().__init__(field, weight)
         self.keep_content = keep_content
 
-    def _get_mask(self, batch, predictions, target):
+    def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
         return stop_word_and_target_not_nan_mask(
             self.keep_content, target, batch['is_stop'], batch['is_begin_word_pieces'])
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
     @classmethod
@@ -338,8 +427,27 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
 
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_squared_error(mask, predictions, target)
+
+
+class NamedTargetStopWordAwareKLeastSE(_NamedTargetStopWordAwareLoss):
+
+    def __init__(self, field, k_fn, moving_average_decay=0.98, keep_content=True, weight=1.):
+        super().__init__(field, keep_content, weight)
+        self.k_fn = k_fn
+        self.moving_average_decay = moving_average_decay
+        self._accumulator = None
+        self._active_mask = None
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        num_features = int(np.prod(target.size()[2:]))
+        k = self.k_fn(epoch, global_step, num_features)
+        self._accumulator, self._active_mask, result = k_least_squared_error(
+            is_eval, is_sequence=True, k=k, mask=mask, predictions=predictions, target=target,
+            accumulator=self._accumulator, active_mask=self._active_mask,
+            moving_average_decay=self.moving_average_decay)
+        return result
 
 
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
@@ -348,7 +456,7 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
         super().__init__(field, keep_content, weight)
         self.should_penalize_scale = should_penalize_scale
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
             mask, predictions, target)
         loss = distance
@@ -363,7 +471,7 @@ class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
         self.num_classes = num_classes
         super().__init__(field, keep_content, weight)
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
 
     def shape_adjust(self, shape):
@@ -376,20 +484,54 @@ class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordA
         super().__init__(field, keep_content, weight)
         self.pos_weight = pos_weight
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
 
 class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLoss):
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
 class NamedTargetSingleMSE(_NamedTargetMaskedLoss):
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_squared_error(mask, predictions, target)
+
+
+class KLeastSEHalvingEpochs:
+    def __init__(self, half_life_in_epochs, delay_in_epochs=0, minimum_k=100, final_full_epochs_start=None):
+        self.half_life_in_epochs = half_life_in_epochs
+        self.delay_in_epochs = delay_in_epochs
+        self.minimum_k = minimum_k
+        self.final_full_epochs_start = final_full_epochs_start
+
+    def __call__(self, epoch, global_step, num_features):
+        if self.final_full_epochs_start is not None and epoch >= self.final_full_epochs_start:
+            return num_features
+        epoch = max(0, epoch - self.delay_in_epochs)
+        k = int(np.round(np.power(2., -epoch / self.half_life_in_epochs) * num_features))
+        return max(k, self.minimum_k)
+
+
+class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):
+
+    def __init__(self, field, k_fn, moving_average_decay=0.98, weight=1.):
+        super().__init__(field, weight)
+        self.k_fn = k_fn
+        self.moving_average_decay = moving_average_decay
+        self._accumulator = None
+        self._active_mask = None
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        num_features = int(np.prod(target.size()[1:]))
+        k = self.k_fn(epoch, global_step, num_features)
+        self._accumulator, self._active_mask, result = k_least_squared_error(
+            is_eval, is_sequence=False, k=k, mask=mask, predictions=predictions, target=target,
+            accumulator=self._accumulator, active_mask=self._active_mask,
+            moving_average_decay=self.moving_average_decay)
+        return result
 
 
 class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
@@ -398,7 +540,7 @@ class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
         self.num_classes = num_classes
         super().__init__(field, weight)
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
 
     def shape_adjust(self, shape):
@@ -407,7 +549,7 @@ class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
 
 class NamedTargetSingleSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
 
@@ -417,7 +559,7 @@ class NamedTargetSingleBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
         super().__init__(field, weight)
         self.pos_weight = pos_weight
 
-    def _masked_loss(self, mask, predictions, target):
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
 
@@ -426,6 +568,7 @@ class CriticMapping:
     # this metadata trick allows us to give the canonical value along with the field definition
     # while not specifying a default (so we force all versions of the mapping to instantiate all the fields)
     mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareMSE))
+    k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareKLeastSE))
     pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwarePearsonDistance))
     cross_entropy: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareCrossEntropy))
     binary_cross_entropy: Any = dataclasses.field(
@@ -433,6 +576,7 @@ class CriticMapping:
     soft_label_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
     single_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMSE))
+    single_k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastSE))
     single_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetSingleCrossEntropy))
     single_binary_cross_entropy: Any = dataclasses.field(

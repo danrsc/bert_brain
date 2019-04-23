@@ -14,7 +14,7 @@ __all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', '
 @dataclass
 class OptimizationSettings:
     # Total number of training epochs to perform.
-    num_train_epochs: float = 3.0
+    num_train_epochs: int = 3
     # initial learning rate for Adam
     learning_rate: float = 5e-5
     # Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10% of training.
@@ -33,8 +33,10 @@ class OptimizationSettings:
     gradient_accumulation_steps: int = 1
     # local_rank for distributed training on gpus; probably don't need this
     local_rank: int = -1
-    # If True, the bert parameters are not modified, only the parameters in the prediction heads
-    is_train_prediction_heads_only: bool = False
+    # During the first num_epochs_train_prediction_heads_only, only the prediction heads will be trained
+    num_epochs_train_prediction_heads_only: int = 0
+    # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
+    num_final_epochs_train_prediction_heads_only: int = 0
 
 
 @dataclass

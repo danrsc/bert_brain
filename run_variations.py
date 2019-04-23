@@ -29,11 +29,12 @@ from tqdm_logging import replace_root_logger_handler
 import numpy as np
 import torch
 
-from bert_erp_common import SwitchRemember
-from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind
-from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings
+from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
+from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
+    PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize
+from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings
 from bert_erp_paths import Paths
-from bert_erp_modeling import KeyedLinear
+from bert_erp_modeling import KeyedLinear, KeyedCombinedLinear, CriticKeys, KLeastSEHalvingEpochs
 from train_eval import train, make_datasets
 
 __all__ = ['task_hash', 'named_variations', 'run_variation', 'iterate_powerset', 'set_random_seeds']
@@ -70,21 +71,9 @@ def run_variation(
             settings: Settings,
             num_runs: int,
             auxiliary_loss_tasks: Sequence[str],
-            force_cache_miss: bool):
-
-    if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not settings.no_cuda else "cpu")
-        n_gpu = 1  # torch.cuda.device_count()
-    else:
-        device = torch.device("cuda", settings.local_rank)
-        n_gpu = 1
-        # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl')
-        if settings.optimization_settings.fp16:
-            logger.info("16-bits training currently not supported in distributed training")
-            settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
-    logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits trainiing: {}".format(
-        device, n_gpu, bool(settings.optimization_settings.local_rank != -1), settings.optimization_settings.fp16))
+            force_cache_miss: bool,
+            device: torch.device,
+            n_gpu: int):
 
     if settings.optimization_settings.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
@@ -239,42 +228,105 @@ def named_variations(name):
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=100))
+            optimization_settings=OptimizationSettings(num_train_epochs=10))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20':
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=50))
+            optimization_settings=OptimizationSettings(num_train_epochs=20))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
             fmri_subjects='I',
-            fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
+            fmri_sentence_mode='ignore', fmri_window_duration=10.1, fmri_minimum_duration_required=9.6)
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_20_high':
+        training_variations = [('hp_fmri_I',)]
+
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=20))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_high_pass=0.015,
+            fmri_sentence_mode='ignore', fmri_window_duration=10.1, fmri_minimum_duration_required=9.6)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_20_high_small':
+        training_variations = [('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=20))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_high_pass=0.005,
+            fmri_sentence_mode='ignore', fmri_window_duration=10.1, fmri_minimum_duration_required=9.6)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_meg':
         training_variations = [('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=50))
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=2))
+        final_linear_start = \
+            settings.optimization_settings.num_train_epochs \
+            - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
             fmri_subjects='I',
             fmri_sentence_mode='ignore',
-            fmri_window_duration=10.,
-            fmri_minimum_duration_required=9.5,
-            group_meg_sentences_like_fmri=True,
-            use_pca_meg=False)
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            meg_kind='pca_sensor_full')
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict())
+        settings.critics[ResponseKind.hp_meg] = CriticSettings(
+            critic_type=CriticKeys.k_least_se,
+            critic_kwargs=dict(
+                k_fn=KLeastSEHalvingEpochs(
+                    0.5, delay_in_epochs=2, minimum_k=10, final_full_epochs_start=final_linear_start),
+                moving_average_decay=0.999))
+        settings.critics['hp_fmri_I'] = CriticSettings(
+            critic_type=CriticKeys.single_k_least_se,
+            critic_kwargs=dict(
+                k_fn=KLeastSEHalvingEpochs(
+                    0.5, delay_in_epochs=2, minimum_k=100, final_full_epochs_start=final_linear_start),
+                moving_average_decay=0.999))
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=50, is_train_prediction_heads_only=True))
+            optimization_settings=OptimizationSettings(num_train_epochs=20, num_epochs_train_prediction_heads_only=-1))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -335,7 +387,32 @@ def main():
     if args.no_cuda:
         settings_.no_cuda = True
     for training_variation in training_variations_:
-        run_variation(args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss)
+
+        if settings_.optimization_settings.local_rank == -1 or settings_.no_cuda:
+            if not torch.cuda.is_available or settings_.no_cuda:
+                device = torch.device('cpu')
+            else:
+                device_id, free = cuda_most_free_device()
+                device = torch.device('cuda', device_id)
+                logger.info('binding to device {} with {} memory free'.format(device_id, free))
+            n_gpu = 1  # torch.cuda.device_count()
+        else:
+            device = torch.device('cuda', settings_.local_rank)
+            n_gpu = 1
+            # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+            torch.distributed.init_process_group(backend='nccl')
+            if settings_.optimization_settings.fp16:
+                logger.info("16-bits training currently not supported in distributed training")
+                settings_.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
+        logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits trainiing: {}".format(
+            device,
+            n_gpu,
+            bool(settings_.optimization_settings.local_rank != -1),
+            settings_.optimization_settings.fp16))
+
+        with cuda_auto_empty_cache_context(device):
+            run_variation(args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
+                          device, n_gpu)
 
 
 if __name__ == '__main__':

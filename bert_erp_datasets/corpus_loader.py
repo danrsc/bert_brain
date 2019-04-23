@@ -2,6 +2,7 @@ import os
 from collections import OrderedDict
 import itertools
 import dataclasses
+import hashlib
 
 import numpy as np
 import torch
@@ -17,6 +18,14 @@ from .colorless_green import ColorlessGreenCorpus, LinzenAgreementCorpus
 
 
 __all__ = ['CorpusLoader', 'CorpusKeys']
+
+
+def _kwargs_hash(kwargs):
+    hash_ = hashlib.sha256()
+    for key in sorted(kwargs):
+        s = '{}={}'.format(key, kwargs[key])
+        hash_.update(s.encode())
+    return hash_.hexdigest()
 
 
 def _save_to_cache(cache_path, data, kwargs):
@@ -195,13 +204,22 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
                 raise ValueError('Unexpected key: {}'.format(k))
 
     if len(kwargs) != len(prefix_results['__kwarg__']):
-        return None
+        raise ValueError('Different kwargs with the same hash!')
 
     for k in kwargs:
         if k not in prefix_results['__kwarg__']:
-            return None
-        if kwargs[k] != prefix_results['__kwarg__'][k].item():
-            return None
+            raise ValueError('Different kwargs with the same hash!')
+        if np.isscalar(prefix_results['__kwarg__'][k]):
+            is_equal = prefix_results['__kwarg__'][k].item() == kwargs[k]
+        else:
+            try:
+                # this handles nan for us
+                np.testing.assert_array_equal(prefix_results['__kwarg__'][k], np.asarray(kwargs[k]))
+                is_equal = True
+            except AssertionError:
+                is_equal = False
+        if not is_equal:
+            raise ValueError('Different kwargs with the same hash!')
 
     tensor_dtypes = prefix_results['__field_spec_tensor_dtype__']
     fill_values = prefix_results['__field_spec_fill_value__']
@@ -455,13 +473,15 @@ class CorpusLoader(object):
 
         for key in keys:
 
-            cache_path = os.path.join(self.cache_path, '{}.npz'.format(key))
-
             print('Loading {}...'.format(key), end='', flush=True)
 
             kwargs = {}
             if self._corpus_key_kwarg_dict is not None and key in self._corpus_key_kwarg_dict:
                 kwargs = self._corpus_key_kwarg_dict[key]
+
+            kwargs_hash = _kwargs_hash(kwargs)
+
+            cache_path = os.path.join(self.cache_path, key, '{}.npz'.format(kwargs_hash))
 
             cached = _load_from_cache(cache_path, kwargs, force_cache_miss)
 

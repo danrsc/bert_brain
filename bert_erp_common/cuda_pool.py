@@ -21,12 +21,18 @@ __all__ = ['cuda_map_unordered',
 
 
 @contextmanager
-def cuda_auto_empty_cache_context(device_id):
+def cuda_auto_empty_cache_context(device):
 
-    with torch.cuda.device(device_id) as device_context:
-        yield device_context
-        gc.collect()
-        torch.cuda.empty_cache()
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    if device.type == 'cpu':
+        yield device
+    else:
+        with torch.cuda.device(device) as device_context:
+            yield device_context
+            gc.collect()
+            torch.cuda.empty_cache()
 
 
 def _set_device_id_and_initialize(device_queue, no_available_queue, initializer, initargs):

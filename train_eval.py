@@ -59,6 +59,7 @@ def evaluate(
         model,
         loss_handlers,
         device,
+        epoch,
         global_step,
         eval_results,
         eval_data_set,
@@ -92,7 +93,9 @@ def evaluate(
             predictions = model(batch, eval_data_set)
             loss_result = OrderedDict(
                 (h.field,
-                 (h.weight, h(batch, predictions, return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
+                 (h.weight,
+                  h(True, epoch, global_step, batch, predictions,
+                    return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
                 for h in loss_handlers)
             if return_detailed:
                 loss_dict = OrderedDict()
@@ -118,7 +121,7 @@ def evaluate(
                         loss = weight * current
                     else:
                         loss += weight * current
-                eval_results.add_result(data_key, global_step, current)
+                eval_results.add_result(data_key, epoch, global_step, current)
             if loss is not None:
                 total_loss += loss * len(batch['unique_id'])
                 total_count += len(batch['unique_id'])
@@ -254,12 +257,20 @@ def train(
         settings.optimization_settings.train_batch_size /
         settings.optimization_settings.gradient_accumulation_steps * settings.optimization_settings.num_train_epochs)
 
+    num_epochs_prediction_head_only_train = settings.optimization_settings.num_epochs_train_prediction_heads_only
+    if num_epochs_prediction_head_only_train < 0:
+        num_epochs_prediction_head_only_train = settings.optimization_settings.num_train_epochs
+    start_final_epochs_prediction_head_only_train = int(
+        settings.optimization_settings.num_train_epochs
+        - settings.optimization_settings.num_final_epochs_train_prediction_heads_only)
+
     prediction_heads, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
     model = BertMultiPredictionHead.from_pretrained(
         settings.bert_model,
+        map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
         prediction_head_settings=prediction_heads,
         token_supplemental_key_to_shape=token_supplemental_key_to_shape,
         pooled_supplemental_key_to_shape=pooled_supplemental_key_to_shape)
@@ -285,8 +296,13 @@ def train(
     else:
         param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta']
-    if settings.optimization_settings.is_train_prediction_heads_only:
-        param_optimizer = [(n, p) for n, p in param_optimizer if n.startswith('prediction_head.')]
+
+    non_prediction_head_parameters = None
+    if num_epochs_prediction_head_only_train > 0 or start_final_epochs_prediction_head_only_train:
+        non_prediction_head_parameters = [p for n, p in param_optimizer if not n.startswith('prediction_head.')]
+        for p in non_prediction_head_parameters:
+            p.requires_grad = False
+
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if n not in no_decay], 'weight_decay_rate': 0.01},
         {'params': [p for n, p in param_optimizer if n in no_decay], 'weight_decay_rate': 0.0}]
@@ -324,6 +340,13 @@ def train(
 
         model.train()
 
+        if index_epoch == start_final_epochs_prediction_head_only_train:
+            for p in non_prediction_head_parameters:
+                p.requires_grad = False
+        elif index_epoch == num_epochs_prediction_head_only_train:
+            for p in non_prediction_head_parameters:
+                p.requires_grad = True
+
         if settings.show_step_progress:
             batch_iterator = tqdm(train_data_loader, desc="Iteration")
         else:
@@ -335,7 +358,9 @@ def train(
                     batch[k] = batch[k].to(device)
             predictions = model(batch, train_data_set)
             loss_dict = OrderedDict(
-                (h.field, (h.weight, h(batch, predictions, apply_weight=False))) for h in loss_handlers)
+                (h.field,
+                 (h.weight,
+                  h(False, index_epoch, global_step, batch, predictions, apply_weight=False))) for h in loss_handlers)
 
             # free up memory
             del predictions
@@ -355,6 +380,7 @@ def train(
                 train_result = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
                 train_results.add_result(
                     data_key,
+                    index_epoch,
                     global_step,
                     train_result)
 
@@ -399,7 +425,8 @@ def train(
 
         write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
-            evaluate(settings, model, loss_handlers, device, global_step, validation_results, validation_data_set)
+            evaluate(settings, model, loss_handlers, device,
+                     index_epoch, global_step, validation_results, validation_data_set)
             write_loss_curve(output_validation_curve_path, validation_results)
 
     logger.info("***** Running predictions *****")
@@ -409,15 +436,16 @@ def train(
 
     if len(validation_data_set) > 0:
         all_validation = evaluate(
-            settings, model, loss_handlers, device, global_step, validation_results, validation_data_set,
+            settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
+            global_step, TaskResults(), validation_data_set,
             return_detailed=True)
     else:
         all_validation = {}
 
-    test_results = TaskResults()
     if len(test_data_set) > 0:
         all_test = evaluate(
-            settings, model, loss_handlers, device, global_step, test_results, test_data_set, return_detailed=True)
+            settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
+            global_step, TaskResults(), test_data_set, return_detailed=True)
     else:
         all_test = {}
 
@@ -436,6 +464,7 @@ def train(
 
 @dataclass
 class TaskResult:
+    epoch: int
     step: int
     value: float
 
@@ -445,7 +474,7 @@ class TaskResults:
     def __init__(self):
         self.results = OrderedDict()
 
-    def add_result(self, name, step, value):
+    def add_result(self, name, epoch, step, value):
         if name not in self.results:
             self.results[name] = list()
-        self.results[name].append(TaskResult(step, value))
+        self.results[name].append(TaskResult(epoch, step, value))

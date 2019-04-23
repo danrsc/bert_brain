@@ -3,14 +3,16 @@ import warnings
 from functools import partial
 from collections import OrderedDict
 import dataclasses
+from typing import Tuple, Optional
 import inspect
+import fnmatch
 
 import numpy as np
 from scipy.misc import logsumexp
 
-from run_variations import task_hash
+from run_variations import task_hash, named_variations
 from bert_erp_modeling import CriticMapping
-from result_output import read_predictions
+from result_output import read_predictions, read_loss_curve
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
@@ -513,11 +515,13 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
 
 _prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=aggregator_regression_handler,
+    k_least_se=aggregator_regression_handler,
     pearson=aggregator_regression_handler,
     cross_entropy=aggregator_class_handler,
     binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=aggregator_class_handler,
     single_mse=aggregator_regression_handler,
+    single_k_least_se=aggregator_regression_handler,
     single_cross_entropy=aggregator_class_handler,
     single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=aggregator_class_handler), dict_factory=OrderedDict)
@@ -525,11 +529,13 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
 
 _no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=regression_handler,
+    k_least_se=regression_handler,
     pearson=regression_handler,
     cross_entropy=class_handler,
     binary_cross_entropy=(class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=class_handler,
     single_mse=regression_handler,
+    single_k_least_se=regression_handler,
     single_cross_entropy=class_handler,
     single_binary_cross_entropy=(class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
@@ -580,10 +586,14 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
     if not np.array_equal(predictions.shape, target.shape):
         raise ValueError('predictions and target must have the same shape')
 
+    value_shape = predictions.shape[1:]
+    predictions = np.reshape(predictions, (predictions.shape[0], -1))
+    target = np.reshape(target, (target.shape[0], -1))
+
     # predictions, target data with the same shape: (words, ..., features)
     # k = how many words to classify at once
     # num_samples = how many words to classify
-    accuracy = np.full((num_samples, target.shape[-1] if len(target.shape) > 1 else 1), np.nan)
+    accuracy = np.full((num_samples, target.shape[1]), np.nan)
 
     if pair_examples is not None and len(pair_examples) > 0:
         if len(pair_examples) != len(predictions):
@@ -594,19 +604,19 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
 
     for index_sample in range(num_samples):
         indices_true = np.random.choice(len(target), k)
-        sample_target = np.reshape(target[indices_true], (-1, target.shape[-1]))
-        sample_predictions_correct = np.reshape(predictions[indices_true], (-1, predictions.shape[-1]))
+        sample_target = target[indices_true]
+        sample_predictions_correct = predictions[indices_true]
         if pair_examples is not None and len(pair_examples) > 0:
             indices_distractor = _find_restricted_distractor_indices(indices_true, pair_examples)
         else:
             indices_distractor = np.random.choice(len(target), k)
-        sample_predictions_incorrect = np.reshape(predictions[indices_distractor], (-1, predictions.shape[-1]))
+        sample_predictions_incorrect = predictions[indices_distractor]
 
         distance_correct = np.sum((sample_target - sample_predictions_correct) ** 2, axis=0)
         distance_incorrect = np.sum((sample_target - sample_predictions_incorrect) ** 2, axis=0)
         accuracy[index_sample] = \
             (distance_correct < distance_incorrect) * 1.0 + (distance_correct == distance_incorrect) * 0.5
-    return accuracy
+    return np.reshape(accuracy, (accuracy.shape[0],) + value_shape)
 
 
 def _find_restricted_distractor_indices(indices_true, pair_examples):
@@ -627,3 +637,139 @@ def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_colo
     word_colors = cmap.to_rgba(scores)
     return '&nbsp;'.join(
         [fmt.format(word=w, hex=colors.to_hex(c), text_color=text_color) for w, c in zip(words, word_colors)])
+
+
+def average_unique_steps_within_loss_curves(curves):
+    for curve in curves:
+        unique_steps = np.unique(curve.steps)
+        step_values = list()
+        step_epochs = list()
+        for step in unique_steps:
+            step_values.append(np.nanmean(curve.values[curve.steps == step]))
+            step_epochs.append(curve.epochs[curve.steps == step][0])
+        curve.steps = unique_steps
+        curve.epochs = np.array(step_epochs)
+        curve.values = np.array(step_values)
+
+
+def average_unique_epochs_within_loss_curves(curves):
+    for curve in curves:
+        unique_epochs = np.unique(curve.epochs)
+        epoch_values = list()
+        for epoch in unique_epochs:
+            epoch_values.append(np.nanmean(curve.values[curve.epochs == epoch]))
+        curve.steps = unique_epochs
+        curve.epochs = unique_epochs
+        curve.values = np.array(epoch_values)
+
+
+@dataclasses.dataclass
+class LossCurve:
+    training_variation: Tuple[str, ...]
+    train_eval_kind: str
+    index_run: int
+    key: str
+    epochs: np.ndarray
+    steps: np.ndarray
+    values: np.ndarray
+
+
+def loss_curves_for_variation(paths, variation_set_name):
+    training_variations, _, num_runs, _, _ = named_variations(variation_set_name)
+
+    def read_curve(kind, training_variation_, index_run_):
+        file_name = 'train_curve.npz' if kind == 'train' else 'validation_curve.npz'
+        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation_)))
+        curve_path = os.path.join(output_dir, 'run_{}'.format(index_run_), file_name)
+        result_ = list()
+        if os.path.exists(curve_path):
+            curve = read_loss_curve(curve_path)
+            for key in curve:
+                result_.append(
+                    LossCurve(training_variation_, kind, index_run_, key, curve[key][0], curve[key][1], curve[key][2]))
+        return result_
+
+    result = list()
+    for training_variation in training_variations:
+        for index_run in range(num_runs):
+            result.extend(read_curve('train', training_variation, index_run))
+            result.extend(read_curve('validation', training_variation, index_run))
+
+    return result
+
+
+@dataclasses.dataclass
+class ResultQuery:
+    variant_set_name: str
+    metric: str
+    key: str
+    training_variation: Optional[str] = None
+    second_variation_set_name: Optional[str] = None
+    second_training_variation: Optional[str] = None
+
+
+def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
+    cache = dict()
+    result = list()
+    for result_query in result_queries:
+        training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
+        query_training_variation = set(result_query.training_variation) \
+            if result_query.training_variation is not None else None
+        for training_variation in training_variations:
+            training_variation = set(training_variation)
+            if query_training_variation is None or query_training_variation == training_variation:
+                cache_key = result_query.variation_set_name, training_variation
+                if cache_key not in cache:
+                    cache[cache_key] = read_variation_results(
+                        paths, result_query.variation_set_name, training_variation, aux_loss, num_runs,
+                        compute_scalar=compute_scalar, **loss_handler_kwargs)
+                aggregated, count_runs = cache[cache_key]
+                for aggregated_key in aggregated:
+                    if fnmatch.fnmatch(aggregated_key, result_query.key):
+                        result_query = dataclasses.replace(result_query, key=aggregated_key)
+                        if result_query.metric == 'k_vs_k':
+                            values = None
+                            for metric in aggregated[result_query.key]:
+                                split_metric = metric.split('_')
+                                if len(split_metric) == 3 \
+                                        and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                                    values = aggregated[result_query.key].values(metric)
+                                    break
+                            if values is None:
+                                raise ValueError('k_vs_k not found')
+                        else:
+                            values = aggregated[result_query.key].values(result_query.metric)
+                        if result_query.training_variation is None:
+                            result_query = dataclasses.replace(result_query, training_variation=training_variation)
+                        result.append((result_query, values))
+    for idx_result in range(len(result)):
+        if result[idx_result][0].second_variation_set_name is not None:
+            result_query, first_values = result[idx_result]
+            training_variations, _, num_runs, _, aux_loss = named_variations(result_query.second_variation_set_name)
+            if result_query.second_training_variation is None:
+                result_query = dataclasses.replace(
+                    result_query, second_training_variation=result_query.training_variation)
+            query_training_variation = set(result_query.second_training_variation)
+            for training_variation in training_variations:
+                if query_training_variation == training_variation:
+                    cache_key = result_query.second_variation_set_name, training_variation
+                    if cache_key not in cache:
+                        cache[cache_key] = read_variation_results(
+                            paths, result_query.second_variation_set_name, training_variation, aux_loss, num_runs,
+                            compute_scalar=compute_scalar, **loss_handler_kwargs)
+                    aggregated, count_runs = cache[cache_key]
+                    if result_query.metric == 'k_vs_k':
+                        second_values = None
+                        for metric in aggregated[result_query.key]:
+                            split_metric = metric.split('_')
+                            if len(split_metric) == 3 \
+                                    and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                                second_values = aggregated[result_query.key].values(metric)
+                                break
+                        if second_values is None:
+                            raise ValueError('k_vs_k not found')
+                    else:
+                        second_values = aggregated[result_query.key].values(result_query.metric)
+                    result[idx_result] = (result_query, first_values, second_values)
+                    break  # break out of looping over training variations
+    return result
