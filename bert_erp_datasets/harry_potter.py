@@ -3,10 +3,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Mapping, Sequence, Optional, Union
 from functools import partial
-import numpy as np
 
+import numpy as np
+from scipy.spatial.distance import cdist
 from scipy.io import loadmat
 from scipy.ndimage.filters import gaussian_filter1d
+from scipy.signal import butter, sosfilt
 
 import nibabel
 import cortex
@@ -18,7 +20,7 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
-           'harry_potter_make_leave_out_fmri_run']
+           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates']
 
 
 @dataclass
@@ -44,7 +46,7 @@ class HarryPotterCorpus(CorpusBase):
             self,
             path: str,
             include_meg: bool = True,
-            use_pca_meg: bool = True,
+            meg_kind: str = 'pca',
             separate_meg_axes: Optional[Union[str, Sequence[str]]] = None,
             group_meg_sentences_like_fmri: bool = False,
             fmri_subjects: Optional[Sequence[str]] = None,
@@ -53,14 +55,19 @@ class HarryPotterCorpus(CorpusBase):
             fmri_skip_end_trs: int = 15,
             fmri_window_duration: float = 8.,
             fmri_minimum_duration_required: float = 7.8,
-            fmri_sentence_mode: str = 'multiple'):
+            fmri_sentence_mode: str = 'multiple',
+            fmri_high_pass: float = None):
         """
         Loader for Harry Potter data
         Args:
             path: The path to the directory where the data is stored
             include_meg: Whether to load the MEG data
-            use_pca_meg: If True, the PCA'd data (one component per roi) is used,
-                otherwise the average of the dipoles within an roi are used
+            meg_kind: One of ('pca_label', 'mean_label', 'pca_sensor')
+                pca_label is source localized and uses the pca within an ROI label for the label with
+                    100ms slices of time
+                mean_label is similar to pca_label, but using the mean within an ROI label
+                pca_sensor uses a PCA on the sensor space to produce 10 latent components and time is averaged over
+                the whole word
             separate_meg_axes: None, or one or more of ('subject', 'roi', 'time'). If not provided (the default), then
                 the MEG data is a dictionary with a single key ('hp_meg') that maps to an array of shape
                 (word, subject, roi, 100ms slice) [Note that this shape may be modified by preprocessing]. If 'subject'
@@ -93,11 +100,12 @@ class HarryPotterCorpus(CorpusBase):
                 the feature window is truncated by the start of a sentence, thus resulting in examples with one
                 sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
                 without consideration of the sentence boundaries
+            fmri_high_pass: If specified, apply a high-pass butterworth filter to the data using this cutoff
         """
         self.path = path
         self.fmri_subjects = fmri_subjects
         self.include_meg = include_meg
-        self.use_pca_meg = use_pca_meg
+        self.meg_kind = meg_kind
         self.separate_meg_axes = separate_meg_axes
         self.group_meg_sentences_like_fmri = group_meg_sentences_like_fmri
         self.fmri_smooth_factor = fmri_smooth_factor
@@ -108,6 +116,7 @@ class HarryPotterCorpus(CorpusBase):
             minimum_duration_required=fmri_minimum_duration_required,
             use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
             sentence_mode=fmri_sentence_mode)
+        self.fmri_high_pass = fmri_high_pass
 
     def _load(self, example_manager: CorpusExampleUnifier):
 
@@ -164,9 +173,10 @@ class HarryPotterCorpus(CorpusBase):
         metadata = dict(fmri_runs=run_at_unique_id)
 
         if self.include_meg:
-            meg = self._read_meg(example_manager, meg_examples)
+            meg, block_metadata = self._read_meg(example_manager, meg_examples)
             for k in meg:
                 data[k] = KindData(ResponseKind.hp_meg, meg[k])
+            metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
             fmri = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
@@ -192,8 +202,17 @@ class HarryPotterCorpus(CorpusBase):
                 raise ValueError('Unknown separate_task_axis: {}'.format(axis))
 
         # see make_harry_potter.ipynb for how these are constructed
-        meg_path = os.path.join(
-            self.path, 'harry_potter_meg_100ms.npz' if not self.use_pca_meg else 'harry_potter_meg_100ms_pca.npz')
+        file_names = {
+            'pca_label': 'harry_potter_meg_100ms_pca.npz',
+            'mean_label': 'harry_potter_meg_100ms_mean_flip.npz',
+            'pca_sensor': 'harry_potter_meg_sensor_pca_35_word_mean.npz',
+            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz'
+        }
+
+        if self.meg_kind not in file_names:
+            raise ValueError('Unknown meg_kind: {}'.format(self.meg_kind))
+
+        meg_path = os.path.join(self.path, file_names[self.meg_kind])
 
         loaded = np.load(meg_path)
 
@@ -202,19 +221,30 @@ class HarryPotterCorpus(CorpusBase):
         assert(stimuli[2364] == '..."')
         stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
 
-        # blocks should be int, but is stored as float; blocks are not currently used, but are available
-        # blocks = loaded['blocks']
-        # blocks = np.round(blocks).astype(np.int64)
+        # blocks should be int, but is stored as float
+        blocks = loaded['blocks']
+        blocks = np.round(blocks).astype(np.int64)
         # (subjects, words, rois, 100ms_slices)
         data = loaded['data']
-        rois = loaded['rois']
+        rois = loaded['rois'] if 'rois' in loaded else None
         subjects = loaded['subjects']
-        times = np.arange(data.shape[-1]) * 100
+        if len(data.shape) == 4:
+            if data.shape[-1] == 500:
+                data = np.reshape(data, data.shape[:-1] + (data.shape[-1] // 100, 100))
+                data = np.mean(data, axis=-1)
+            times = np.arange(data.shape[-1]) * 100
+        else:
+            times = None
 
-        # -> (words, subjects, rois, 100ms_slices)
-        data = np.transpose(data, axes=(1, 0, 2, 3))
+        if len(data.shape) == 4:
+            # -> (words, subjects, rois, 100ms_slices)
+            data = np.transpose(data, axes=(1, 0, 2, 3))
+        else:
+            # -> (words, subjects, space)
+            data = np.transpose(data, axes=(1, 0, 2))
 
-        assert (len(rois) == data.shape[2])
+        if rois is not None:
+            assert (len(rois) == data.shape[2])
 
         indicator_plus = stimuli == '+'
 
@@ -240,10 +270,10 @@ class HarryPotterCorpus(CorpusBase):
         not_plus = np.logical_not(indicator_plus)
         data = data[not_plus]
         stimuli = stimuli[not_plus]
+        blocks = blocks[not_plus]
 
         new_indices[not_plus] = np.arange(len(data))
 
-        # blocks = blocks[not_plus]
         # example_id_words = example_id_words[not_plus]
 
         # data is (words, subjects, rois, 100ms_slices)
@@ -263,6 +293,8 @@ class HarryPotterCorpus(CorpusBase):
             roi_axis -= 1
             time_axis -= 1
         if 'roi' in separate_task_axes:
+            if rois is None:
+                raise ValueError('Cannot separate roi axis. rois does not exist.')
             separated_data = OrderedDict()
             for k in data:
                 assert (len(rois) == data[k].shape[roi_axis])
@@ -272,6 +304,8 @@ class HarryPotterCorpus(CorpusBase):
             data = separated_data
             time_axis -= 1
         if 'time' in separate_task_axes:
+            if times is None:
+                raise ValueError('Cannot separate time axis. times does not exist')
             separated_data = OrderedDict()
             for k in data:
                 assert (len(times) == data[k].shape[time_axis])
@@ -279,6 +313,8 @@ class HarryPotterCorpus(CorpusBase):
                     k_new = k + '.{}'.format(window)
                     separated_data[k_new] = np.take(data[k], idx_time, axis=time_axis)
             data = separated_data
+
+        block_metadata = np.full(len(example_manager), -1, dtype=np.int64)
 
         for example in examples:
             indices = np.array([w.index_in_all_words for w in example.full_sentences])
@@ -297,7 +333,13 @@ class HarryPotterCorpus(CorpusBase):
                 allow_new_examples=False)
             assert (features is not None)
 
-        return data
+            example_blocks = blocks[new_indices[indices]]
+            assert(np.all(example_blocks == example_blocks[0]))
+            block_metadata[features.unique_id] = example_blocks[0]
+
+        assert(np.all(block_metadata) >= 0)
+
+        return data, block_metadata
 
     def _read_harry_potter_fmri_files(self):
         # noinspection PyPep8
@@ -312,6 +354,12 @@ class HarryPotterCorpus(CorpusBase):
             M=[7, 8, 9, 10],
             N=[7, 8, 9, 10])
 
+        # if subject is in this dict, we will add a separate response data for this subset of indices
+        # to more easily track the train/eval curves
+        good_region_args = dict(
+            I=dict(x=0.73, y=0.35, z=0.5, distance=3)
+        )
+
         subjects = self.fmri_subjects
         if subjects is None:
             subjects = list(subject_runs.keys())
@@ -323,6 +371,7 @@ class HarryPotterCorpus(CorpusBase):
 
         all_subject_data = OrderedDict()
         masks = OrderedDict()
+        good_regions = dict()
 
         for subject in subjects:
             if subject not in subject_runs:
@@ -335,8 +384,11 @@ class HarryPotterCorpus(CorpusBase):
 
             masks[subject] = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
             all_subject_data[subject] = subject_data
+            if subject in good_region_args:
+                good_indices, _, _ = get_indices_from_normalized_coordinates(subject, **good_region_args[subject])
+                good_regions[subject] = good_indices
 
-        return all_subject_data, masks
+        return all_subject_data, masks, good_regions
 
     def _harry_potter_fmri_word_info(self, run_lengths):
 
@@ -417,7 +469,7 @@ class HarryPotterCorpus(CorpusBase):
 
     def _read_fmri(self, example_manager: CorpusExampleUnifier, fmri_examples):
 
-        data, spatial_masks = self._read_harry_potter_fmri_files()
+        data, spatial_masks, good_regions = self._read_harry_potter_fmri_files()
 
         # we assume that the runs are the same across subjects below. assert it here
         run_lengths = None
@@ -447,6 +499,10 @@ class HarryPotterCorpus(CorpusBase):
         masked_data = OrderedDict()
         for subject in data:
             subject_data = np.concatenate(data[subject])[active_image_indices]
+            if self.fmri_high_pass is not None:
+                fs = 0.5  # sample rate is 0.5 Hz
+                sos = butter(10, 2 * self.fmri_high_pass / fs, 'high', output='sos')
+                subject_data = sosfilt(sos, subject_data, axis=0)
             if self.fmri_smooth_factor is not None:
                 subject_data = gaussian_filter1d(
                     subject_data, sigma=self.fmri_smooth_factor, axis=1, order=0, mode='reflect', truncate=4.0)
@@ -454,6 +510,9 @@ class HarryPotterCorpus(CorpusBase):
             subject_data = subject_data[:, spatial_masks[subject]]
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
             masked_data['hp_fmri_{}'.format(subject)] = np.expand_dims(subject_data, axis=1)
+            if subject in good_regions:
+                masked_data['hp_fmri_good_{}'.format(subject)] = np.expand_dims(
+                    subject_data[:, good_regions[subject]], axis=1)
         data = masked_data
 
         for example in fmri_examples:
@@ -577,3 +636,53 @@ def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=
             np.random.shuffle(validation_examples)
     test_examples = list()
     return train_examples, validation_examples, test_examples
+
+
+def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, distance=None):
+
+    mask = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+
+    max_z, max_y, max_x = mask.shape
+
+    is_single = np.isscalar(x) and np.isscalar(y) and np.isscalar(z)
+
+    x, y, z = np.reshape(np.asarray(x), (-1, 1)), np.reshape(np.asarray(y), (-1, 1)), np.reshape(np.asarray(z), (-1, 1))
+
+    # transform from normalized coordinates to voxel space
+    slice_coord = np.concatenate([x * max_x, y * max_y, z * max_z], axis=1)
+
+    mask_z, mask_y, mask_x = np.where(mask)
+    mask_coord = np.concatenate(
+        [np.expand_dims(mask_x, 1), np.expand_dims(mask_y, 1), np.expand_dims(mask_z, 1)], axis=1)
+
+    distances = cdist(slice_coord, mask_coord)
+
+    if distance is not None:
+        distances[distances > distance] = np.nan
+    if closest_k is None:
+        closest_k = distances.shape[1]
+    max_valid = np.max(np.sum(np.logical_not(np.isnan(distances)), axis=1))
+    closest_k = min(max_valid, closest_k)
+
+    # nan sorts last
+    closest_indices = np.take(np.argsort(distances, axis=1), np.arange(closest_k), axis=1)
+    axis_0_indices = np.tile(np.reshape(np.arange(len(closest_indices)), (-1, 1, 1)), (1, closest_indices.shape[1], 1))
+    axis_1_compressed_indices = np.tile(np.reshape(np.arange(closest_k), (1, -1, 1)), (closest_indices.shape[0], 1, 1))
+    closest_indices = np.reshape(
+        np.concatenate([axis_0_indices, np.expand_dims(closest_indices, 2), axis_1_compressed_indices], axis=2),
+        (-1, 3))
+    axis_0, indices, axis_1 = np.split(closest_indices, 3, axis=1)
+
+    compressed_distances = np.full((distances.shape[0], closest_k), np.nan)
+    compressed_indices = np.full((distances.shape[0], closest_k), -1)
+
+    compressed_distances[axis_0, axis_1] = distances[axis_0, indices]
+    compressed_indices[axis_0, axis_1] = indices
+
+    compressed_indices[np.isnan(compressed_distances)] = -1
+
+    if is_single:
+        compressed_indices = np.squeeze(compressed_indices, axis=0)
+        compressed_distances = np.squeeze(compressed_distances, axis=0)
+
+    return compressed_indices, compressed_distances, mask_coord.shape[0]

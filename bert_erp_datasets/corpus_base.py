@@ -118,6 +118,9 @@ class CorpusExampleUnifier:
             if data_key in self._seen_data_keys:
                 del self._seen_data_keys[data_key]
 
+    def __len__(self):
+        return len(self._examples)
+
 
 class CorpusBase:
     pass

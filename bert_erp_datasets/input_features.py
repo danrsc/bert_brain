@@ -64,6 +64,7 @@ class _ResponseKind:
     ns_froi: str
     colorless: str
     linzen_agree: str
+    stanford_sentiment: str
 
 
 ResponseKind = _ResponseKind(**dict((f.name, f.name) for f in dataclasses.fields(_ResponseKind)))

@@ -3,11 +3,16 @@ from collections import OrderedDict
 import logging
 import pickle
 import inspect
+import tarfile
+import tempfile
+import shutil
 
 import numpy as np
 import torch
 from torch import nn
-from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME
+from pytorch_pretrained_bert.modeling import BertConfig, \
+    BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME, PRETRAINED_MODEL_ARCHIVE_MAP, TF_WEIGHTS_NAME, \
+    cached_path, load_tf_weights_in_bert
 
 from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id
 
@@ -15,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = ['BertMultiPredictionHead', 'KeyedLinear', 'KeyedGroupPooledLinear', 'MultiPredictionHead',
-           'BertOutputSupplement']
+           'BertOutputSupplement', 'KeyedCombinedLinear']
 
 
 class KeyedLinear(torch.nn.Module):
@@ -45,6 +50,8 @@ class KeyedLinear(torch.nn.Module):
                 indicator_valid = data_ids >= 0
                 result[k] = result[k][indicator_valid]
                 result[(k, 'data_ids')] = data_ids[indicator_valid]
+                result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
+
         return result
 
 
@@ -68,6 +75,28 @@ class KeyedGroupPooledLinear(torch.nn.Module):
         for k in keys:
             result[(k, 'data_ids')] = groups
             result[(k, 'example_ids')] = example_ids
+        return result
+
+
+class KeyedCombinedLinear(torch.nn.Module):
+
+    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+        super(KeyedCombinedLinear, self).__init__()
+        self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
+        self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
+        self.sequence_linear = nn.Linear(in_sequence_channels, sum(self.splits))
+        self.pooled_linear = nn.Linear(in_pooled_channels, sum(self.splits))
+
+    def forward(self, sequence_output, pooled_output, batch):
+        pooled_predictions = self.pooled_linear(pooled_output)
+        predictions = self.sequence_linear(sequence_output) + torch.unsqueeze(pooled_predictions, 1)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        result = OrderedDict()
+        assert(len(self.prediction_key_to_shape) == len(predictions))
+        for k, p in zip(self.prediction_key_to_shape, predictions):
+            p = p.view(p.size()[:2] + self.prediction_key_to_shape[k])
+            result[k] = p
+
         return result
 
 
@@ -228,7 +257,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         self.prediction_head.save_kwargs(output_model_path)
 
     @classmethod
-    def load(cls, model_path):
+    def load(cls, model_path, map_location=None):
         config = BertConfig(os.path.join(model_path, CONFIG_NAME))
         kwargs = MultiPredictionHead.load_kwargs(model_path)
         signature = inspect.signature(cls.__init__)
@@ -237,7 +266,136 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             del kwargs[k]
         bound = signature.bind_partial(**kwargs)
         model = cls(config, **bound.kwargs)
-        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME)))
+
+        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location))
+
+        return model
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, state_dict=None, cache_dir=None,
+                        from_tf=False, map_location='default_map_location', *inputs, **kwargs):
+        """
+        Copied from pytorch_pretrained_bert modeling.py so we can pass a map_location argument
+        Instantiate a BertPreTrainedModel from a pre-trained model file or a pytorch state dict.
+        Download and cache the pre-trained model file if needed.
+
+        Params:
+            pretrained_model_name_or_path: either:
+                - a str with the name of a pre-trained model to load selected in the list of:
+                    . `bert-base-uncased`
+                    . `bert-large-uncased`
+                    . `bert-base-cased`
+                    . `bert-large-cased`
+                    . `bert-base-multilingual-uncased`
+                    . `bert-base-multilingual-cased`
+                    . `bert-base-chinese`
+                - a path or url to a pretrained model archive containing:
+                    . `bert_config.json` a configuration file for the model
+                    . `pytorch_model.bin` a PyTorch dump of a BertForPreTraining instance
+                - a path or url to a pretrained model archive containing:
+                    . `bert_config.json` a configuration file for the model
+                    . `model.chkpt` a TensorFlow checkpoint
+            from_tf: should we load the weights from a locally saved TensorFlow checkpoint
+            cache_dir: an optional path to a folder in which the pre-trained models will be cached.
+            state_dict: an optional state dictionnary (collections.OrderedDict object) to use instead of Google pre-trained models
+            *inputs, **kwargs: additional input for the specific Bert class
+                (ex: num_labels for BertForSequenceClassification)
+        """
+        if pretrained_model_name_or_path in PRETRAINED_MODEL_ARCHIVE_MAP:
+            archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[pretrained_model_name_or_path]
+        else:
+            archive_file = pretrained_model_name_or_path
+        # redirect to the cache, if necessary
+        try:
+            resolved_archive_file = cached_path(archive_file, cache_dir=cache_dir)
+        except EnvironmentError:
+            logger.error(
+                "Model name '{}' was not found in model name list ({}). "
+                "We assumed '{}' was a path or url but couldn't find any file "
+                "associated to this path or url.".format(
+                    pretrained_model_name_or_path,
+                    ', '.join(PRETRAINED_MODEL_ARCHIVE_MAP.keys()),
+                    archive_file))
+            return None
+        if resolved_archive_file == archive_file:
+            logger.info("loading archive file {}".format(archive_file))
+        else:
+            logger.info("loading archive file {} from cache at {}".format(
+                archive_file, resolved_archive_file))
+        tempdir = None
+        if os.path.isdir(resolved_archive_file) or from_tf:
+            serialization_dir = resolved_archive_file
+        else:
+            # Extract archive to temp dir
+            tempdir = tempfile.mkdtemp()
+            logger.info("extracting archive file {} to temp dir {}".format(
+                resolved_archive_file, tempdir))
+            with tarfile.open(resolved_archive_file, 'r:gz') as archive:
+                archive.extractall(tempdir)
+            serialization_dir = tempdir
+        # Load config
+        config_file = os.path.join(serialization_dir, CONFIG_NAME)
+        config = BertConfig.from_json_file(config_file)
+        logger.info("Model config {}".format(config))
+        # Instantiate model.
+        model = cls(config, *inputs, **kwargs)
+        if state_dict is None and not from_tf:
+            weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)
+            if map_location == 'default_map_location':
+                map_location = 'cpu' if not torch.cuda.is_available() else None
+            state_dict = torch.load(weights_path, map_location)
+        if tempdir:
+            # Clean up temp dir
+            shutil.rmtree(tempdir)
+        if from_tf:
+            # Directly load from a TensorFlow checkpoint
+            weights_path = os.path.join(serialization_dir, TF_WEIGHTS_NAME)
+            return load_tf_weights_in_bert(model, weights_path)
+        # Load from a PyTorch state_dict
+        old_keys = []
+        new_keys = []
+        for key in state_dict.keys():
+            new_key = None
+            if 'gamma' in key:
+                new_key = key.replace('gamma', 'weight')
+            if 'beta' in key:
+                new_key = key.replace('beta', 'bias')
+            if new_key:
+                old_keys.append(key)
+                new_keys.append(new_key)
+        for old_key, new_key in zip(old_keys, new_keys):
+            state_dict[new_key] = state_dict.pop(old_key)
+
+        missing_keys = []
+        unexpected_keys = []
+        error_msgs = []
+        # copy state_dict so _load_from_state_dict can modify it
+        metadata = getattr(state_dict, '_metadata', None)
+        state_dict = state_dict.copy()
+        if metadata is not None:
+            state_dict._metadata = metadata
+
+        def load(module, prefix=''):
+            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+            module._load_from_state_dict(
+                state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
+            for name, child in module._modules.items():
+                if child is not None:
+                    load(child, prefix + name + '.')
+
+        start_prefix = ''
+        if not hasattr(model, 'bert') and any(s.startswith('bert.') for s in state_dict.keys()):
+            start_prefix = 'bert.'
+        load(model, prefix=start_prefix)
+        if len(missing_keys) > 0:
+            logger.info("Weights of {} not initialized from pretrained model: {}".format(
+                model.__class__.__name__, missing_keys))
+        if len(unexpected_keys) > 0:
+            logger.info("Weights from pretrained model not used in {}: {}".format(
+                model.__class__.__name__, unexpected_keys))
+        if len(error_msgs) > 0:
+            raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
+                model.__class__.__name__, "\n\t".join(error_msgs)))
         return model
 
     def forward(self, batch, dataset):

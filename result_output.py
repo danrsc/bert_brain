@@ -6,7 +6,7 @@ import logging
 import numpy as np
 
 
-__all__ = ['OutputResult', 'write_predictions', 'read_predictions']
+__all__ = ['OutputResult', 'write_predictions', 'read_predictions', 'write_loss_curve', 'read_loss_curve']
 
 
 logger = logging.getLogger(__name__)
@@ -152,4 +152,24 @@ def read_predictions(output_path):
 
         result[key] = results
 
+    return result
+
+
+def write_loss_curve(output_path, task_results):
+    output_dict = dict()
+    keys = [k for k in task_results.results]
+    output_dict['__keys__'] = keys
+    for key in keys:
+        output_dict['epochs_{}'.format(key)] = np.array([tr.epoch for tr in task_results.results[key]])
+        output_dict['steps_{}'.format(key)] = np.array([tr.step for tr in task_results.results[key]])
+        output_dict['values_{}'.format(key)] = np.array([tr.value for tr in task_results.results[key]])
+    np.savez(output_path, **output_dict)
+
+
+def read_loss_curve(output_path):
+    npz = np.load(output_path)
+    keys = npz['__keys__']
+    result = OrderedDict()
+    for key in keys:
+        result[key] = (npz['epochs_{}'.format(key)], npz['steps_{}'.format(key)], npz['values_{}'.format(key)])
     return result

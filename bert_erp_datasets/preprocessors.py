@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 from scipy.stats import boxcox
 from scipy.ndimage.filters import gaussian_filter1d
+from scipy.signal import sosfilt
 from sklearn.decomposition import PCA
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     'PreprocessDetrend',
     'PreprocessDiscretize',
     'PreprocessBaseline',
+    'PreprocessFeatureStandardize',
     'PreprocessSequenceStandardize',
     'PreprocessDiff',
     'PreprocessStandardize',
@@ -24,6 +26,7 @@ __all__ = [
     'PreprocessClip',
     'PreprocessGaussianBlur',
     'PreprocessCompress',
+    'PreprocessSoSFilter',
     'PreprocessMany']
 
 
@@ -122,8 +125,21 @@ class PreprocessDetrend:
             x = x[indicator_train]
             to_fit = to_fit[indicator_train]
 
-        to_fit = np.ma.masked_invalid(to_fit)
-        p = np.ma.polyfit(x, np.reshape(to_fit, (to_fit.shape[0], -1)), deg=1)
+        if len(to_fit) == 0:
+            return arr
+
+        to_fit = np.reshape(np.ma.masked_invalid(to_fit), (to_fit.shape[0], -1))
+
+        # some columns might not have any data
+        indicator_can_fit = np.logical_not(np.all(to_fit.mask, axis=0))
+        to_fit = to_fit[:, indicator_can_fit]
+
+        p = np.ma.polyfit(x, to_fit, deg=1)
+
+        filled_p = np.zeros((p.shape[0], len(indicator_can_fit)), p.dtype)
+        filled_p[:, indicator_can_fit] = p
+        p = filled_p
+
         #      (1, num_columns)            (num_rows, 1)
         lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(arr)), (-1, 1)) + np.reshape(p[1], (1, -1))
         lines = np.reshape(lines, arr.shape)
@@ -237,6 +253,17 @@ class PreprocessBaseline:
         self._subtract_baseline(loaded_data_tuple.test, data)
 
         return replace(loaded_data_tuple, data=data)
+
+
+class PreprocessFeatureStandardize:
+
+    def __init__(self):
+        pass
+
+    def __call__(self, loaded_data_tuple, metadata):
+        d = np.reshape(loaded_data_tuple.data, (loaded_data_tuple.data.shape[0], -1))
+        d = (d - np.nanmean(d, axis=1, keepdims=True)) / np.nanstd(d, axis=1, keepdims=True)
+        return replace(loaded_data_tuple, data=np.reshape(d, loaded_data_tuple.data.shape))
 
 
 class PreprocessSequenceStandardize:
@@ -378,7 +405,12 @@ class PreprocessStandardize:
         if self.metadata_example_group_by is not None:
             if metadata is None or self.metadata_example_group_by not in metadata:
                 raise ValueError('metadata_example_group_by not found: {}'.format(self.metadata_example_group_by))
-            data = np.copy(loaded_data_tuple.data)
+            if self.average_axis is None:   # we're going to keep the shape
+                data = np.full(loaded_data_tuple.data.shape, np.nan)
+            else:
+                data = np.full(
+                    loaded_data_tuple.data.shape[:self.average_axis]
+                    + loaded_data_tuple.data.shape[(self.average_axis + 1):], np.nan)
             grouped_examples = _unsorted_group_by(
                 chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
                 lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
@@ -493,6 +525,26 @@ class PreprocessCompress:
         condition = metadata[self.metadata_condition_name]
         data = np.compress(condition, loaded_data_tuple.data, axis=self.compress_axis)
         return replace(loaded_data_tuple, data=data)
+
+
+class PreprocessSoSFilter:
+
+    def __init__(self, sos, axis=0):
+        """
+        Apply scipy.signal.sosfilt to data
+        Args:
+            sos: iirfilter created with output='sos',
+                e.g.
+                    A high-pass butterworth filter for a sampling rate of 0.5 Hz
+                    and cutoff 0.2 Hz
+                signal.butter(10, 0.2, 'hp', fs=0.5, output='sos')
+            axis: Which axis to apply along
+        """
+        self.sos = sos
+        self.axis = axis
+
+    def __call__(self, loaded_data_tuple, metadata):
+        return replace(loaded_data_tuple, data=sosfilt(self.sos, loaded_data_tuple.data, axis=self.axis))
 
 
 class PreprocessMany:

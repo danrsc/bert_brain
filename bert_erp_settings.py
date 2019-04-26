@@ -14,7 +14,7 @@ __all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', '
 @dataclass
 class OptimizationSettings:
     # Total number of training epochs to perform.
-    num_train_epochs: float = 3.0
+    num_train_epochs: int = 3
     # initial learning rate for Adam
     learning_rate: float = 5e-5
     # Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10% of training.
@@ -33,8 +33,10 @@ class OptimizationSettings:
     gradient_accumulation_steps: int = 1
     # local_rank for distributed training on gpus; probably don't need this
     local_rank: int = -1
-    # If True, the bert parameters are not modified, only the parameters in the prediction heads
-    is_train_prediction_heads_only: bool = False
+    # During the first num_epochs_train_prediction_heads_only, only the prediction heads will be trained
+    num_epochs_train_prediction_heads_only: int = 0
+    # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
+    num_final_epochs_train_prediction_heads_only: int = 0
 
 
 @dataclass
@@ -86,6 +88,10 @@ def _default_preprocessors():
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
             PreprocessStandardize(average_axis=None, stop_mode='content')),
+        # ResponseKind.hp_meg: PreprocessMany(
+        #     PreprocessDetrend(stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+        #     PreprocessStandardize(stop_mode='content', average_axis=None)),
+
         ResponseKind.ucl_erp: preprocess_standardize,
         ResponseKind.ucl_eye: PreprocessMany(PreprocessLog(), preprocess_standardize),
         ResponseKind.ucl_self_paced: PreprocessMany(PreprocessLog(), preprocess_standardize),
@@ -128,7 +134,8 @@ def _default_critics():
         ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
         CorpusKeys.harry_potter: CriticSettings(critic_type=CriticKeys.mse),
         CorpusKeys.colorless_green: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        CorpusKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        CorpusKeys.stanford_sentiment_treebank: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
     }
 
 
