@@ -134,7 +134,8 @@ def _default_critics():
         ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
         CorpusKeys.harry_potter: CriticSettings(critic_type=CriticKeys.mse),
         CorpusKeys.colorless_green: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        CorpusKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        CorpusKeys.stanford_sentiment_treebank: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
     }
 
 

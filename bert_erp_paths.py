@@ -26,6 +26,7 @@ class Paths:
     default_relative_ontonotes_path = os.path.join('conll-formatted-ontonotes-5.0', 'data')
     default_relative_natural_stories_path = 'natural_stories'
     default_relative_linzen_agreement_path = 'linzen_agreement'
+    default_relative_stanford_sentiment_treebank_path = os.path.join('GLUE', 'glue_data', 'SST-2')
 
     pre_trained_base_path: str = '/share/volume0/drschwar/BERT'
     result_path: str = '/share/volume0/drschwar/bert_erp/results/'
@@ -47,6 +48,7 @@ class Paths:
     ontonotes_path: Optional[str] = None
     natural_stories_path: Optional[str] = None
     linzen_agreement_path: Optional[str] = None
+    stanford_sentiment_treebank_path: Optional[str] = None
 
     def __post_init__(self):
         if self.pre_trained_path is None:
@@ -85,6 +87,9 @@ class Paths:
         if self.linzen_agreement_path is None:
             self.linzen_agreement_path = os.path.join(
                 self.data_set_base_path, Paths.default_relative_linzen_agreement_path)
+        if self.stanford_sentiment_treebank_path is None:
+            self.stanford_sentiment_treebank_path = os.path.join(
+                self.data_set_base_path, Paths.default_relative_stanford_sentiment_treebank_path)
 
     def make_corpus_loader(
             self, bert_pre_trained_model_name='bert-base-uncased', corpus_key_kwarg_dict=None):
@@ -94,4 +99,5 @@ class Paths:
             self.frank_2015_erp_path, self.dundee_path, self.english_web_universal_dependencies_v_1_2_path,
             self.english_web_universal_dependencies_v_2_3_path, self.proto_roles_english_web_path, self.ontonotes_path,
             self.proto_roles_prop_bank_path, self.natural_stories_path, self.linzen_agreement_path,
+            self.stanford_sentiment_treebank_path,
             corpus_key_kwarg_dict=corpus_key_kwarg_dict)

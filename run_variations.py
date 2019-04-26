@@ -334,6 +334,11 @@ def named_variations(name):
             fmri_sentence_mode='ignore', fmri_window_duration=10., fmri_minimum_duration_required=9.5)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
+    elif name == 'sst':
+        training_variations = [('sentiment',)]
+        settings = Settings(corpus_keys=(CorpusKeys.stanford_sentiment_treebank,))
+        num_runs = 1
+        min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 

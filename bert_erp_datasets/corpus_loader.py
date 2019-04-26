@@ -15,6 +15,7 @@ from .university_college_london_corpus import UclCorpus
 from .natural_stories import NaturalStoriesCorpus
 from .harry_potter import HarryPotterCorpus
 from .colorless_green import ColorlessGreenCorpus, LinzenAgreementCorpus
+from .stanford_sentiment_treebank import StanfordSentimentTreebank
 
 
 __all__ = ['CorpusLoader', 'CorpusKeys']
@@ -359,6 +360,7 @@ class _CorpusKeys:
     natural_stories: str
     colorless_green: str
     linzen_agreement: str
+    stanford_sentiment_treebank: str
 
 
 CorpusKeys = _CorpusKeys(**dict((f.name, f.name) for f in dataclasses.fields(_CorpusKeys)))
@@ -383,6 +385,7 @@ class CorpusLoader(object):
             proto_roles_prop_bank_path,
             natural_stories_path,
             linzen_agreement_path,
+            stanford_sentiment_treebank_path,
             corpus_key_kwarg_dict=None):
         """
         This object knows how to load data, and stores settings that should be invariant across calls to load
@@ -426,7 +429,9 @@ class CorpusLoader(object):
             CorpusKeys.colorless_green: ColorlessGreenCorpus(
                 english_web_universal_dependencies_v_2_3_path, **_get_kwargs(CorpusKeys.colorless_green)),
             CorpusKeys.linzen_agreement: LinzenAgreementCorpus(
-                linzen_agreement_path, **_get_kwargs(CorpusKeys.linzen_agreement))
+                linzen_agreement_path, **_get_kwargs(CorpusKeys.linzen_agreement)),
+            CorpusKeys.stanford_sentiment_treebank: StanfordSentimentTreebank(
+                stanford_sentiment_treebank_path, **_get_kwargs(CorpusKeys.stanford_sentiment_treebank))
         }
 
         # if key == DataLoader.geco:

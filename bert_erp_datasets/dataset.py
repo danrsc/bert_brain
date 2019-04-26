@@ -76,11 +76,11 @@ class PreparedDataDataset(torch.utils.data.Dataset):
     def _get_examples(which, current):
         which = SwitchRemember(which)
         if which == 'train':
-            return current.train
+            return current.train if current.train is not None else []
         elif which == 'validation':
-            return current.validation
+            return current.validation if current.validation is not None else []
         elif which == 'test':
-            return current.test
+            return current.test if current.test is not None else []
         raise ValueError(
             'Unknown value for which: {}. Valid choices are: ({})'.format(which.var, ', '.join(which.tests)))
 
