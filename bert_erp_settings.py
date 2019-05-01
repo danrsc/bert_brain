@@ -8,7 +8,7 @@ from bert_erp_datasets import CorpusKeys, PreprocessMany, PreprocessStandardize,
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
-__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'Settings']
+__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'Settings']
 
 
 @dataclass
@@ -140,6 +140,18 @@ def _default_critics():
 
 
 @dataclass
+class TrainingVariation:
+    loss_tasks: Sequence[str]
+    # If specified, then this causes a partially fine-tuned model to be loaded instead of the base pre-trained model.
+    # When specified, this should be a function taking as arguments a name from named_variations, a tuple of loss tasks
+    # which will be one of the training variations within the named variation, and an index which indicates the run.
+    # These arguments specify the training variation and run that is about to be executed. The function should return
+    # a name, tuple of loss tasks, and run index corresponding to the training variation and run from which a model
+    # should be loaded
+    load_from: Optional[Callable[[str, Tuple[str], int], Tuple[str, Tuple[str], int]]] = None
+
+
+@dataclass
 class Settings:
     # which data to load
     corpus_keys: Optional[Sequence[str]] = (CorpusKeys.ucl,)
@@ -200,18 +212,15 @@ class Settings:
     # but only the fields listed here will be considered part of the loss for the purpose of optimization and
     # only those fields will be reported in train_loss / eval_loss. Other critic output is available as metrics for
     # reporting, but is otherwise ignored by training.
-    loss_tasks: set = field(default_factory=set)
+    loss_tasks: Union[set, TrainingVariation] = field(default_factory=set)
 
     # fields which are not in the response_data part of the RawData structure, but which should nevertheless be used
     # as output targets of the model. If a field is already in loss_tasks then it does not need to also be specified
     # here, but this allows non-loss fields to be output/evaluated. This is useful when we want to predict something
-    # like syntax that is on the input features rather than in the response data. The use-case for this is is a model
+    # like syntax that is on the input features rather than in the response data. The use-case for this is a model
     # has been pre-trained to make a prediction on a non-response field, and we want to track how those predictions
     # are changing as we target a different optimization metric.
     non_response_outputs: set = field(default_factory=set)
-
-    # TODO: not currently used, but we need to save the model
-    save_checkpoints_steps: int = 1000
 
     # TODO: not currently used. Should revive from ulmfit code
     # can use an extension to render to file, e.g. 'png', or 'show' to plot

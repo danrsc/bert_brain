@@ -20,7 +20,7 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
-           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates']
+           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
 
 
 @dataclass
@@ -206,7 +206,8 @@ class HarryPotterCorpus(CorpusBase):
             'pca_label': 'harry_potter_meg_100ms_pca.npz',
             'mean_label': 'harry_potter_meg_100ms_mean_flip.npz',
             'pca_sensor': 'harry_potter_meg_sensor_pca_35_word_mean.npz',
-            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz'
+            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz',
+            'ica_sensor_full': 'harry_potter_meg_sensor_ica_35_word_full.npz'
         }
 
         if self.meg_kind not in file_names:
@@ -382,7 +383,7 @@ class HarryPotterCorpus(CorpusBase):
                 data = nibabel.load(functional_file).get_data()
                 subject_data.append(np.transpose(data))
 
-            masks[subject] = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+            masks[subject] = get_mask_for_subject(subject)
             all_subject_data[subject] = subject_data
             if subject in good_region_args:
                 good_indices, _, _ = get_indices_from_normalized_coordinates(subject, **good_region_args[subject])
@@ -638,9 +639,15 @@ def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=
     return train_examples, validation_examples, test_examples
 
 
+def get_mask_for_subject(subject):
+    if subject in ['H', 'L', 'K']:
+        return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars_auto2'.format(subject), 'thick')
+    return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+
+
 def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, distance=None):
 
-    mask = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+    mask = get_mask_for_subject(subject)
 
     max_z, max_y, max_x = mask.shape
 

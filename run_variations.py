@@ -21,7 +21,7 @@ import logging
 import os
 import random
 from dataclasses import replace
-from typing import Sequence
+from typing import Sequence, Union
 import hashlib
 from tqdm import trange
 from tqdm_logging import replace_root_logger_handler
@@ -32,7 +32,7 @@ import torch
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
     PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize
-from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings
+from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, TrainingVariation
 from bert_erp_paths import Paths
 from bert_erp_modeling import KeyedLinear, KeyedCombinedLinear, CriticKeys, KLeastSEHalvingEpochs
 from train_eval import train, make_datasets
@@ -67,7 +67,7 @@ def set_random_seeds(seed, index_run, n_gpu):
 
 def run_variation(
             set_name,
-            loss_tasks: Sequence[str],
+            loss_tasks: Union[Sequence[str], TrainingVariation],
             settings: Settings,
             num_runs: int,
             auxiliary_loss_tasks: Sequence[str],
@@ -83,10 +83,25 @@ def run_variation(
     # settings = replace(
     #   settings, train_batch_size=int(settings.train_batch_size / settings.gradient_accumulation_steps))
 
+    load_from_paths = None
+    if isinstance(loss_tasks, TrainingVariation):
+        load_from = loss_tasks.load_from
+        loss_tasks = loss_tasks.loss_tasks
+
+        load_from_paths = list()
+        for index_run in range(num_runs):
+            load_from_name, load_from_training_variation, load_from_run = load_from(set_name, loss_tasks, index_run)
+            load_from_paths.append(os.path.join(
+                Paths().model_path,
+                load_from_name,
+                task_hash(load_from_training_variation),
+                'run_{}'.format(load_from_run)))
+
     def io_setup():
         temp_paths = Paths()
         corpus_loader_ = temp_paths.make_corpus_loader(corpus_key_kwarg_dict=settings.corpus_key_kwargs)
-        hash_ = task_hash(loss_tasks)
+        to_hash = list(loss_tasks) + load_from_paths if load_from_paths is not None else loss_tasks
+        hash_ = task_hash(to_hash)
         model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
         result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
 
@@ -123,7 +138,8 @@ def run_variation(
             data_id_in_batch_keys=settings.data_id_in_batch_keys)
 
         train(settings, output_validation_path, output_test_path, output_model_path,
-              train_data, validation_data, test_data, n_gpu, device)
+              train_data, validation_data, test_data, n_gpu, device,
+              load_from_paths[index_run] if load_from_paths is not None else None)
 
 
 def iterate_powerset(items):
@@ -339,6 +355,37 @@ def named_variations(name):
         settings = Settings(corpus_keys=(CorpusKeys.stanford_sentiment_treebank,))
         num_runs = 1
         min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_H_from_I':
+        training_variations = [
+            TrainingVariation(
+                ('hp_fmri_H',),
+                load_from=lambda set_name_, variation_, run_index: ('hp_fmri_meg', ('hp_fmri_I',), run_index)),
+            ('hp_fmri_H',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=3, num_epochs_train_prediction_heads_only=-1))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='H',
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            include_meg=False)
+        # final_linear_start = \
+        #     settings.optimization_settings.num_train_epochs \
+        #     - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
+        # settings.critics['hp_fmri_H'] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5, delay_in_epochs=2, minimum_k=100, final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 
@@ -391,6 +438,7 @@ def main():
     training_variations_, settings_, num_runs_, min_memory_, aux_loss_tasks = named_variations(args.name)
     if args.no_cuda:
         settings_.no_cuda = True
+
     for training_variation in training_variations_:
 
         if settings_.optimization_settings.local_rank == -1 or settings_.no_cuda:
@@ -416,8 +464,9 @@ def main():
             settings_.optimization_settings.fp16))
 
         with cuda_auto_empty_cache_context(device):
-            run_variation(args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
-                          device, n_gpu)
+            run_variation(
+                args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
+                device, n_gpu)
 
 
 if __name__ == '__main__':

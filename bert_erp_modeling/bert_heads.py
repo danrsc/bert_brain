@@ -6,6 +6,7 @@ import inspect
 import tarfile
 import tempfile
 import shutil
+import itertools
 
 import numpy as np
 import torch
@@ -23,13 +24,55 @@ __all__ = ['BertMultiPredictionHead', 'KeyedLinear', 'KeyedGroupPooledLinear', '
            'BertOutputSupplement', 'KeyedCombinedLinear']
 
 
-class KeyedLinear(torch.nn.Module):
+class KeyedBase(torch.nn.Module):
 
-    def __init__(self, is_sequence, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
-        super(KeyedLinear, self).__init__()
-        self.is_sequence = is_sequence
+    def __init__(self, prediction_key_to_shape):
+        super().__init__()
         self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
         self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
+
+    def forward(self, sequence_output, pooled_output, batch):
+        raise NotImplementedError('{} does not implement forward'.format(type(self)))
+
+    def update_state_dict(self, prefix, state_dict, old_prediction_key_to_shape):
+        old_splits = np.cumsum([int(np.prod(old_prediction_key_to_shape[k])) for k in old_prediction_key_to_shape])
+        old_splits = dict((k, (0 if i == 0 else old_splits[i] - 1, old_splits[i]))
+                          for i, k in enumerate(old_prediction_key_to_shape))
+        ranges = [old_splits[k] if k in old_splits else None for k in self.prediction_key_to_shape]
+        for idx, k in enumerate(self.prediction_key_to_shape):
+            if ranges[idx] is not None and int(np.prod(self.prediction_key_to_shape[k])) != ranges[idx]:
+                raise ValueError('Inconsistent number of targets for prediction key: {}'.format(k))
+        current_splits = [0] + np.cumsum(self.splits).tolist()
+        total = current_splits[-1]
+        current_splits = current_splits[:-1]
+
+        def update(module, prefix_=''):
+            for name, tensor in itertools.chain(
+                    module.named_buffers(prefix_[:-1], False), module.named_parameters(prefix_[:-1], False)):
+                if name in state_dict:
+                    state = state_dict[name]
+                    updated_state = tensor.clone()
+                    for idx in current_splits:
+                        if ranges[idx] is not None:
+                            end = current_splits[idx + 1] if idx + 1 < len(current_splits) else total
+                            if len(state.size()) < 3:
+                                updated_state[idx:end] = state[ranges[idx][0]:ranges[idx][1]]
+                            else:
+                                raise ValueError('Unexpected state size: {}'.format(len(state.size())))
+                    state_dict[name] = updated_state
+
+            for name, child in module.named_children():
+                if child is not None:
+                    update(child, prefix_ + name + '.')
+
+        update(self, prefix)
+
+
+class KeyedLinear(KeyedBase):
+
+    def __init__(self, is_sequence, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+        super().__init__(prediction_key_to_shape)
+        self.is_sequence = is_sequence
         self.linear = nn.Linear(in_sequence_channels if self.is_sequence else in_pooled_channels, sum(self.splits))
 
     def forward(self, sequence_output, pooled_output, batch):
@@ -61,7 +104,10 @@ class KeyedGroupPooledLinear(torch.nn.Module):
         super().__init__()
         self.group_pool = GroupPool()
         self.linear = KeyedLinear(
-            is_sequence=False, in_channels=in_sequence_channels, prediction_key_to_shape=prediction_key_to_shape)
+            is_sequence=False,
+            in_sequence_channels=in_sequence_channels,
+            in_pooled_channels=in_pooled_channels,
+            prediction_key_to_shape=prediction_key_to_shape)
 
     def forward(self, sequence_output, pooled_output, batch):
         all_data_ids = [batch[(k, 'data_ids')] for k in self.prediction_key_to_shape]
@@ -78,12 +124,10 @@ class KeyedGroupPooledLinear(torch.nn.Module):
         return result
 
 
-class KeyedCombinedLinear(torch.nn.Module):
+class KeyedCombinedLinear(KeyedBase):
 
     def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
-        super(KeyedCombinedLinear, self).__init__()
-        self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
-        self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
+        super().__init__(prediction_key_to_shape)
         self.sequence_linear = nn.Linear(in_sequence_channels, sum(self.splits))
         self.pooled_linear = nn.Linear(in_pooled_channels, sum(self.splits))
 
@@ -183,12 +227,13 @@ class MultiPredictionHead(torch.nn.Module):
                 skip_dropout_keys=pooled_supplemental_skip_dropout_keys)
             in_pooled_channels = self.pooled_supplement.out_channels()
 
-        self.prediction_heads = torch.nn.ModuleList(modules=[
+        self.prediction_heads = torch.nn.ModuleDict(modules=[(
+            ph[0].key,
             ph[0].head_type(
                 in_sequence_channels=in_sequence_channels,
                 in_pooled_channels=in_pooled_channels,
                 prediction_key_to_shape=ph[1],
-                **ph[0].kwargs)
+                **ph[0].kwargs))
             for ph in prediction_head_settings])
 
     def forward(self, sequence_output, pooled_output, batch, dataset):
@@ -198,7 +243,8 @@ class MultiPredictionHead(torch.nn.Module):
             pooled_output = self.pooled_supplement(pooled_output, batch)
 
         predictions = OrderedDict()
-        for head in self.prediction_heads:
+        for name in self.prediction_heads:
+            head = self.prediction_heads[name]
             head_predictions = head(sequence_output, pooled_output, batch)
             for k in head_predictions:
                 if k in predictions:
@@ -222,6 +268,14 @@ class MultiPredictionHead(torch.nn.Module):
     def load_kwargs(model_path):
         with open(os.path.join(model_path, 'kwargs.pkl'), 'rb') as f:
             return pickle.load(f)
+
+    def update_state_dict(self, prefix, state_dict, saved_kwargs):
+        saved_prediction_head_settings = dict((s[0].key, s[1]) for s in saved_kwargs['prediction_head_settings'])
+        for name in self.prediction_heads:
+            if name in saved_prediction_head_settings:
+                self.prediction_heads[name].update_state_dict(
+                    prefix + 'prediction_heads.' + name + '.', state_dict, saved_prediction_head_settings[name])
+        return state_dict
 
 
 class BertMultiPredictionHead(BertPreTrainedModel):
@@ -257,7 +311,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         self.prediction_head.save_kwargs(output_model_path)
 
     @classmethod
-    def load(cls, model_path, map_location=None):
+    def load(cls, model_path, map_location='default_map_location'):
         config = BertConfig(os.path.join(model_path, CONFIG_NAME))
         kwargs = MultiPredictionHead.load_kwargs(model_path)
         signature = inspect.signature(cls.__init__)
@@ -267,8 +321,25 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         bound = signature.bind_partial(**kwargs)
         model = cls(config, **bound.kwargs)
 
-        model.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location))
+        if map_location == 'default_map_location':
+            map_location = 'cpu' if not torch.cuda.is_available() else None
 
+        state_dict = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location)
+
+        model.load_state_dict(state_dict)
+
+        return model
+
+    @classmethod
+    def from_fine_tuned(cls, model_path, map_location='default_map_location', *inputs, **kwargs):
+        config = BertConfig(os.path.join(model_path, CONFIG_NAME))
+        model = cls(config, *inputs, **kwargs)
+        saved_kwargs = MultiPredictionHead.load_kwargs(model_path)
+        if map_location == 'default_map_location':
+            map_location = 'cpu' if not torch.cuda.is_available() else None
+        state_dict = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location)
+        model.prediction_head.update_state_dict('prediction_head.', state_dict, saved_kwargs)
+        model.load_state_dict(state_dict, strict=False)
         return model
 
     @classmethod

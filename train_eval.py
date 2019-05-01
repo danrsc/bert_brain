@@ -247,7 +247,8 @@ def train(
         validation_data_set: PreparedDataDataset,
         test_data_set: Optional[PreparedDataDataset],
         n_gpu: int,
-        device):
+        device,
+        load_from_path: str = None):
 
     output_train_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'train_curve.npz')
     output_validation_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'validation_curve.npz')
@@ -268,8 +269,10 @@ def train(
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
-    model = BertMultiPredictionHead.from_pretrained(
-        settings.bert_model,
+    model_loader = BertMultiPredictionHead.from_fine_tuned \
+        if load_from_path is not None else BertMultiPredictionHead.from_pretrained
+    model = model_loader(
+        load_from_path if load_from_path is not None else settings.bert_model,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
         prediction_head_settings=prediction_heads,
         token_supplemental_key_to_shape=token_supplemental_key_to_shape,

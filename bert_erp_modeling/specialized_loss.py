@@ -198,9 +198,6 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
 def k_least_squared_error(
         is_eval, is_sequence, k, mask, predictions, target, accumulator, active_mask, moving_average_decay):
 
-    if is_eval:
-        print(k)
-
     if is_sequence:
         flat_shape = (target.size()[0] * target.size()[1], -1)
     else:
