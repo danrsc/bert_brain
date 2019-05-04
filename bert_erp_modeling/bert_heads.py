@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from pytorch_pretrained_bert.modeling import BertConfig, \
     BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME, PRETRAINED_MODEL_ARCHIVE_MAP, TF_WEIGHTS_NAME, \
-    cached_path, load_tf_weights_in_bert
+    cached_path, load_tf_weights_in_bert, gelu, BertLayerNorm
 
 from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id
 
@@ -52,7 +52,7 @@ class KeyedBase(torch.nn.Module):
                 if name in state_dict:
                     state = state_dict[name]
                     updated_state = tensor.clone()
-                    for idx in current_splits:
+                    for idx in range(len(current_splits)):
                         if ranges[idx] is not None:
                             end = current_splits[idx + 1] if idx + 1 < len(current_splits) else total
                             if len(state.size()) < 3:
@@ -68,15 +68,51 @@ class KeyedBase(torch.nn.Module):
         update(self, prefix)
 
 
+class _HiddenLayer(torch.nn.Module):
+
+    def __init__(self, in_channels, out_channels, activation_function=gelu):
+        super().__init__()
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.activation_function = activation_function
+        self.layer_norm = BertLayerNorm(out_channels, eps=1e-12)
+
+    def forward(self, x):
+        x = self.linear(x)
+        if self.activation_function is not None:
+            x = self.activation_function(x)
+        return self.layer_norm(x)
+
+
 class KeyedLinear(KeyedBase):
 
-    def __init__(self, is_sequence, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+    def __init__(
+            self,
+            is_sequence,
+            in_sequence_channels,
+            in_pooled_channels,
+            prediction_key_to_shape,
+            hidden_sizes=None,
+            hidden_activation=gelu):
         super().__init__(prediction_key_to_shape)
         self.is_sequence = is_sequence
-        self.linear = nn.Linear(in_sequence_channels if self.is_sequence else in_pooled_channels, sum(self.splits))
+        self.hidden = None
+        in_channels = in_sequence_channels if self.is_sequence else in_pooled_channels
+        if hidden_sizes is not None:
+            if np.isscalar(hidden_sizes):
+                hidden_sizes = [hidden_sizes]
+            hidden_modules = list()
+            for index_hidden in range(len(hidden_sizes)):
+                current_in = in_channels if index_hidden == 0 else hidden_sizes[index_hidden - 1]
+                hidden_modules.append(_HiddenLayer(current_in, hidden_sizes[index_hidden], hidden_activation))
+            self.hidden = torch.nn.Sequential(*hidden_modules)
+        if hidden_sizes is not None:
+            in_channels = hidden_sizes[-1]
+        self.linear = nn.Linear(in_channels, sum(self.splits))
 
     def forward(self, sequence_output, pooled_output, batch):
         x = sequence_output if self.is_sequence else pooled_output
+        if self.hidden is not None:
+            x = self.hidden(x)
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()

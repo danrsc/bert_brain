@@ -140,15 +140,17 @@ def _default_critics():
 
 
 @dataclass
+class LoadFrom:
+    variation_name: str
+    loss_tasks: Sequence[str]
+    map_run: Optional[Callable[[int], int]] = None
+
+
+@dataclass
 class TrainingVariation:
     loss_tasks: Sequence[str]
     # If specified, then this causes a partially fine-tuned model to be loaded instead of the base pre-trained model.
-    # When specified, this should be a function taking as arguments a name from named_variations, a tuple of loss tasks
-    # which will be one of the training variations within the named variation, and an index which indicates the run.
-    # These arguments specify the training variation and run that is about to be executed. The function should return
-    # a name, tuple of loss tasks, and run index corresponding to the training variation and run from which a model
-    # should be loaded
-    load_from: Optional[Callable[[str, Tuple[str], int], Tuple[str, Tuple[str], int]]] = None
+    load_from: Optional[LoadFrom] = None
 
 
 @dataclass

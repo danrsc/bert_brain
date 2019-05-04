@@ -509,7 +509,7 @@ class KLeastSEHalvingEpochs:
             return num_features
         epoch = max(0, epoch - self.delay_in_epochs)
         k = int(np.round(np.power(2., -epoch / self.half_life_in_epochs) * num_features))
-        return max(k, self.minimum_k)
+        return max(k, min(self.minimum_k, num_features))
 
 
 class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):

@@ -23,7 +23,7 @@ import random
 from dataclasses import replace
 from typing import Sequence, Union
 import hashlib
-from tqdm import trange
+from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
 
 import numpy as np
@@ -32,7 +32,8 @@ import torch
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
     PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize
-from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, TrainingVariation
+from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
+    TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
 from bert_erp_modeling import KeyedLinear, KeyedCombinedLinear, CriticKeys, KLeastSEHalvingEpochs
 from train_eval import train, make_datasets
@@ -44,10 +45,21 @@ replace_root_logger_handler()
 logger = logging.getLogger(__name__)
 
 
+def _internal_hash_update(hash_, loss_tasks):
+    if isinstance(loss_tasks, TrainingVariation):
+        for loss_task in sorted(loss_tasks.loss_tasks):
+            hash_.update(loss_task.encode())
+        if loss_tasks.load_from is not None:
+            hash_.update(loss_tasks.load_from.variation_name.encode())
+            _internal_hash_update(hash_, loss_tasks.load_from.loss_tasks)
+    else:
+        for loss_task in sorted(loss_tasks):
+            hash_.update(loss_task.encode())
+
+
 def task_hash(loss_tasks):
     hash_ = hashlib.sha256()
-    for loss_task in sorted(loss_tasks):
-        hash_.update(loss_task.encode())
+    _internal_hash_update(hash_, loss_tasks)
     return hash_.hexdigest()
 
 
@@ -65,6 +77,12 @@ def set_random_seeds(seed, index_run, n_gpu):
     return seed
 
 
+def progress_iterate(iterable, progress_bar):
+    for item in iterable:
+        yield item
+        progress_bar.update()
+
+
 def run_variation(
             set_name,
             loss_tasks: Union[Sequence[str], TrainingVariation],
@@ -73,7 +91,8 @@ def run_variation(
             auxiliary_loss_tasks: Sequence[str],
             force_cache_miss: bool,
             device: torch.device,
-            n_gpu: int):
+            n_gpu: int,
+            progress_bar=None):
 
     if settings.optimization_settings.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
@@ -83,25 +102,10 @@ def run_variation(
     # settings = replace(
     #   settings, train_batch_size=int(settings.train_batch_size / settings.gradient_accumulation_steps))
 
-    load_from_paths = None
-    if isinstance(loss_tasks, TrainingVariation):
-        load_from = loss_tasks.load_from
-        loss_tasks = loss_tasks.loss_tasks
-
-        load_from_paths = list()
-        for index_run in range(num_runs):
-            load_from_name, load_from_training_variation, load_from_run = load_from(set_name, loss_tasks, index_run)
-            load_from_paths.append(os.path.join(
-                Paths().model_path,
-                load_from_name,
-                task_hash(load_from_training_variation),
-                'run_{}'.format(load_from_run)))
-
     def io_setup():
         temp_paths = Paths()
         corpus_loader_ = temp_paths.make_corpus_loader(corpus_key_kwarg_dict=settings.corpus_key_kwargs)
-        to_hash = list(loss_tasks) + load_from_paths if load_from_paths is not None else loss_tasks
-        hash_ = task_hash(to_hash)
+        hash_ = task_hash(loss_tasks)
         model_path_ = os.path.join(temp_paths.model_path, set_name, hash_)
         result_path_ = os.path.join(temp_paths.result_path, set_name, hash_)
 
@@ -113,11 +117,22 @@ def run_variation(
         return corpus_loader_, result_path_, model_path_
 
     corpus_loader, result_path, model_path = io_setup()
-    loss_tasks = set(loss_tasks)
+
+    load_from = None
+    if isinstance(loss_tasks, TrainingVariation):
+        load_from = loss_tasks.load_from
+        loss_tasks = set(loss_tasks.loss_tasks)
+    else:
+        loss_tasks = set(loss_tasks)
+
     loss_tasks.update(auxiliary_loss_tasks)
     settings = replace(settings, loss_tasks=loss_tasks)
     data = corpus_loader.load(settings.corpus_keys, force_cache_miss=force_cache_miss)
-    for index_run in trange(num_runs, desc='Run'):
+
+    if progress_bar is None:
+        progress_bar = tqdm(total=num_runs, desc='Runs')
+
+    for index_run in progress_iterate(range(num_runs), progress_bar):
 
         output_dir = os.path.join(result_path, 'run_{}'.format(index_run))
 
@@ -137,9 +152,16 @@ def run_variation(
             data_preparer.prepare(data),
             data_id_in_batch_keys=settings.data_id_in_batch_keys)
 
+        load_from_path = None
+        if load_from is not None:
+            load_from_index_run = index_run if load_from.map_run is None else load_from.map_run(index_run)
+            load_from_path = os.path.join(
+                Paths().model_path,
+                load_from.variation_name,
+                task_hash(load_from.loss_tasks),
+                'run_{}'.format(load_from_index_run))
         train(settings, output_validation_path, output_test_path, output_model_path,
-              train_data, validation_data, test_data, n_gpu, device,
-              load_from_paths[index_run] if load_from_paths is not None else None)
+              train_data, validation_data, test_data, n_gpu, device, load_from_path)
 
 
 def iterate_powerset(items):
@@ -251,12 +273,22 @@ def named_variations(name):
         training_variations = [('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
-            optimization_settings=OptimizationSettings(num_train_epochs=20))
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=20,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=['I'],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            include_meg=False)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
-        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
-            fmri_subjects='I',
-            fmri_sentence_mode='ignore', fmri_window_duration=10.1, fmri_minimum_duration_required=9.6)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_high':
@@ -309,7 +341,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            meg_kind='pca_sensor_full')
+            meg_kind='ica_sensor_full')
         settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -326,16 +358,143 @@ def named_variations(name):
             critic_type=CriticKeys.k_least_se,
             critic_kwargs=dict(
                 k_fn=KLeastSEHalvingEpochs(
-                    0.5, delay_in_epochs=2, minimum_k=10, final_full_epochs_start=final_linear_start),
+                    0.5, delay_in_epochs=2, minimum_k=600, final_full_epochs_start=final_linear_start),
                 moving_average_decay=0.999))
         settings.critics['hp_fmri_I'] = CriticSettings(
             critic_type=CriticKeys.single_k_least_se,
             critic_kwargs=dict(
                 k_fn=KLeastSEHalvingEpochs(
-                    0.5, delay_in_epochs=2, minimum_k=100, final_full_epochs_start=final_linear_start),
+                    0.5, delay_in_epochs=2, minimum_k=20000, final_full_epochs_start=final_linear_start),
                 moving_average_decay=0.999))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_HIKL':
+        subjects_ = ['H', 'I', 'K', 'L']
+        joint = tuple('hp_fmri_{}'.format(s) for s in subjects_)
+        training_variations = [joint] + [('hp_fmri_{}'.format(s),) for s in subjects_]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=20,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=0))
+        # final_linear_start = \
+        #     settings.optimization_settings.num_train_epochs \
+        #     - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            include_meg=False)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        # for subject in subjects_:
+        #     settings.critics['hp_fmri_{}'.format(subject)] = CriticSettings(
+        #         critic_type=CriticKeys.single_k_least_se,
+        #         critic_kwargs=dict(
+        #             k_fn=KLeastSEHalvingEpochs(
+        #                 0.5, delay_in_epochs=2, minimum_k=5000, final_full_epochs_start=final_linear_start),
+        #             moving_average_decay=0.999))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_HIKL_bottle':
+        subjects_ = ['H', 'I', 'K', 'L']
+        joint = tuple('hp_fmri_{}'.format(s) for s in subjects_)
+        training_variations = [joint] + [('hp_fmri_{}'.format(s),) for s in subjects_]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=20,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            include_meg=False)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False, hidden_sizes=100))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_HIKL_long':
+        subjects_ = ['H', 'I', 'K', 'L']
+        joint = tuple('hp_fmri_{}'.format(s) for s in subjects_)
+        training_variations = [joint]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=80,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=0))
+        # final_linear_start = \
+        #     settings.optimization_settings.num_train_epochs \
+        #     - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            include_meg=False)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        # for subject in subjects_:
+        #     settings.critics['hp_fmri_{}'.format(subject)] = CriticSettings(
+        #         critic_type=CriticKeys.single_k_least_se,
+        #         critic_kwargs=dict(
+        #             k_fn=KLeastSEHalvingEpochs(
+        #                 0.5, delay_in_epochs=2, minimum_k=5000, final_full_epochs_start=final_linear_start),
+        #             moving_average_decay=0.999))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg':
+        training_variations = [('hp_meg',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=2,
+                num_final_epochs_train_prediction_heads_only=0))
+        final_linear_start = \
+            settings.optimization_settings.num_train_epochs \
+            - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=[],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            meg_kind='ica_sensor_full')
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict())
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5, delay_in_epochs=2, minimum_k=600, final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        settings.critics[ResponseKind.hp_meg] = CriticSettings(
+            critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':
@@ -355,12 +514,15 @@ def named_variations(name):
         settings = Settings(corpus_keys=(CorpusKeys.stanford_sentiment_treebank,))
         num_runs = 1
         min_memory = 4 * 1024 ** 3
-    elif name == 'hp_fmri_H_from_I':
+    elif name == 'hp_HKL_from_I':
+        load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
         training_variations = [
-            TrainingVariation(
-                ('hp_fmri_H',),
-                load_from=lambda set_name_, variation_, run_index: ('hp_fmri_meg', ('hp_fmri_I',), run_index)),
-            ('hp_fmri_H',)]
+            TrainingVariation(('hp_fmri_H',), load_from=load_from_I),
+            ('hp_fmri_H',),
+            TrainingVariation(('hp_fmri_K',), load_from=load_from_I),
+            ('hp_fmri_K',),
+            TrainingVariation(('hp_fmri_L',), load_from=load_from_I),
+            ('hp_fmri_L',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(num_train_epochs=3, num_epochs_train_prediction_heads_only=-1))
@@ -370,20 +532,11 @@ def named_variations(name):
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
-            fmri_subjects='H',
+            fmri_subjects=['H', 'K', 'L'],
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             include_meg=False)
-        # final_linear_start = \
-        #     settings.optimization_settings.num_train_epochs \
-        #     - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
-        # settings.critics['hp_fmri_H'] = CriticSettings(
-        #     critic_type=CriticKeys.single_k_least_se,
-        #     critic_kwargs=dict(
-        #         k_fn=KLeastSEHalvingEpochs(
-        #             0.5, delay_in_epochs=2, minimum_k=100, final_full_epochs_start=final_linear_start),
-        #         moving_average_decay=0.999))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:
@@ -439,6 +592,7 @@ def main():
     if args.no_cuda:
         settings_.no_cuda = True
 
+    progress_bar = tqdm(total=len(training_variations_) * num_runs_, desc='Runs')
     for training_variation in training_variations_:
 
         if settings_.optimization_settings.local_rank == -1 or settings_.no_cuda:
@@ -466,7 +620,7 @@ def main():
         with cuda_auto_empty_cache_context(device):
             run_variation(
                 args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
-                device, n_gpu)
+                device, n_gpu, progress_bar=progress_bar)
 
 
 if __name__ == '__main__':

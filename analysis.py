@@ -11,6 +11,7 @@ import numpy as np
 from scipy.misc import logsumexp
 
 from run_variations import task_hash, named_variations
+from bert_erp_settings import TrainingVariation
 from bert_erp_modeling import CriticMapping
 from result_output import read_predictions, read_loss_curve
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
@@ -102,7 +103,7 @@ class Aggregator:
 
 def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
                            compute_scalar=True, **loss_handler_kwargs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
+    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
     aggregated = dict()
     losses = dict()
     count_runs = 0
@@ -118,7 +119,11 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
         count_runs += 1
         output_results_by_name = read_predictions(validation_npz_path)
         for name in output_results_by_name:
-            if name not in training_variation and name not in aux_loss:
+            if isinstance(training_variation, TrainingVariation):
+                in_training_variation = name in training_variation.loss_tasks
+            else:
+                in_training_variation = name in training_variation
+            if not in_training_variation and name not in aux_loss:
                 continue
             output_results = output_results_by_name[name]
             for output_result in output_results:
@@ -219,7 +224,7 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
 
 
 def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
+    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
     result = dict()
     has_warned = False
     for index_run in range(num_runs):
@@ -679,7 +684,7 @@ def loss_curves_for_variation(paths, variation_set_name):
 
     def read_curve(kind, training_variation_, index_run_):
         file_name = 'train_curve.npz' if kind == 'train' else 'validation_curve.npz'
-        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation_)))
+        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation_))
         curve_path = os.path.join(output_dir, 'run_{}'.format(index_run_), file_name)
         result_ = list()
         if os.path.exists(curve_path):
@@ -698,31 +703,85 @@ def loss_curves_for_variation(paths, variation_set_name):
     return result
 
 
+def remove_prefix(prefix, x):
+    if x.startswith(prefix):
+        return x[len(prefix):]
+    return x
+
+
+def remove_hp_fmri_prefix(x):
+    return remove_prefix('hp_fmri_', x)
+
+
 @dataclasses.dataclass
 class ResultQuery:
-    variant_set_name: str
+    variation_set_name: str
     metric: str
     key: str
     training_variation: Optional[str] = None
     second_variation_set_name: Optional[str] = None
     second_training_variation: Optional[str] = None
 
+    def as_dict_with_combined_second(self, sep=':', key_shorten_fn=None):
+        result = dataclasses.asdict(self, dict_factory=OrderedDict)
+        if key_shorten_fn is not None:
+            result['key'] = key_shorten_fn(result['key'])
+            result['training_variation'] = tuple(key_shorten_fn(x) for x in result['training_variation'])
+            if result['second_training_variation'] is not None:
+                result['second_training_variation'] = tuple(
+                    key_shorten_fn(x) for x in result['second_training_variation'])
+        result['combined_variation_set_name'] = result['variation_set_name']
+        result['combined_training_variation'] = result['training_variation']
+        if self.second_variation_set_name is not None and self.second_variation_set_name != self.variation_set_name:
+            result['combined_variation_set_name'] = \
+                result['variation_set_name'] + sep + result['second_variation_set_name']
+        if self.second_variation_set_name is not None and self.second_training_variation != self.training_variation:
+            result['combined_training_variation'] = \
+                str(result['training_variation']) + sep + str(result['second_training_variation'])
+        return result
+
+
+def is_metric_k_vs_k(metric):
+    split_metric = metric.split('_')
+    if len(split_metric) == 3 and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+        return True
+
 
 def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
     cache = dict()
     result = list()
+
+    needs_k_vs_k = set()
     for result_query in result_queries:
+        if result_query.metric != 'k_vs_k':
+            continue
         training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
-        query_training_variation = set(result_query.training_variation) \
+        query_training_variation_hash = task_hash(result_query.training_variation) \
             if result_query.training_variation is not None else None
         for training_variation in training_variations:
-            training_variation = set(training_variation)
-            if query_training_variation is None or query_training_variation == training_variation:
-                cache_key = result_query.variation_set_name, training_variation
+            training_variation_hash = task_hash(training_variation)
+            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
+                result_key = result_query.variation_set_name, training_variation_hash
+                needs_k_vs_k.add(result_key)
+
+    for result_query in result_queries:
+        matched = False
+        training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
+        query_training_variation_hash = task_hash(result_query.training_variation) \
+            if result_query.training_variation is not None else None
+        for training_variation in training_variations:
+            training_variation_hash = task_hash(training_variation)
+            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
+                cache_key = result_query.variation_set_name, training_variation_hash
                 if cache_key not in cache:
+                    current_loss_handler_kwargs = loss_handler_kwargs
+                    if cache_key in needs_k_vs_k:
+                        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
+                            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
+                            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
                     cache[cache_key] = read_variation_results(
                         paths, result_query.variation_set_name, training_variation, aux_loss, num_runs,
-                        compute_scalar=compute_scalar, **loss_handler_kwargs)
+                        compute_scalar=compute_scalar, **current_loss_handler_kwargs)
                 aggregated, count_runs = cache[cache_key]
                 for aggregated_key in aggregated:
                     if fnmatch.fnmatch(aggregated_key, result_query.key):
@@ -730,9 +789,7 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                         if result_query.metric == 'k_vs_k':
                             values = None
                             for metric in aggregated[result_query.key]:
-                                split_metric = metric.split('_')
-                                if len(split_metric) == 3 \
-                                        and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                                if is_metric_k_vs_k(metric):
                                     values = aggregated[result_query.key].values(metric)
                                     break
                             if values is None:
@@ -741,7 +798,10 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                             values = aggregated[result_query.key].values(result_query.metric)
                         if result_query.training_variation is None:
                             result_query = dataclasses.replace(result_query, training_variation=training_variation)
-                        result.append((result_query, values))
+                        matched = True
+                        result.append((result_query, np.asarray(values)))
+        if not matched:
+            raise ValueError('No match for query: {}'.format(result_query))
     for idx_result in range(len(result)):
         if result[idx_result][0].second_variation_set_name is not None:
             result_query, first_values = result[idx_result]
@@ -749,27 +809,99 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
             if result_query.second_training_variation is None:
                 result_query = dataclasses.replace(
                     result_query, second_training_variation=result_query.training_variation)
-            query_training_variation = set(result_query.second_training_variation)
+            query_training_variation_hash = task_hash(result_query.second_training_variation)
             for training_variation in training_variations:
-                if query_training_variation == training_variation:
+                if query_training_variation_hash == task_hash(training_variation):
                     cache_key = result_query.second_variation_set_name, training_variation
                     if cache_key not in cache:
+                        current_loss_handler_kwargs = loss_handler_kwargs
+                        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
+                            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
+                            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
                         cache[cache_key] = read_variation_results(
                             paths, result_query.second_variation_set_name, training_variation, aux_loss, num_runs,
-                            compute_scalar=compute_scalar, **loss_handler_kwargs)
+                            compute_scalar=compute_scalar, **current_loss_handler_kwargs)
                     aggregated, count_runs = cache[cache_key]
                     if result_query.metric == 'k_vs_k':
                         second_values = None
                         for metric in aggregated[result_query.key]:
-                            split_metric = metric.split('_')
-                            if len(split_metric) == 3 \
-                                    and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                            if is_metric_k_vs_k(metric):
                                 second_values = aggregated[result_query.key].values(metric)
                                 break
                         if second_values is None:
                             raise ValueError('k_vs_k not found')
                     else:
                         second_values = aggregated[result_query.key].values(result_query.metric)
-                    result[idx_result] = (result_query, first_values, second_values)
+                    result[idx_result] = (result_query, first_values, np.asarray(second_values))
                     break  # break out of looping over training variations
+            if len(result[idx_result]) == 2:
+                raise ValueError('No match for query: {}'.format(result_query))
     return result
+
+
+def data_combine_subtract(x, y):
+    return x - y
+
+
+def print_min_max(
+        result_queries,
+        key_format='{combined_variation_set_name}, {combined_training_variation}, {key}, {metric}',
+        data_combine_fn=data_combine_subtract,
+        key_shorten_fn=None):
+    for result in result_queries:
+        if len(result) == 3:
+            result_query, data_1, data_2 = result
+            data = data_combine_fn(data_1, data_2)
+        else:
+            result_query, data = result
+        vmin, vmax = np.nanmin(data), np.nanmax(data)
+        print('{key}, min: {vmin}, max: {vmax}'.format(
+            key=key_format.format(
+                **result_query.as_dict_with_combined_second(key_shorten_fn=key_shorten_fn)), vmin=vmin, vmax=vmax))
+
+
+def default_filter_combine(result_query, x, y):
+    if result_query.metric == 'pove':
+        return np.logical_and(x >= 0.05, y >= 0.05)
+    elif result_query.metric == 'k_vs_k':
+        return np.logical_and(x >= 0.5, y >= 0.5)
+    else:
+        return np.full(x.shape, True)
+
+
+def min_max_default_group_key_fn(result):
+    if len(result) == 3:
+        return result[0].metric, 'combined'
+    return result[0].metric
+
+
+def min_max_per_group(
+        result_queries,
+        group_key_fn=min_max_default_group_key_fn,
+        data_combine_fn=data_combine_subtract,
+        filter_combine_fn=default_filter_combine,
+        percentile_min=None,
+        percentile_max=None):
+    vmin_vmax = dict()
+    for result in result_queries:
+        key = group_key_fn(result)
+        if len(result) == 3:
+            result_query, data_1, data_2 = result
+            data = data_combine_fn(data_1, data_2)
+            if filter_combine_fn is not None:
+                data = np.where(filter_combine_fn(result_query, data_1, data_2), data, np.nan)
+        else:
+            result_query, data = result
+        if percentile_min is not None:
+            vmin = np.nanpercentile(data, percentile_min, interpolation='higher').item()
+        else:
+            vmin = np.nanmin(data).item()
+        if percentile_max is not None:
+            vmax = np.nanpercentile(data, percentile_max, interpolation='lower').item()
+        else:
+            vmax = np.nanmax(data).item()
+        if key not in vmin_vmax:
+            vmin_vmax[key] = list(), list()
+        vmin_vmax[key][0].append(vmin)
+        vmin_vmax[key][1].append(vmax)
+    return vmin_vmax
