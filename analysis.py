@@ -217,7 +217,11 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
             text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
 
-    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, ', '.join(sorted(training_variation))))
+    if isinstance(training_variation, TrainingVariation):
+        training_variation_name = str(training_variation)
+    else:
+        training_variation_name = ', '.join(sorted(training_variation))
+    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, training_variation_name))
     write_text_grid_to_console(text_grid, width='tight')
     print('')
     print('')
@@ -527,6 +531,7 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
     soft_label_cross_entropy=aggregator_class_handler,
     single_mse=aggregator_regression_handler,
     single_k_least_se=aggregator_regression_handler,
+    single_pearson=aggregator_regression_handler,
     single_cross_entropy=aggregator_class_handler,
     single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=aggregator_class_handler), dict_factory=OrderedDict)
@@ -541,6 +546,7 @@ _no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
     soft_label_cross_entropy=class_handler,
     single_mse=regression_handler,
     single_k_least_se=regression_handler,
+    single_pearson=regression_handler,
     single_cross_entropy=class_handler,
     single_binary_cross_entropy=(class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
@@ -811,8 +817,9 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                     result_query, second_training_variation=result_query.training_variation)
             query_training_variation_hash = task_hash(result_query.second_training_variation)
             for training_variation in training_variations:
-                if query_training_variation_hash == task_hash(training_variation):
-                    cache_key = result_query.second_variation_set_name, training_variation
+                training_variation_hash = task_hash(training_variation)
+                if query_training_variation_hash == training_variation_hash:
+                    cache_key = result_query.second_variation_set_name, training_variation_hash
                     if cache_key not in cache:
                         current_loss_handler_kwargs = loss_handler_kwargs
                         if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
@@ -843,30 +850,33 @@ def data_combine_subtract(x, y):
     return x - y
 
 
+def default_filter_combine(result_query, x, y):
+    if result_query.metric == 'pove':
+        return np.logical_or(x >= 0.05, y >= 0.05)
+    elif result_query.metric == 'k_vs_k':
+        return np.logical_or(x >= 0.5, y >= 0.5)
+    else:
+        return np.full(x.shape, True)
+
+
 def print_min_max(
         result_queries,
         key_format='{combined_variation_set_name}, {combined_training_variation}, {key}, {metric}',
         data_combine_fn=data_combine_subtract,
+        filter_combine_fn=default_filter_combine,
         key_shorten_fn=None):
     for result in result_queries:
         if len(result) == 3:
             result_query, data_1, data_2 = result
             data = data_combine_fn(data_1, data_2)
+            if filter_combine_fn is not None:
+                data = np.where(filter_combine_fn(result_query, data_1, data_2), data, np.nan)
         else:
             result_query, data = result
         vmin, vmax = np.nanmin(data), np.nanmax(data)
         print('{key}, min: {vmin}, max: {vmax}'.format(
             key=key_format.format(
                 **result_query.as_dict_with_combined_second(key_shorten_fn=key_shorten_fn)), vmin=vmin, vmax=vmax))
-
-
-def default_filter_combine(result_query, x, y):
-    if result_query.metric == 'pove':
-        return np.logical_and(x >= 0.05, y >= 0.05)
-    elif result_query.metric == 'k_vs_k':
-        return np.logical_and(x >= 0.5, y >= 0.5)
-    else:
-        return np.full(x.shape, True)
 
 
 def min_max_default_group_key_fn(result):

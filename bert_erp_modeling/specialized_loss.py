@@ -24,6 +24,7 @@ __all__ = [
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
     'NamedTargetSingleMSE',
     'NamedTargetSingleKLeastSE',
+    'NamedTargetSinglePearsonDistance',
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
     'NamedTargetSingleCrossEntropy',
     'NamedTargetSingleSoftLabelCrossEntropy',
@@ -98,18 +99,21 @@ def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
 
     # min_value is an epsilon to avoid divide-by-zero, and to prevent sqrt from blowing up numerically
     min_value = torch.zeros((), dtype=var_predictions.dtype, device=var_predictions.device) + 1e-8
-    var_predictions = torch.max(var_predictions, min_value)
-    var_target = torch.max(var_target, min_value)
+    safe_var_predictions = torch.max(var_predictions, min_value)
+    safe_var_target = torch.max(var_target, min_value)
 
     # scale by the std
-    predictions = predictions / torch.sqrt(var_predictions)
-    target = target / torch.sqrt(var_target)
+    predictions = predictions / torch.sqrt(safe_var_predictions)
+    target = target / torch.sqrt(safe_var_target)
 
     # now r is straightforward to compute
     r = (predictions * target).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
 
     # convert to distance
     distance = 1 - r
+
+    # final masking to get rid of numerically unstable values
+    distance = _values_or_zeros(indicator_valid_example, distance)
 
     return distance, valid_count, var_predictions, var_target, mean_predictions, mean_target
 
@@ -449,13 +453,14 @@ class NamedTargetStopWordAwareKLeastSE(_NamedTargetStopWordAwareLoss):
 
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
 
-    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1.):
+    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1., axis=1):
         super().__init__(field, keep_content, weight)
         self.should_penalize_scale = should_penalize_scale
+        self.axis = axis
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
-            mask, predictions, target)
+            mask, predictions, target, sequence_axis=self.axis)
         loss = distance
         if self.should_penalize_scale:
             loss = loss + (var_input - var_target) ** 2
@@ -531,6 +536,22 @@ class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):
         return result
 
 
+class NamedTargetSinglePearsonDistance(_NamedTargetMaskedLoss):
+
+    def __init__(self, field, should_penalize_scale=False, weight=1., axis=0):
+        super().__init__(field, weight)
+        self.should_penalize_scale = should_penalize_scale
+        self.axis = axis
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
+            mask, predictions, target, sequence_axis=self.axis)
+        loss = distance
+        if self.should_penalize_scale:
+            loss = loss + (var_input - var_target) ** 2
+        return loss, valid_count
+
+
 class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
 
     def __init__(self, field, num_classes, weight=1.):
@@ -574,6 +595,7 @@ class CriticMapping:
         metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
     single_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMSE))
     single_k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastSE))
+    single_pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSinglePearsonDistance))
     single_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetSingleCrossEntropy))
     single_binary_cross_entropy: Any = dataclasses.field(

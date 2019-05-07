@@ -36,11 +36,12 @@ class KeyedBase(torch.nn.Module):
 
     def update_state_dict(self, prefix, state_dict, old_prediction_key_to_shape):
         old_splits = np.cumsum([int(np.prod(old_prediction_key_to_shape[k])) for k in old_prediction_key_to_shape])
-        old_splits = dict((k, (0 if i == 0 else old_splits[i] - 1, old_splits[i]))
+        old_splits = dict((k, (0 if i == 0 else old_splits[i - 1], old_splits[i]))
                           for i, k in enumerate(old_prediction_key_to_shape))
         ranges = [old_splits[k] if k in old_splits else None for k in self.prediction_key_to_shape]
         for idx, k in enumerate(self.prediction_key_to_shape):
-            if ranges[idx] is not None and int(np.prod(self.prediction_key_to_shape[k])) != ranges[idx]:
+            if ranges[idx] is not None and \
+                    int(np.prod(self.prediction_key_to_shape[k])) != ranges[idx][1] - ranges[idx][0]:
                 raise ValueError('Inconsistent number of targets for prediction key: {}'.format(k))
         current_splits = [0] + np.cumsum(self.splits).tolist()
         total = current_splits[-1]
@@ -56,7 +57,7 @@ class KeyedBase(torch.nn.Module):
                         if ranges[idx] is not None:
                             end = current_splits[idx + 1] if idx + 1 < len(current_splits) else total
                             if len(state.size()) < 3:
-                                updated_state[idx:end] = state[ranges[idx][0]:ranges[idx][1]]
+                                updated_state[current_splits[idx]:end] = state[ranges[idx][0]:ranges[idx][1]]
                             else:
                                 raise ValueError('Unexpected state size: {}'.format(len(state.size())))
                     state_dict[name] = updated_state

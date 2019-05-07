@@ -178,7 +178,7 @@ class HarryPotterCorpus(CorpusBase):
                 data[k] = KindData(ResponseKind.hp_meg, meg[k])
             metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri = self._read_fmri(example_manager, fmri_examples)
+            fmri, good_regions = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
                 data[k] = KindData(ResponseKind.hp_fmri, fmri[k])
 
@@ -338,8 +338,6 @@ class HarryPotterCorpus(CorpusBase):
             assert(np.all(example_blocks == example_blocks[0]))
             block_metadata[features.unique_id] = example_blocks[0]
 
-        assert(np.all(block_metadata) >= 0)
-
         return data, block_metadata
 
     def _read_harry_potter_fmri_files(self):
@@ -387,7 +385,11 @@ class HarryPotterCorpus(CorpusBase):
             all_subject_data[subject] = subject_data
             if subject in good_region_args:
                 good_indices, _, _ = get_indices_from_normalized_coordinates(subject, **good_region_args[subject])
-                good_regions[subject] = good_indices
+                temp_mask = np.full_like(masks[subject], False)
+                temp_mask[good_indices] = True
+                # mask the good_indices mask, so we can compute the indices within the mask
+                temp_mask = temp_mask[masks[subject]]
+                good_regions[subject] = np.where(temp_mask)[0]
 
         return all_subject_data, masks, good_regions
 
@@ -512,8 +514,8 @@ class HarryPotterCorpus(CorpusBase):
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
             masked_data['hp_fmri_{}'.format(subject)] = np.expand_dims(subject_data, axis=1)
             if subject in good_regions:
-                masked_data['hp_fmri_good_{}'.format(subject)] = np.expand_dims(
-                    subject_data[:, good_regions[subject]], axis=1)
+                good_regions['hp_fmri_{}'.format(subject)] = good_regions[subject]
+                del good_regions[subject]
         data = masked_data
 
         for example in fmri_examples:
@@ -537,7 +539,7 @@ class HarryPotterCorpus(CorpusBase):
                 allow_new_examples=False)
             assert(features is not None)
 
-        return data
+        return data, good_regions
 
 
 def read_harry_potter_story_features(path):

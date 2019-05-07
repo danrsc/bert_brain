@@ -31,7 +31,8 @@ import torch
 
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
-    PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize
+    PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
+    PreprocessSequenceStandardize
 from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
     TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
@@ -175,6 +176,8 @@ def named_variations(name):
     erp_tasks = ('epnp', 'pnp', 'elan', 'lan', 'n400', 'p600')
     ns_froi_tasks = ('ns_lh_pt', 'ns_lh_at', 'ns_lh_ifg', 'ns_lh_ifgpo', 'ns_lh_mfg', 'ns_lh_ag',
                      'ns_rh_pt', 'ns_rh_at', 'ns_rh_ifg', 'ns_rh_ifgpo', 'ns_rh_mfg', 'ns_rh_ag')
+
+    load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
 
     name = SwitchRemember(name)
     auxiliary_loss_tasks = set()
@@ -325,13 +328,19 @@ def named_variations(name):
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_meg':
-        training_variations = [('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
+        training_variations = [
+            TrainingVariation(('hp_meg',), load_from=load_from_I),
+            ('hp_meg',),
+            TrainingVariation(('hp_meg', 'hp_fmri_I'), load_from=load_from_I),
+            ('hp_meg', 'hp_fmri_I')]
+        # training_variations = [
+        #     ('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=2,
-                num_final_epochs_train_prediction_heads_only=2))
+                num_train_epochs=20,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=3))
         final_linear_start = \
             settings.optimization_settings.num_train_epochs \
             - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
@@ -341,33 +350,36 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            meg_kind='ica_sensor_full')
+            meg_kind='mean_label')
         settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
             PreprocessDetrend(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+                stop_mode='content', metadata_example_group_by='meg_blocks', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+                stop_mode='content', metadata_example_group_by='meg_blocks', train_on_all=True))
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict())
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.k_least_se,
-            critic_kwargs=dict(
-                k_fn=KLeastSEHalvingEpochs(
-                    0.5, delay_in_epochs=2, minimum_k=600, final_full_epochs_start=final_linear_start),
-                moving_average_decay=0.999))
-        settings.critics['hp_fmri_I'] = CriticSettings(
-            critic_type=CriticKeys.single_k_least_se,
-            critic_kwargs=dict(
-                k_fn=KLeastSEHalvingEpochs(
-                    0.5, delay_in_epochs=2, minimum_k=20000, final_full_epochs_start=final_linear_start),
-                moving_average_decay=0.999))
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
-        #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
+        #     critic_type=CriticKeys.k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5,
+        #             delay_in_epochs=settings.optimization_settings.num_epochs_train_prediction_heads_only,
+        #             minimum_k=100,
+        #             final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        # settings.critics['hp_fmri_I'] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5, delay_in_epochs=2, minimum_k=20000, final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        settings.critics[ResponseKind.hp_meg] = CriticSettings(
+            critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=False))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HIKL':
@@ -467,7 +479,7 @@ def named_variations(name):
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=10,
+                num_train_epochs=80,
                 num_epochs_train_prediction_heads_only=2,
                 num_final_epochs_train_prediction_heads_only=0))
         final_linear_start = \
@@ -482,19 +494,19 @@ def named_variations(name):
             meg_kind='ica_sensor_full')
         settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
             PreprocessDetrend(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict())
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
         #         k_fn=KLeastSEHalvingEpochs(
         #             0.5, delay_in_epochs=2, minimum_k=600, final_full_epochs_start=final_linear_start),
         #         moving_average_decay=0.999))
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':
@@ -515,7 +527,6 @@ def named_variations(name):
         num_runs = 1
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HKL_from_I':
-        load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
         training_variations = [
             TrainingVariation(('hp_fmri_H',), load_from=load_from_I),
             ('hp_fmri_H',),
@@ -526,6 +537,31 @@ def named_variations(name):
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(num_train_epochs=3, num_epochs_train_prediction_heads_only=-1))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=['H', 'K', 'L'],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            include_meg=False)
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_HKL_from_I_fine_tune':
+        load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
+        training_variations = [
+            TrainingVariation(('hp_fmri_H',), load_from=load_from_I),
+            ('hp_fmri_H',),
+            TrainingVariation(('hp_fmri_K',), load_from=load_from_I),
+            ('hp_fmri_K',),
+            TrainingVariation(('hp_fmri_L',), load_from=load_from_I),
+            ('hp_fmri_L',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(num_train_epochs=20, num_epochs_train_prediction_heads_only=2))
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -621,6 +657,8 @@ def main():
             run_variation(
                 args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
                 device, n_gpu, progress_bar=progress_bar)
+
+    progress_bar.close()
 
 
 if __name__ == '__main__':
