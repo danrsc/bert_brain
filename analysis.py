@@ -138,7 +138,8 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
             handler = make_prediction_handler(losses[name], loss_handler_kwargs)
             result_dict = handler(run_aggregated[name])
             if compute_scalar:
-                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+                with warnings.catch_warnings():
+                    result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
             if name not in aggregated:
                 aggregated[name] = Aggregator()
             aggregated[name].update(result_dict, is_sequence=False)
@@ -289,7 +290,7 @@ def nan_pearson(x, y, axis=0, keepdims=False):
     return result
 
 
-def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
+def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1):
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
@@ -302,11 +303,14 @@ def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20)
     if np.any(target_counts > 1):
         splits = np.cumsum(target_counts)[:-1]
 
-    return regression_handler(predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, splits, is_single_example=False)
+    return regression_handler(
+        predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, k_vs_k_feature_axes, splits, is_single_example=False)
 
 
 def regression_handler(
-        predictions, target, mask, k_vs_k_num_samples=0, k_vs_k_k=20, splits=None, is_single_example=False):
+        predictions, target, mask,
+        k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1,
+        splits=None, is_single_example=False):
 
     if is_single_example and len(target) > 1:
         seq_r = nan_pearson(predictions, target)
@@ -346,7 +350,8 @@ def regression_handler(
             raise ValueError('For k_vs_k, the mask must be the same for all features')
         k_vs_k_mask = k_vs_k_mask[:, 0]
         accuracy = k_vs_k(
-            predictions[k_vs_k_mask], target[k_vs_k_mask], k=k_vs_k_k, num_samples=k_vs_k_num_samples)
+            predictions[k_vs_k_mask], target[k_vs_k_mask], k=k_vs_k_k, num_samples=k_vs_k_num_samples,
+            feature_axes=k_vs_k_feature_axes)
         result['{0}_vs_{0}'.format(k_vs_k_k)] = np.mean(accuracy, axis=0)
 
     return result
@@ -568,7 +573,7 @@ def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True)
     return partial(factory, **loss_kwargs)
 
 
-def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
+def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None, feature_axes=-1):
     """
     Estimates how accurate a classifier would be if the classifier chose between
     1) the concatenated predictions of (e.g.) brain activity for the k examples corresponding to the true k examples
@@ -589,22 +594,38 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
             concatenated vector where word i is. Letting distractor_word_indices be the set of indices used in the
             distractor, and true_word_indices be the indices used in the true k examples, then:
             pair_examples[true_word_indices[j]] == pair_examples[distractor_word_indices[j]]
+        feature_axes: An int or tuple indicating which axes to compute accuracy for. Axes which are neither the example
+            axis (axis 0) or feature_axes will be used to make joint predictions.
 
     Returns:
-        An accuracy array of shape (num_samples, features)
+        An accuracy array of shape
+        (num_samples, predictions.shape[feature_axis_0], predictions.shape[feature_axis_1], ...)
     """
 
     if not np.array_equal(predictions.shape, target.shape):
         raise ValueError('predictions and target must have the same shape')
 
-    value_shape = predictions.shape[1:]
-    predictions = np.reshape(predictions, (predictions.shape[0], -1))
-    target = np.reshape(target, (target.shape[0], -1))
+    if np.isscalar(feature_axes):
+        feature_axes = [feature_axes]
+    feature_axes = list(sorted([f if f > 0 else len(predictions.shape) + f for f in feature_axes]))
+    transpose_axes = [i for i in range(len(predictions.shape)) if i not in feature_axes] + feature_axes
+    if np.array_equal(transpose_axes, np.arange(len(predictions.shape))):
+        transpose_axes = None
+    if transpose_axes is not None:
+        predictions = np.transpose(predictions, transpose_axes)
+        target = np.transpose(target, transpose_axes)
+
+    value_shape = predictions.shape[-len(feature_axes):]
+
+    predictions = np.reshape(
+        predictions, (predictions.shape[0], int(np.prod(predictions.shape[1:-len(feature_axes)])), -1,))
+    target = np.reshape(
+        target, (target.shape[0], int(np.prod(target.shape[1:-len(feature_axes)])), -1))
 
     # predictions, target data with the same shape: (words, ..., features)
     # k = how many words to classify at once
     # num_samples = how many words to classify
-    accuracy = np.full((num_samples, target.shape[1]), np.nan)
+    accuracy = np.full((num_samples, target.shape[-1]), np.nan)
 
     if pair_examples is not None and len(pair_examples) > 0:
         if len(pair_examples) != len(predictions):
@@ -623,10 +644,17 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
             indices_distractor = np.random.choice(len(target), k)
         sample_predictions_incorrect = predictions[indices_distractor]
 
+        sample_target = np.reshape(sample_target, (-1, sample_target.shape[-1]))
+        sample_predictions_correct = np.reshape(
+            sample_predictions_correct, (-1, sample_predictions_correct.shape[-1]))
+        sample_predictions_incorrect = np.reshape(
+            sample_predictions_incorrect, (-1, sample_predictions_incorrect.shape[-1]))
+
         distance_correct = np.sum((sample_target - sample_predictions_correct) ** 2, axis=0)
         distance_incorrect = np.sum((sample_target - sample_predictions_incorrect) ** 2, axis=0)
         accuracy[index_sample] = \
             (distance_correct < distance_incorrect) * 1.0 + (distance_correct == distance_incorrect) * 0.5
+
     return np.reshape(accuracy, (accuracy.shape[0],) + value_shape)
 
 
