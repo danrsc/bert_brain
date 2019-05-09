@@ -93,10 +93,14 @@ class KeyedLinear(KeyedBase):
             in_pooled_channels,
             prediction_key_to_shape,
             hidden_sizes=None,
-            hidden_activation=gelu):
+            hidden_activation=gelu,
+            index_layer=None):
         super().__init__(prediction_key_to_shape)
         self.is_sequence = is_sequence
         self.hidden = None
+        if not self.is_sequence and index_layer is not None:
+            raise ValueError('index_layer incompatible with pooled output')
+        self.index_layer = index_layer
         in_channels = in_sequence_channels if self.is_sequence else in_pooled_channels
         if hidden_sizes is not None:
             if np.isscalar(hidden_sizes):
@@ -111,7 +115,14 @@ class KeyedLinear(KeyedBase):
         self.linear = nn.Linear(in_channels, sum(self.splits))
 
     def forward(self, sequence_output, pooled_output, batch):
-        x = sequence_output if self.is_sequence else pooled_output
+        if self.is_sequence:
+            assert(isinstance(sequence_output, list))
+            if self.index_layer is not None:
+                x = sequence_output[self.index_layer]
+            else:
+                x = sequence_output[-1]
+        else:
+            x = pooled_output
         if self.hidden is not None:
             x = self.hidden(x)
         predictions = self.linear(x)
@@ -137,9 +148,10 @@ class KeyedLinear(KeyedBase):
 
 class KeyedGroupPooledLinear(torch.nn.Module):
 
-    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape, index_layer=-1):
         super().__init__()
         self.group_pool = GroupPool()
+        self.index_layer = index_layer
         self.linear = KeyedLinear(
             is_sequence=False,
             in_sequence_channels=in_sequence_channels,
@@ -152,7 +164,7 @@ class KeyedGroupPooledLinear(torch.nn.Module):
             if not torch.equal(all_data_ids[0], all_data_ids[idx]):
                 raise ValueError('Inconsistent data_ids cannot be used within the same instance of FMRIHead')
         data_ids = all_data_ids[0]
-        pooled, groups, example_ids = self.group_pool(sequence_output, data_ids)
+        pooled, groups, example_ids = self.group_pool(sequence_output[self.index_layer], data_ids)
         result = self.linear(None, pooled, batch)
         keys = [k for k in result]
         for k in keys:
@@ -163,14 +175,15 @@ class KeyedGroupPooledLinear(torch.nn.Module):
 
 class KeyedCombinedLinear(KeyedBase):
 
-    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape):
+    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape, index_layer=-1):
         super().__init__(prediction_key_to_shape)
         self.sequence_linear = nn.Linear(in_sequence_channels, sum(self.splits))
         self.pooled_linear = nn.Linear(in_pooled_channels, sum(self.splits))
+        self.index_layer = index_layer
 
     def forward(self, sequence_output, pooled_output, batch):
         pooled_predictions = self.pooled_linear(pooled_output)
-        predictions = self.sequence_linear(sequence_output) + torch.unsqueeze(pooled_predictions, 1)
+        predictions = self.sequence_linear(sequence_output[self.index_layer]) + torch.unsqueeze(pooled_predictions, 1)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()
         assert(len(self.prediction_key_to_shape) == len(predictions))
@@ -203,18 +216,27 @@ class BertOutputSupplement(torch.nn.Module):
     def out_channels(self):
         return self.in_channels + self.supplement_channels()
 
-    def forward(self, x, batch):
+    def forward(self, x_layers, batch):
         # we expect that dropout has already been applied to sequence_output / pooled_output
-        all_values = [x]
-        for key in self.supplement_key_to_shape:
-            values = batch[key]
-            shape_part = values.size()[:2] if self.is_sequence_supplement else values.size()[:1]
-            values = values.view(
-                shape_part + (int(np.prod(self.supplement_key_to_shape[key])),)).type(all_values[0].dtype)
-            if key not in self.skip_dropout_keys:
-                values = self.dropout(values)
-            all_values.append(values)
-        return torch.cat(all_values, dim=2 if self.is_sequence_supplement else 1)
+        if not self.is_sequence_supplement:
+            x_layers = [x_layers]
+        else:
+            assert(isinstance(x_layers, list))
+        result = list()
+        for x in x_layers:
+            all_values = [x]
+            for key in self.supplement_key_to_shape:
+                values = batch[key]
+                shape_part = values.size()[:2] if self.is_sequence_supplement else values.size()[:1]
+                values = values.view(
+                    shape_part + (int(np.prod(self.supplement_key_to_shape[key])),)).type(all_values[0].dtype)
+                if key not in self.skip_dropout_keys:
+                    values = self.dropout(values)
+                all_values.append(values)
+            result.append(torch.cat(all_values, dim=2 if self.is_sequence_supplement else 1))
+        if not self.is_sequence_supplement:
+            result = result[0]
+        return result
 
 
 class MultiPredictionHead(torch.nn.Module):
@@ -511,7 +533,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             batch['token_ids'],
             token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
             attention_mask=batch['mask'] if 'mask' in batch else None,
-            output_all_encoded_layers=False)
-        sequence_output = self.dropout(sequence_output)
+            output_all_encoded_layers=True)
+        sequence_output = [self.dropout(s) for s in sequence_output]
         pooled_output = self.dropout(pooled_output)
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)

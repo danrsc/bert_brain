@@ -20,7 +20,8 @@ class FMRIConvConvWithDilationHead(torch.nn.Module):
             hidden_kernel_size=5,
             out_kernel_size=5,
             out_dilation=5,
-            memory_efficient=False):
+            memory_efficient=False,
+            index_layer=-1):
         super().__init__()
         # the total number of tokens giving information to the output layer token is going to be:
         # out_dilation * (out_kernel_size - 1) + (hidden_kernel_size - 1)
@@ -28,6 +29,7 @@ class FMRIConvConvWithDilationHead(torch.nn.Module):
         # will be punctuation, we are hoping to get roughly 16 words, i.e. 8 seconds of time
         self.prediction_key_to_shape = OrderedDict(prediction_key_to_shape)
         self.splits = [int(np.prod(self.prediction_key_to_shape[k])) for k in self.prediction_key_to_shape]
+        self.index_layer = index_layer
         out_channels = sum(self.splits)
         self.memory_efficient = memory_efficient
         self.out_kernel_size = out_kernel_size
@@ -60,7 +62,7 @@ class FMRIConvConvWithDilationHead(torch.nn.Module):
                 raise ValueError('Inconsistent data_ids cannot be used within the same instance of FMRIHead')
         data_ids = all_data_ids[0]
 
-        hidden = self.conv1d_hidden(sequence_output)
+        hidden = self.conv1d_hidden(sequence_output[self.index_layer])
         if self.memory_efficient:
 
             # pad the sequence so we don't index out of bounds or into other examples in the batch

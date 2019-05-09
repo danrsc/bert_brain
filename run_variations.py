@@ -363,7 +363,7 @@ def named_variations(name):
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True, index_layer=6))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
