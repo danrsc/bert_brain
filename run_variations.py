@@ -177,7 +177,7 @@ def named_variations(name):
     ns_froi_tasks = ('ns_lh_pt', 'ns_lh_at', 'ns_lh_ifg', 'ns_lh_ifgpo', 'ns_lh_mfg', 'ns_lh_ag',
                      'ns_rh_pt', 'ns_rh_at', 'ns_rh_ifg', 'ns_rh_ifgpo', 'ns_rh_mfg', 'ns_rh_ag')
 
-    load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
+    load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',), map_run=lambda r: r % 4)
 
     name = SwitchRemember(name)
     auxiliary_loss_tasks = set()
@@ -286,7 +286,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            include_meg=False)
+            meg_subjects=[])
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -340,7 +340,7 @@ def named_variations(name):
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=10,
-                num_final_epochs_train_prediction_heads_only=3))
+                num_final_epochs_train_prediction_heads_only=0))
         final_linear_start = \
             settings.optimization_settings.num_train_epochs \
             - settings.optimization_settings.num_final_epochs_train_prediction_heads_only
@@ -350,12 +350,13 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            meg_kind='mean_label')
+            meg_kind='leila',
+            meg_subjects=['A', 'B', 'D'])
         settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
             PreprocessDetrend(
-                stop_mode='content', metadata_example_group_by='meg_blocks', train_on_all=True),
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='meg_blocks', train_on_all=True))
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -378,9 +379,38 @@ def named_variations(name):
         #         k_fn=KLeastSEHalvingEpochs(
         #             0.5, delay_in_epochs=2, minimum_k=20000, final_full_epochs_start=final_linear_start),
         #         moving_average_decay=0.999))
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=False))
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
         num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_erp':
+        training_variations = [
+            TrainingVariation(erp_tasks, load_from=load_from_I),
+            erp_tasks,
+            TrainingVariation(erp_tasks + ('hp_fmri_I',), load_from=load_from_I),
+            erp_tasks + ('hp_fmri_I',)]
+        # training_variations = [
+        #     ('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.ucl, CorpusKeys.harry_potter),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=12,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=False,
+            meg_kind='leila',
+            meg_subjects=[])
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HIKL':
         subjects_ = ['H', 'I', 'K', 'L']
@@ -401,7 +431,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            include_meg=False)
+            meg_subjects=[])
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -432,7 +462,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            include_meg=False)
+            meg_subjects=[])
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -459,7 +489,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
-            include_meg=False)
+            meg_subjects=[])
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
@@ -547,7 +577,7 @@ def named_variations(name):
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
-            include_meg=False)
+            meg_subjects=[])
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HKL_from_I_fine_tune':
@@ -572,7 +602,7 @@ def named_variations(name):
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
-            include_meg=False)
+            meg_subjects=[])
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:
