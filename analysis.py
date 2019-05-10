@@ -6,6 +6,7 @@ import dataclasses
 from typing import Tuple, Optional
 import inspect
 import fnmatch
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 from scipy.misc import logsumexp
@@ -102,7 +103,7 @@ class Aggregator:
 
 
 def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
-                           compute_scalar=True, **loss_handler_kwargs):
+                           compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
     output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
     aggregated = dict()
     losses = dict()
@@ -135,6 +136,14 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
                     assert (losses[name] == output_result.critic_type)
                 run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
         for name in run_aggregated:
+            loss_handler_kwargs = dict(loss_handler_kwargs)
+            if isinstance(k_vs_k_feature_axes, dict):
+                if name in k_vs_k_feature_axes:
+                    loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes[name]
+                else:
+                    loss_handler_kwargs['k_vs_k_feature_axes'] = -1
+            else:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
             handler = make_prediction_handler(losses[name], loss_handler_kwargs)
             result_dict = handler(run_aggregated[name])
             if compute_scalar:
@@ -781,14 +790,32 @@ def is_metric_k_vs_k(metric):
         return True
 
 
-def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
-    cache = dict()
-    result = list()
+def _run_query(item):
+    paths, variation_set_name, variation_hash, needs_k_vs_k, compute_scalar, loss_handler_kwargs = item
+    variations, _, num_runs, _, aux_loss = named_variations(variation_set_name)
+    variation = None
+    for v in variations:
+        if task_hash(v) == variation_hash:
+            variation = v
+            break
+    if variation is None:
+        raise RuntimeError('Bad hash: unable to find match')
+    current_loss_handler_kwargs = loss_handler_kwargs
+    if needs_k_vs_k:
+        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
+            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
+            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
+    query_key = variation_set_name, variation_hash
+    result = read_variation_results(
+        paths, variation_set_name, variation, aux_loss, num_runs, compute_scalar=compute_scalar,
+        **current_loss_handler_kwargs)
+    return query_key, result
 
+
+def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
     needs_k_vs_k = set()
+    query_set = set()
     for result_query in result_queries:
-        if result_query.metric != 'k_vs_k':
-            continue
         training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
         query_training_variation_hash = task_hash(result_query.training_variation) \
             if result_query.training_variation is not None else None
@@ -796,7 +823,29 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
             training_variation_hash = task_hash(training_variation)
             if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
                 result_key = result_query.variation_set_name, training_variation_hash
-                needs_k_vs_k.add(result_key)
+                query_set.add(result_key)
+                if result_query.metric == 'k_vs_k':
+                    needs_k_vs_k.add(result_key)
+                if result_query.second_variation_set_name is not None:
+                    second_variation = result_query.second_training_variation \
+                        if result_query.second_training_variation is not None else training_variation
+                    second_key = result_query.second_variation_set_name, task_hash(second_variation)
+                    query_set.add(second_key)
+                    if result_query.metric == 'k_vs_k':
+                        needs_k_vs_k.add(second_key)
+
+    query_items = list()
+    for query_key in query_set:
+        variation_set_name, variation_hash = query_key
+        query_items.append(
+            (paths, variation_set_name, variation_hash, query_key in needs_k_vs_k, compute_scalar, loss_handler_kwargs))
+
+    cache = dict()
+    result = list()
+    with ProcessPoolExecutor() as ex:
+        query_results = ex.map(_run_query, query_items)
+    for query_key, query_result in query_results:
+        cache[query_key] = query_result
 
     for result_query in result_queries:
         matched = False
@@ -807,15 +856,6 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
             training_variation_hash = task_hash(training_variation)
             if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
                 cache_key = result_query.variation_set_name, training_variation_hash
-                if cache_key not in cache:
-                    current_loss_handler_kwargs = loss_handler_kwargs
-                    if cache_key in needs_k_vs_k:
-                        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
-                            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
-                            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
-                    cache[cache_key] = read_variation_results(
-                        paths, result_query.variation_set_name, training_variation, aux_loss, num_runs,
-                        compute_scalar=compute_scalar, **current_loss_handler_kwargs)
                 aggregated, count_runs = cache[cache_key]
                 for aggregated_key in aggregated:
                     if fnmatch.fnmatch(aggregated_key, result_query.key):
@@ -848,14 +888,6 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                 training_variation_hash = task_hash(training_variation)
                 if query_training_variation_hash == training_variation_hash:
                     cache_key = result_query.second_variation_set_name, training_variation_hash
-                    if cache_key not in cache:
-                        current_loss_handler_kwargs = loss_handler_kwargs
-                        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
-                            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
-                            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
-                        cache[cache_key] = read_variation_results(
-                            paths, result_query.second_variation_set_name, training_variation, aux_loss, num_runs,
-                            compute_scalar=compute_scalar, **current_loss_handler_kwargs)
                     aggregated, count_runs = cache[cache_key]
                     if result_query.metric == 'k_vs_k':
                         second_values = None
