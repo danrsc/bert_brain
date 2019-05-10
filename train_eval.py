@@ -95,7 +95,7 @@ def evaluate(
                 (h.field,
                  (h.weight,
                   h(True, epoch, global_step, batch, predictions,
-                    return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
+                    return_detailed=return_detailed, apply_weight=False, as_numpy=True, reduction='none')))
                 for h in loss_handlers)
             if return_detailed:
                 loss_dict = OrderedDict()
@@ -107,24 +107,17 @@ def evaluate(
                     all_results[k].extend(detailed)
             else:
                 loss_dict = loss_result
-            loss = None
             for data_key in loss_dict:
-                weight, data_loss = loss_dict[data_key]
-                no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
-                if no_valid_inputs:
+                weight, (data_loss, data_valid_count) = loss_dict[data_key]
+                if data_valid_count == 0:
                     current = np.nan
                 else:
-                    current = data_loss
+                    current = np.sum(data_loss)
                 kind = eval_data_set.response_data_kind(data_key)
-                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
-                    if loss is None:
-                        loss = weight * current
-                    else:
-                        loss += weight * current
+                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and data_valid_count > 0:
+                    total_loss += current
+                    total_count += data_valid_count
                 eval_results.add_result(data_key, epoch, global_step, current)
-            if loss is not None:
-                total_loss += loss * len(batch['unique_id'])
-                total_count += len(batch['unique_id'])
 
     if total_count > 0:
         logger.info('eval: {}'.format(total_loss / total_count))
