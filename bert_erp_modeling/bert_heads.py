@@ -71,17 +71,19 @@ class KeyedBase(torch.nn.Module):
 
 class _HiddenLayer(torch.nn.Module):
 
-    def __init__(self, in_channels, out_channels, activation_function=gelu):
+    def __init__(self, in_channels, out_channels, activation_function=gelu, should_norm=True):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels)
         self.activation_function = activation_function
-        self.layer_norm = BertLayerNorm(out_channels, eps=1e-12)
+        self.layer_norm = BertLayerNorm(out_channels, eps=1e-12) if should_norm else None
 
     def forward(self, x):
         x = self.linear(x)
         if self.activation_function is not None:
             x = self.activation_function(x)
-        return self.layer_norm(x)
+        if self.layer_norm is not None:
+            return self.layer_norm(x)
+        return x
 
 
 class KeyedLinear(KeyedBase):
@@ -96,7 +98,13 @@ class KeyedLinear(KeyedBase):
             hidden_activation=gelu,
             index_layer=None):
         super().__init__(prediction_key_to_shape)
-        self.is_sequence = is_sequence
+        self.naked_pooled = is_sequence == 'naked_pooled'
+        if self.naked_pooled:
+            self.is_sequence = False
+        elif isinstance(is_sequence, bool):
+            self.is_sequence = is_sequence
+        else:
+            raise ValueError('Bad value for is_sequence: {}'.format(is_sequence))
         self.hidden = None
         if not self.is_sequence and index_layer is not None:
             raise ValueError('index_layer incompatible with pooled output')
@@ -115,14 +123,12 @@ class KeyedLinear(KeyedBase):
         self.linear = nn.Linear(in_channels, sum(self.splits))
 
     def forward(self, sequence_output, pooled_output, batch):
-        if self.is_sequence:
-            assert(isinstance(sequence_output, list))
-            if self.index_layer is not None:
-                x = sequence_output[self.index_layer]
-            else:
-                x = sequence_output[-1]
+        if self.naked_pooled:
+            x = sequence_output.naked_pooled(self.index_layer if self.index_layer is not None else -1)
+        elif self.is_sequence:
+            x = sequence_output[self.index_layer if self.index_layer is not None else -1]
         else:
-            x = pooled_output
+            x = pooled_output.value
         if self.hidden is not None:
             x = self.hidden(x)
         predictions = self.linear(x)
@@ -182,7 +188,7 @@ class KeyedCombinedLinear(KeyedBase):
         self.index_layer = index_layer
 
     def forward(self, sequence_output, pooled_output, batch):
-        pooled_predictions = self.pooled_linear(pooled_output)
+        pooled_predictions = self.pooled_linear(pooled_output.value)
         predictions = self.sequence_linear(sequence_output[self.index_layer]) + torch.unsqueeze(pooled_predictions, 1)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()
@@ -216,27 +222,18 @@ class BertOutputSupplement(torch.nn.Module):
     def out_channels(self):
         return self.in_channels + self.supplement_channels()
 
-    def forward(self, x_layers, batch):
+    def forward(self, x, batch):
         # we expect that dropout has already been applied to sequence_output / pooled_output
-        if not self.is_sequence_supplement:
-            x_layers = [x_layers]
-        else:
-            assert(isinstance(x_layers, list))
-        result = list()
-        for x in x_layers:
-            all_values = [x]
-            for key in self.supplement_key_to_shape:
-                values = batch[key]
-                shape_part = values.size()[:2] if self.is_sequence_supplement else values.size()[:1]
-                values = values.view(
-                    shape_part + (int(np.prod(self.supplement_key_to_shape[key])),)).type(all_values[0].dtype)
-                if key not in self.skip_dropout_keys:
-                    values = self.dropout(values)
-                all_values.append(values)
-            result.append(torch.cat(all_values, dim=2 if self.is_sequence_supplement else 1))
-        if not self.is_sequence_supplement:
-            result = result[0]
-        return result
+        all_values = [x]
+        for key in self.supplement_key_to_shape:
+            values = batch[key]
+            shape_part = values.size()[:2] if self.is_sequence_supplement else values.size()[:1]
+            values = values.view(
+                shape_part + (int(np.prod(self.supplement_key_to_shape[key])),)).type(all_values[0].dtype)
+            if key not in self.skip_dropout_keys:
+                values = self.dropout(values)
+            all_values.append(values)
+        return torch.cat(all_values, dim=2 if self.is_sequence_supplement else 1)
 
 
 class MultiPredictionHead(torch.nn.Module):
@@ -244,7 +241,7 @@ class MultiPredictionHead(torch.nn.Module):
     def __init__(
             self,
             in_channels,
-            supplemental_dropout_prob,
+            dropout_prob,
             prediction_head_settings,
             token_supplemental_key_to_shape=None,
             token_supplemental_skip_dropout_keys=None,
@@ -258,12 +255,14 @@ class MultiPredictionHead(torch.nn.Module):
 
         self._save_kwargs = dict(
             in_channels=in_channels,
-            supplemental_dropout_prob=supplemental_dropout_prob,
+            dropout_prob=dropout_prob,
             prediction_head_settings=list(prediction_head_settings),
             token_supplemental_key_to_shape=_maybe_copy(token_supplemental_key_to_shape),
             token_supplemental_skip_dropout_keys=_maybe_copy(token_supplemental_skip_dropout_keys),
             pooled_supplemental_key_to_shape=_maybe_copy(pooled_supplemental_key_to_shape),
             pooled_supplemental_skip_dropout_keys=_maybe_copy(pooled_supplemental_skip_dropout_keys))
+
+        self.dropout = torch.nn.Dropout(dropout_prob)
 
         in_sequence_channels = in_channels
         in_pooled_channels = in_channels
@@ -271,7 +270,7 @@ class MultiPredictionHead(torch.nn.Module):
         if token_supplemental_key_to_shape is not None and len(token_supplemental_key_to_shape) > 0:
             self.token_supplement = BertOutputSupplement(
                 in_channels,
-                supplemental_dropout_prob=supplemental_dropout_prob,
+                supplemental_dropout_prob=dropout_prob,
                 is_sequence_supplement=True,
                 supplement_key_to_shape=token_supplemental_key_to_shape,
                 skip_dropout_keys=token_supplemental_skip_dropout_keys)
@@ -280,7 +279,7 @@ class MultiPredictionHead(torch.nn.Module):
         if pooled_supplemental_key_to_shape is not None and len(pooled_supplemental_key_to_shape) > 0:
             self.pooled_supplement = BertOutputSupplement(
                 in_channels,
-                supplemental_dropout_prob=supplemental_dropout_prob,
+                supplemental_dropout_prob=dropout_prob,
                 is_sequence_supplement=False,
                 supplement_key_to_shape=pooled_supplemental_key_to_shape,
                 skip_dropout_keys=pooled_supplemental_skip_dropout_keys)
@@ -296,10 +295,10 @@ class MultiPredictionHead(torch.nn.Module):
             for ph in prediction_head_settings])
 
     def forward(self, sequence_output, pooled_output, batch, dataset):
-        if self.token_supplement is not None:
-            sequence_output = self.token_supplement(sequence_output, batch)
-        if self.pooled_supplement is not None:
-            pooled_output = self.pooled_supplement(pooled_output, batch)
+        sequence_output = OutputCache(
+            sequence_output, batch, self.dropout, self.token_supplement, self.pooled_supplement, True)
+        pooled_output = OutputCache(
+            pooled_output, batch, self.dropout, self.pooled_supplement, None, False)
 
         predictions = OrderedDict()
         for name in self.prediction_heads:
@@ -326,7 +325,11 @@ class MultiPredictionHead(torch.nn.Module):
     @staticmethod
     def load_kwargs(model_path):
         with open(os.path.join(model_path, 'kwargs.pkl'), 'rb') as f:
-            return pickle.load(f)
+            result = pickle.load(f)
+            if 'supplemental_dropout_prob' in result:  # backwards compatible for now
+                result['dropout_prob'] = result['supplemental_dropout_prob']
+                del result['supplemental_dropout_prob']
+            return result
 
     def update_state_dict(self, prefix, state_dict, saved_kwargs):
         saved_prediction_head_settings = dict((s[0].key, s[1]) for s in saved_kwargs['prediction_head_settings'])
@@ -350,7 +353,6 @@ class BertMultiPredictionHead(BertPreTrainedModel):
 
         super(BertMultiPredictionHead, self).__init__(config)
         self.bert = BertModel(config)
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.prediction_head = MultiPredictionHead(
             config.hidden_size,
             config.hidden_dropout_prob,
@@ -534,6 +536,70 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
             attention_mask=batch['mask'] if 'mask' in batch else None,
             output_all_encoded_layers=True)
-        sequence_output = [self.dropout(s) for s in sequence_output]
-        pooled_output = self.dropout(pooled_output)
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)
+
+
+class OutputCache:
+
+    def __init__(self, raw_output, batch, dropout_layer, supplement, naked_pooled_supplement, is_multi_layer):
+        self.raw_output = raw_output
+        self.batch = batch
+        self.dropout_layer = dropout_layer
+        self.supplement = supplement
+        self.naked_pooled_supplement = naked_pooled_supplement
+        if is_multi_layer:
+            assert(isinstance(self.raw_output, list))
+            self._cache = [None] * len(self.raw_output)
+            self._naked_pooled = [None] * len(self.raw_output)
+        else:
+            assert(not isinstance(self.raw_output, list))
+            self._cache = None
+            self._naked_pooled = None
+
+    def _get(self, index, naked_pooled=False):
+        if index is not None:
+            if self._cache[index] is not None:
+                if naked_pooled:
+                    return self._naked_pooled[index]
+                return self._cache[index]
+            x = self.raw_output[index]
+        else:
+            if self._cache is not None:
+                return self._cache
+            x = self.raw_output
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x)
+        if self.naked_pooled_supplement is not None:
+            y = self.naked_pooled_supplement(x, self.batch)
+        else:
+            y = x
+        if self.supplement is not None:
+            x = self.supplement(x, self.batch)
+        if index is not None:
+            self._cache[index] = x
+            self._naked_pooled[index] = y[:, 0]
+        else:
+            self._cache = x
+        if naked_pooled:
+            return self._naked_pooled[index]
+        return x
+
+    @property
+    def value(self):
+        if isinstance(self._cache, list):
+            raise ValueError('Cannot call value on multi-layer OutputCache, use __getitem__ instead')
+        return self._get(None)
+
+    def naked_pooled(self, item):
+        if not isinstance(self._cache, list):
+            raise ValueError('Cannot call naked_pooled on a non-multi-layer OutputCache')
+        if item is None:
+            raise ValueError('None is not a valid index')
+        return self._get(item, naked_pooled=True)
+
+    def __getitem__(self, item):
+        if not isinstance(self._cache, list):
+            raise ValueError('Cannot call __getitem__ on a non-multi-layer OutputCache, use value instead')
+        if item is None:
+            raise ValueError('None is not a valid index')
+        return self._get(item)
