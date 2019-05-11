@@ -161,7 +161,7 @@ def _load_from_cache(cache_path, kwargs, force_cache_miss):
     if not os.path.exists(cache_path):
         return None
 
-    loaded = np.load(cache_path)
+    loaded = np.load(cache_path, allow_pickle=True)
 
     special_keys = [
         '__num_input_examples__',
