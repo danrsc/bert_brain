@@ -102,56 +102,83 @@ class Aggregator:
         return self._counts[name]
 
 
+def _read_variation_parallel_helper(item):
+    (result_path, variation_set_name, variation_hash, index_run, aux_loss,
+     compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) = item
+    training_variations, _, _, _, _ = named_variations(variation_set_name)
+    training_variation = None
+    for v in training_variations:
+        if task_hash(v) == variation_hash:
+            training_variation = v
+            break
+    if training_variation is None:
+        raise RuntimeError('Bad variation hash')
+    output_dir = os.path.join(result_path, variation_set_name, variation_hash)
+    validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+    if not os.path.exists(validation_npz_path):
+        return index_run, None
+    output_results_by_name = read_predictions(validation_npz_path)
+    run_aggregated = dict()
+    losses = dict()
+    for name in output_results_by_name:
+        if isinstance(training_variation, TrainingVariation):
+            in_training_variation = name in training_variation.loss_tasks
+        else:
+            in_training_variation = name in training_variation
+        if not in_training_variation and name not in aux_loss:
+            continue
+        output_results = output_results_by_name[name]
+        for output_result in output_results:
+            if name not in run_aggregated:
+                run_aggregated[name] = Aggregator()
+            if name not in losses:
+                losses[name] = output_result.critic_type
+            else:
+                assert (losses[name] == output_result.critic_type)
+            run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
+    run_results = dict()
+    for name in run_aggregated:
+        loss_handler_kwargs = dict(loss_handler_kwargs)
+        if isinstance(k_vs_k_feature_axes, dict):
+            if name in k_vs_k_feature_axes:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes[name]
+            else:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = -1
+        else:
+            loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
+        handler = make_prediction_handler(losses[name], loss_handler_kwargs)
+        result_dict = handler(run_aggregated[name])
+        if compute_scalar:
+            with warnings.catch_warnings():
+                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+        run_results[name] = result_dict
+    return index_run, run_results
+
+
 def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
                            compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
-    aggregated = dict()
-    losses = dict()
-    count_runs = 0
+
+    task_arguments = [(paths.result_path, variation_set_name, task_hash(training_variation), i,
+                       aux_loss, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(num_runs)]
+
+    with ProcessPoolExecutor() as ex:
+        mapped = ex.map(_read_variation_parallel_helper, task_arguments)
+
     has_warned = False
-    for index_run in range(num_runs):
-        run_aggregated = dict()
-        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
-        if not os.path.exists(validation_npz_path):
+    count_runs = 0
+    aggregated = dict()
+    for index_run, run_results in mapped:
+        if run_results is None:
             if not has_warned:
                 print('Warning: results incomplete. Some output files not found')
             has_warned = True
             continue
+
         count_runs += 1
-        output_results_by_name = read_predictions(validation_npz_path)
-        for name in output_results_by_name:
-            if isinstance(training_variation, TrainingVariation):
-                in_training_variation = name in training_variation.loss_tasks
-            else:
-                in_training_variation = name in training_variation
-            if not in_training_variation and name not in aux_loss:
-                continue
-            output_results = output_results_by_name[name]
-            for output_result in output_results:
-                if name not in run_aggregated:
-                    run_aggregated[name] = Aggregator()
-                if name not in losses:
-                    losses[name] = output_result.critic_type
-                else:
-                    assert (losses[name] == output_result.critic_type)
-                run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
-        for name in run_aggregated:
-            loss_handler_kwargs = dict(loss_handler_kwargs)
-            if isinstance(k_vs_k_feature_axes, dict):
-                if name in k_vs_k_feature_axes:
-                    loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes[name]
-                else:
-                    loss_handler_kwargs['k_vs_k_feature_axes'] = -1
-            else:
-                loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
-            handler = make_prediction_handler(losses[name], loss_handler_kwargs)
-            result_dict = handler(run_aggregated[name])
-            if compute_scalar:
-                with warnings.catch_warnings():
-                    result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+        for name in run_results:
             if name not in aggregated:
                 aggregated[name] = Aggregator()
-            aggregated[name].update(result_dict, is_sequence=False)
+            aggregated[name].update(run_results[name], is_sequence=False)
 
     return aggregated, count_runs
 
