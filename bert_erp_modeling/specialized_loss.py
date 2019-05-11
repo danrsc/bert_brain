@@ -306,7 +306,8 @@ class _NamedTargetMaskedLoss:
             loss = result
         if isinstance(loss, str):
             assert(loss == 'no_valid_inputs')
-        loss = self.weight * loss
+        else:
+            loss = self.weight * loss
         if is_tuple:
             return (loss,) + result[1:]
         return loss
@@ -385,7 +386,7 @@ class _NamedTargetMaskedLoss:
                 unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
-                        mask=np.squeeze(example_mask, axis=0) == 1,  # convert to bool
+                        mask=np.abs(np.squeeze(example_mask, axis=0) - 1) < 1e-5,  # convert to bool
                         prediction=np.squeeze(example_predictions, axis=0),
                         target=np.squeeze(example_targets, axis=0),
                         sequence_type=sequence_type,
