@@ -299,13 +299,14 @@ def named_variations(name):
             TrainingVariation(('hp_meg',), load_from=load_from_I),
             ('hp_meg',),
             TrainingVariation(('hp_meg', 'hp_fmri_I'), load_from=load_from_I),
-            ('hp_meg', 'hp_fmri_I')]
+            ('hp_meg', 'hp_fmri_I'),
+            ('hp_fmri_I',)]
         # training_variations = [
         #     ('hp_fmri_I', 'hp_meg'), ('hp_meg',), ('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=20,
+                num_train_epochs=30,
                 num_epochs_train_prediction_heads_only=10,
                 num_final_epochs_train_prediction_heads_only=0))
         final_linear_start = \
@@ -316,9 +317,9 @@ def named_variations(name):
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
-            group_meg_sentences_like_fmri=False,
+            group_meg_sentences_like_fmri=True,
             meg_kind='leila',
-            meg_subjects=['A', 'B', 'D'])
+            meg_subjects=None)  # None means everyone
         settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -453,7 +454,7 @@ def named_variations(name):
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=30,
+                num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=10,
                 num_final_epochs_train_prediction_heads_only=0))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -461,9 +462,9 @@ def named_variations(name):
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
-            group_meg_sentences_like_fmri=False,
+            group_meg_sentences_like_fmri=True,
             meg_kind='leila',
-            meg_subjects=['B'])
+            meg_subjects=['A', 'B', 'D'])
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
