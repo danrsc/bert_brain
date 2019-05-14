@@ -218,7 +218,7 @@ class HarryPotterCorpus(CorpusBase):
 
         meg_path = os.path.join(self.path, file_names[self.meg_kind])
 
-        loaded = np.load(meg_path)
+        loaded = np.load(meg_path, allow_pickle=True)
 
         stimuli = loaded['stimuli']
 
@@ -413,9 +413,9 @@ class HarryPotterCorpus(CorpusBase):
     def _harry_potter_fmri_word_info(self, run_lengths):
 
         time_images = np.arange(1351) * 2
-        words = np.load(os.path.join(self.path, 'words_fmri.npy'))
+        words = np.load(os.path.join(self.path, 'words_fmri.npy'), allow_pickle=True)
         words = [w.item() for w in words]
-        time_words = np.load(os.path.join(self.path, 'time_words_fmri.npy'))
+        time_words = np.load(os.path.join(self.path, 'time_words_fmri.npy'), allow_pickle=True)
         assert (len(words) == len(time_words))
 
         # searchsorted returns first location such that time_words[i] < time_images[word_images[i]]

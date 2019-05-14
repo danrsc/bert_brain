@@ -26,7 +26,8 @@ class Paths:
     default_relative_ontonotes_path = os.path.join('conll-formatted-ontonotes-5.0', 'data')
     default_relative_natural_stories_path = 'natural_stories'
     default_relative_linzen_agreement_path = 'linzen_agreement'
-    default_relative_stanford_sentiment_treebank_path = os.path.join('GLUE', 'glue_data', 'SST-2')
+    default_relative_glue_path = os.path.join('GLUE', 'glue_data')
+    default_relative_stanford_sentiment_treebank_path = os.path.join(default_relative_glue_path, 'SST-2')
 
     pre_trained_base_path: str = '/share/volume0/drschwar/BERT'
     result_path: str = '/share/volume0/drschwar/bert_erp/results/'
@@ -49,6 +50,7 @@ class Paths:
     natural_stories_path: Optional[str] = None
     linzen_agreement_path: Optional[str] = None
     stanford_sentiment_treebank_path: Optional[str] = None
+    glue_path: Optional[str] = None
 
     def __post_init__(self):
         if self.pre_trained_path is None:
@@ -90,6 +92,8 @@ class Paths:
         if self.stanford_sentiment_treebank_path is None:
             self.stanford_sentiment_treebank_path = os.path.join(
                 self.data_set_base_path, Paths.default_relative_stanford_sentiment_treebank_path)
+        if self.glue_path is None:
+            self.glue_path = os.path.join(self.data_set_base_path, Paths.default_relative_glue_path)
 
     def make_corpus_loader(
             self, bert_pre_trained_model_name='bert-base-uncased', corpus_key_kwarg_dict=None):

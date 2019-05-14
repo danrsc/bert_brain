@@ -142,7 +142,7 @@ def _default_critics():
 @dataclass
 class LoadFrom:
     variation_name: str
-    loss_tasks: Sequence[str]
+    loss_tasks: Union[Sequence[str], 'TrainingVariation']
     map_run: Optional[Callable[[int], int]] = None
 
 

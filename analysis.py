@@ -6,7 +6,7 @@ import dataclasses
 from typing import Tuple, Optional
 import inspect
 import fnmatch
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 from scipy.misc import logsumexp
@@ -161,8 +161,9 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
     task_arguments = [(paths.result_path, variation_set_name, task_hash(training_variation), i,
                        aux_loss, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(num_runs)]
 
-    with ProcessPoolExecutor() as ex:
+    with ThreadPoolExecutor() as ex:
         mapped = ex.map(_read_variation_parallel_helper, task_arguments)
+    # mapped = map(_read_variation_parallel_helper, task_arguments)
 
     has_warned = False
     count_runs = 0
@@ -275,7 +276,7 @@ def sentence_predictions(paths, variation_set_name, training_variation, aux_loss
                 print('warning: results are incomplete. Some runs not found')
             has_warned = True
             continue
-        output_results = np.load(validation_npz_path)
+        output_results = np.load(validation_npz_path, allow_pickle=True)
         for output_result in output_results:
             name = output_result.name
             if name not in training_variation and name not in aux_loss:

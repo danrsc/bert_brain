@@ -284,7 +284,7 @@ def write_occlusion_predictions(output_path, all_results):
 
 
 def read_occlusion_predictions(output_path):
-    npz = np.load(output_path)
+    npz = np.load(output_path, allow_pickle=True)
 
     keys = [k.item() for k in npz['keys']]
 

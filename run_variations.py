@@ -448,13 +448,188 @@ def named_variations(name):
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg':
-        fmri_subjects_ = ['I']
-        fmri_losses_ = tuple('hp_fmri_{}'.format(s) for s in fmri_subjects_)
-        training_variations = [('hp_meg',) + fmri_losses_, ('hp_meg',), fmri_losses_]
+        training_variations = [('hp_meg',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=20,
+                num_train_epochs=30,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=[],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=None)  # None means everyone
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_combined':
+        training_variations = [
+            TrainingVariation(('hp_meg',), load_from=load_from_I),
+            ('hp_meg',),
+            TrainingVariation(('hp_meg', 'hp_fmri_I'), load_from=load_from_I),
+            ('hp_meg', 'hp_fmri_I'),
+            ('hp_fmri_I',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=30,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects='I',
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=None)  # None means everyone
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict(naked_pooled=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_linear':
+        training_variations = [('hp_meg',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=-1,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=[],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=None)  # None means everyone
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_erp':
+        training_variations = [
+            TrainingVariation(
+                erp_tasks, load_from=LoadFrom('hp_fmri_meg', loss_tasks=('hp_meg',), map_run=lambda i: i % 4)),
+            erp_tasks]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.ucl,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=22,
+                num_epochs_train_prediction_heads_only=20,
+                num_final_epochs_train_prediction_heads_only=0))
+        num_runs = 100
+        min_memory = 4 * 1024 ** 3
+    elif name == 'erp_hp_meg':
+        training_variations = [
+            TrainingVariation(
+                ('hp_meg',), load_from=LoadFrom('hp_meg_erp', loss_tasks=erp_tasks)),
+            TrainingVariation(
+                ('hp_meg',), load_from=LoadFrom(
+                    'hp_meg_erp',
+                    TrainingVariation(erp_tasks, load_from=LoadFrom('hp_fmri_meg', loss_tasks=('hp_meg',))))),
+            ('hp_meg',)]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=30,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=[],
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=None)  # None means everyone
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        num_runs = 12
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_fmri_linear':
+        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(TrainingVariation(
+                ('hp_fmri_{}'.format(subject),), load_from=LoadFrom(
+                    'erp_hp_meg',
+                    TrainingVariation(
+                        ('hp_meg',), load_from=LoadFrom(
+                            'hp_meg_erp',
+                            TrainingVariation(erp_tasks, load_from=LoadFrom(
+                                'hp_fmri_meg',
+                                loss_tasks=('hp_meg',))))))))
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=15,
+                num_epochs_train_prediction_heads_only=-1,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=[])  # None means everyone
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_fmri':
+        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(TrainingVariation(
+                ('hp_fmri_{}'.format(subject),), load_from=LoadFrom(
+                    'erp_hp_meg',
+                    TrainingVariation(
+                        ('hp_meg',), load_from=LoadFrom(
+                            'hp_meg_erp',
+                            TrainingVariation(erp_tasks, load_from=LoadFrom(
+                                'hp_fmri_meg',
+                                loss_tasks=('hp_meg',))))))))
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=30,
                 num_epochs_train_prediction_heads_only=10,
                 num_final_epochs_train_prediction_heads_only=0))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -464,17 +639,70 @@ def named_variations(name):
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
-            meg_subjects=['A', 'B', 'D'])
+            meg_subjects=[])  # None means everyone
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
-            PreprocessDetrend(
-                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(
-                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_meg_simple_fmri':
+        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(TrainingVariation(
+                ('hp_fmri_{}'.format(subject),), load_from=LoadFrom(
+                    'hp_fmri_meg',
+                    loss_tasks=('hp_meg',))))
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=30,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=[])  # None means everyone
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'erp_hp_fmri':
+        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(TrainingVariation(
+                ('hp_fmri_{}'.format(subject),), load_from=LoadFrom(
+                    'hp_meg_erp',
+                    loss_tasks=erp_tasks)))
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=30,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=[])  # None means everyone
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4

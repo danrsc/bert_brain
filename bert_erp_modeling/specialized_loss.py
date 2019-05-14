@@ -382,8 +382,10 @@ class _NamedTargetMaskedLoss:
                 if example_indices is not None:
                     idx = example_indices[idx]
 
-                data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
-                unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
+                data_set_id = batch['data_set_id'].detach().cpu().numpy()[idx] \
+                    if 'data_set_id' in batch else None
+                unique_id = batch['unique_id'].detach().cpu().numpy()[idx] \
+                    if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
                         mask=np.abs(np.squeeze(example_mask, axis=0) - 1) < 1e-5,  # convert to bool

@@ -181,14 +181,21 @@ class KeyedGroupPooledLinear(torch.nn.Module):
 
 class KeyedCombinedLinear(KeyedBase):
 
-    def __init__(self, in_sequence_channels, in_pooled_channels, prediction_key_to_shape, index_layer=-1):
+    def __init__(
+            self,
+            in_sequence_channels, in_pooled_channels, prediction_key_to_shape, index_layer=-1, naked_pooled=False):
         super().__init__(prediction_key_to_shape)
         self.sequence_linear = nn.Linear(in_sequence_channels, sum(self.splits))
         self.pooled_linear = nn.Linear(in_pooled_channels, sum(self.splits))
         self.index_layer = index_layer
+        self.naked_pooled = naked_pooled
 
     def forward(self, sequence_output, pooled_output, batch):
-        pooled_predictions = self.pooled_linear(pooled_output.value)
+        if self.naked_pooled:
+            pooled = sequence_output.naked_pooled(self.index_layer if self.index_layer is not None else -1)
+        else:
+            pooled = pooled_output.value
+        pooled_predictions = self.pooled_linear(pooled)
         predictions = self.sequence_linear(sequence_output[self.index_layer]) + torch.unsqueeze(pooled_predictions, 1)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()
