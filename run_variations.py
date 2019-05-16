@@ -351,6 +351,58 @@ def named_variations(name):
         #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_meg_joint':
+        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        fmri_tasks_ = tuple('hp_fmri_{}'.format(s) for s in fmri_subjects_)
+        training_variations = [
+            fmri_tasks_ + ('hp_meg',),
+            ('hp_meg',),
+            fmri_tasks_]
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=40,
+                num_epochs_train_prediction_heads_only=10,
+                num_final_epochs_train_prediction_heads_only=0))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=None)  # None means everyone
+        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+            PreprocessDetrend(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5,
+        #             delay_in_epochs=settings.optimization_settings.num_epochs_train_prediction_heads_only,
+        #             minimum_k=100,
+        #             final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        # settings.critics['hp_fmri_I'] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_se,
+        #     critic_kwargs=dict(
+        #         k_fn=KLeastSEHalvingEpochs(
+        #             0.5, delay_in_epochs=2, minimum_k=20000, final_full_epochs_start=final_linear_start),
+        #         moving_average_decay=0.999))
+        # settings.critics[ResponseKind.hp_meg] = CriticSettings(
+        #     critic_type=CriticKeys.pearson, critic_kwargs=dict(should_penalize_scale=True))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_erp':
         training_variations = [
             TrainingVariation(erp_tasks, load_from=load_from_I),

@@ -19,6 +19,7 @@ import argparse
 import csv
 import logging
 import os
+import gc
 
 import numpy as np
 import torch
@@ -39,12 +40,11 @@ from bert_erp_common import cuda_most_free_device
 from tqdm_logging import replace_root_logger_handler
 from run_variations import named_variations, task_hash, set_random_seeds
 from bert_erp_paths import Paths
-from bert_erp_settings import Settings
+from bert_erp_settings import Settings, TrainingVariation
 
 
 replace_root_logger_handler()
 logger = logging.getLogger(__name__)
-logger.setLevel('INFO')
 
 
 class InputExample(object):
@@ -625,9 +625,9 @@ def _run_glue_for_variation(
         eval_features,
         processor,
         output_mode,
-        tokenizer,
         settings: Settings,
         index_run: int,
+        index_sub_run: int,
         device,
         n_gpu):
 
@@ -771,26 +771,30 @@ def _run_glue_for_variation(
                     optimizer.zero_grad()
                     global_step += 1
 
+    task_model_path = os.path.join(run_model_path, task_name, '{:.0e}_{}'.format(
+        settings.optimization_settings.learning_rate, index_sub_run))
+
     if train_features is not None \
             and (settings.optimization_settings.local_rank == -1 or torch.distributed.get_rank() == 0):
         # Save a trained model, configuration and tokenizer
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
 
-        task_model_path = os.path.join(run_model_path, task_name)
+        if not os.path.exists(task_model_path):
+            os.makedirs(task_model_path)
 
         # If we save using the predefined names, we can load using `from_pretrained`
         output_model_file = os.path.join(task_model_path, WEIGHTS_NAME)
         output_config_file = os.path.join(task_model_path, CONFIG_NAME)
 
         torch.save(model_to_save.state_dict(), output_model_file)
-        model_to_save.config.to_json_file(output_config_file)
-        tokenizer.save_vocabulary(task_model_path)
+        with open(output_config_file, 'w') as f:
+            f.write(model_to_save.config.to_json_string())
 
         # Load a trained model and vocabulary that you have fine-tuned
         model = BertForSequenceClassification.from_pretrained(task_model_path, num_labels=len(processor.get_labels()))
     else:
         model = BertForSequenceClassification.from_pretrained(
-            os.path.join(run_model_path, task_name), num_labels=len(processor.get_labels()))
+            task_model_path, num_labels=len(processor.get_labels()))
     model.to(device)
 
     if eval_features is not None \
@@ -861,7 +865,8 @@ def _run_glue_for_variation(
         if not os.path.exists(run_result_path):
             os.makedirs(run_result_path)
 
-        output_eval_file = os.path.join(run_result_path, "{}_results.txt".format(task_name))
+        output_eval_file = os.path.join(run_result_path, "{}_{:.0e}_{}_results.txt".format(
+            task_name, settings.optimization_settings.learning_rate, index_sub_run))
         with open(output_eval_file, "w") as writer:
             logger.info("***** Eval results *****")
             for key in sorted(result.keys()):
@@ -872,8 +877,8 @@ def _run_glue_for_variation(
         if task_name == "mnli":
             task_name = "mnli-mm"
 
-            if not os.path.exists(run_result_path + '-MM'):
-                os.makedirs(run_result_path + '-MM')
+            if not os.path.exists(os.path.join(run_result_path, task_name)):
+                os.makedirs(os.path.join(run_result_path, task_name))
 
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_features))
@@ -904,7 +909,7 @@ def _run_glue_for_variation(
                     logits = model(input_ids, segment_ids, input_mask, labels=None)
 
                 loss_fct = CrossEntropyLoss()
-                tmp_eval_loss = loss_fct(logits.view(-1, processor.get_labels()), label_ids.view(-1))
+                tmp_eval_loss = loss_fct(logits.view(-1, len(processor.get_labels())), label_ids.view(-1))
 
                 eval_loss += tmp_eval_loss.mean().item()
                 nb_eval_steps += 1
@@ -924,7 +929,8 @@ def _run_glue_for_variation(
             result['global_step'] = global_step
             result['loss'] = loss
 
-            output_eval_file = os.path.join(run_result_path + '-MM', "eval_results.txt")
+            output_eval_file = os.path.join(run_result_path, task_name, "{:.0e}_{}_eval_results.txt".format(
+                settings.optimization_settings.learning_rate, index_sub_run))
             with open(output_eval_file, "w") as writer:
                 logger.info("***** Eval results *****")
                 for key in sorted(result.keys()):
@@ -940,7 +946,8 @@ def main():
                         type=str,
                         required=True,
                         help="The name of the task to train.")
-    parser.add_argument('--name', action='store', required=False, default='erp', help='Which set to run')
+    # hard coded for now
+    # parser.add_argument('--name', action='store', required=False, default='erp', help='Which set to run')
     parser.add_argument('--log_level', action='store', required=False, default='WARNING',
                         help='Sets the log-level. Defaults to WARNING')
 
@@ -960,6 +967,7 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
+    parser.add_argument('--num_runs_per_input_run', default=1, type=int)
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
     args = parser.parse_args()
@@ -998,10 +1006,26 @@ def main():
         "wnli": "classification",
     }
 
-    training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(args.name)
+    setattr(args, 'name', 'hp_meg_simple_fmri')
 
-    if settings.optimization_settings.local_rank == -1 or settings.optimization_settings.no_cuda:
-        if not torch.cuda.is_available or settings.optimization_settings.no_cuda:
+    training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(args.name)
+    settings.optimization_settings.num_epochs_train_prediction_heads_only = 0
+    settings.optimization_settings.num_final_epochs_train_prediction_heads_only = 0
+    settings.optimization_settings.num_train_epochs = args.num_train_epochs
+
+    chosen_variation = None
+    for training_variation in training_variations:
+        if isinstance(training_variation, TrainingVariation) and training_variation.loss_tasks == ('hp_fmri_I',):
+            if chosen_variation is not None:
+                raise ValueError('2 matches to hard coded training variation')
+            chosen_variation = training_variation
+    if chosen_variation is None:
+        raise ValueError('Unable to find variation which matches chosen variation')
+    training_variations = [chosen_variation]
+    num_runs = 4
+
+    if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
+        if not torch.cuda.is_available or settings.no_cuda:
             device = torch.device('cpu')
         else:
             device_id, free = cuda_most_free_device()
@@ -1057,21 +1081,27 @@ def main():
     paths = Paths()
     if args.do_train:
         train_features = convert_examples_to_features(
-            processor.get_train_examples(paths.glue_path),
+            processor.get_train_examples(os.path.join(paths.glue_path, task_name.upper())),
             processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
     eval_features = None
     if args.do_eval:
         eval_features = convert_examples_to_features(
-            processor.get_dev_examples(paths.glue_path),
+            processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
             processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
     for training_variation in training_variations:
         result_path, model_path = io_setup(training_variation)
         for index_run in range(num_runs):
-            _run_glue_for_variation(
-                model_path, result_path, task_name, train_features, eval_features, processor, output_mode, tokenizer,
-                settings, index_run, device, n_gpu)
+            for learning_rate in [2e-5, 3e-5, 4e-5, 5e-5]:
+                for index_sub_run in range(args.num_runs_per_input_run):
+                    settings.optimization_settings.learning_rate = learning_rate
+                    set_random_seeds(settings.seed, index_run * args.num_runs_per_input_run + index_sub_run, n_gpu)
+                    _run_glue_for_variation(
+                        model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
+                        settings, index_run, index_sub_run, device, n_gpu)
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
