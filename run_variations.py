@@ -355,13 +355,13 @@ def named_variations(name):
         fmri_subjects_ = ['H', 'I', 'K', 'L']
         fmri_tasks_ = tuple('hp_fmri_{}'.format(s) for s in fmri_subjects_)
         training_variations = [
-            fmri_tasks_ + ('hp_meg',),
-            ('hp_meg',),
-            fmri_tasks_]
+            fmri_tasks_ + ('hp_meg',),]
+            # ('hp_meg',),
+            # fmri_tasks_]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=40,
+                num_train_epochs=60,
                 num_epochs_train_prediction_heads_only=10,
                 num_final_epochs_train_prediction_heads_only=0))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(

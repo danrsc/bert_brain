@@ -629,7 +629,8 @@ def _run_glue_for_variation(
         index_run: int,
         index_sub_run: int,
         device,
-        n_gpu):
+        n_gpu,
+        mnli_mm_eval_features=None):
 
     run_model_path = os.path.join(model_path, 'run_{}'.format(index_run))
     run_result_path = os.path.join(result_path, 'run_{}'.format(index_run))
@@ -877,16 +878,13 @@ def _run_glue_for_variation(
         if task_name == "mnli":
             task_name = "mnli-mm"
 
-            if not os.path.exists(os.path.join(run_result_path, task_name)):
-                os.makedirs(os.path.join(run_result_path, task_name))
-
             logger.info("***** Running evaluation *****")
-            logger.info("  Num examples = %d", len(eval_features))
+            logger.info("  Num examples = %d", len(mnli_mm_eval_features))
             logger.info("  Batch size = %d", settings.optimization_settings.predict_batch_size)
-            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            all_input_ids = torch.tensor([f.input_ids for f in mnli_mm_eval_features], dtype=torch.long)
+            all_input_mask = torch.tensor([f.input_mask for f in mnli_mm_eval_features], dtype=torch.long)
+            all_segment_ids = torch.tensor([f.segment_ids for f in mnli_mm_eval_features], dtype=torch.long)
+            all_label_ids = torch.tensor([f.label_id for f in mnli_mm_eval_features], dtype=torch.long)
 
             eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
             # Run prediction for full data
@@ -929,8 +927,8 @@ def _run_glue_for_variation(
             result['global_step'] = global_step
             result['loss'] = loss
 
-            output_eval_file = os.path.join(run_result_path, task_name, "{:.0e}_{}_eval_results.txt".format(
-                settings.optimization_settings.learning_rate, index_sub_run))
+            output_eval_file = os.path.join(run_result_path, "{}_{:.0e}_{}_results.txt".format(
+                task_name, settings.optimization_settings.learning_rate, index_sub_run))
             with open(output_eval_file, "w") as writer:
                 logger.info("***** Eval results *****")
                 for key in sorted(result.keys()):
@@ -1085,10 +1083,16 @@ def main():
             processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
     eval_features = None
+    mnli_mm_eval_features = None
     if args.do_eval:
         eval_features = convert_examples_to_features(
             processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
             processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
+        if task_name == 'mnli':
+            mnli_mm_processor = processors['mnli-mm']()
+            mnli_mm_eval_features = convert_examples_to_features(
+                mnli_mm_processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
+                processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
     for training_variation in training_variations:
         result_path, model_path = io_setup(training_variation)
@@ -1099,7 +1103,7 @@ def main():
                     set_random_seeds(settings.seed, index_run * args.num_runs_per_input_run + index_sub_run, n_gpu)
                     _run_glue_for_variation(
                         model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
-                        settings, index_run, index_sub_run, device, n_gpu)
+                        settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
                     gc.collect()
                     torch.cuda.empty_cache()
 
