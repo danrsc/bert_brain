@@ -96,7 +96,8 @@ class KeyedLinear(KeyedBase):
             prediction_key_to_shape,
             hidden_sizes=None,
             hidden_activation=gelu,
-            index_layer=None):
+            index_layer=None,
+            force_cpu=False):
         super().__init__(prediction_key_to_shape)
         self.naked_pooled = is_sequence == 'naked_pooled'
         if self.naked_pooled:
@@ -121,6 +122,7 @@ class KeyedLinear(KeyedBase):
         if hidden_sizes is not None:
             in_channels = hidden_sizes[-1]
         self.linear = nn.Linear(in_channels, sum(self.splits))
+        self.force_cpu = force_cpu
 
     def forward(self, sequence_output, pooled_output, batch):
         if self.naked_pooled:
@@ -131,6 +133,8 @@ class KeyedLinear(KeyedBase):
             x = pooled_output.value
         if self.hidden is not None:
             x = self.hidden(x)
+        if self.force_cpu:
+            x = x.cpu()
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
         result = OrderedDict()
@@ -321,7 +325,7 @@ class MultiPredictionHead(torch.nn.Module):
         for k in predictions:
             if isinstance(k, tuple) and len(k) == 2 and k[1] == 'data_ids':
                 group_data = dataset.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
-                batch[k[0]] = group_data.to(predictions[k].device)
+                batch[k[0]] = group_data.to(predictions[k[0]].device)
 
         return predictions
 
@@ -545,6 +549,71 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             attention_mask=batch['mask'] if 'mask' in batch else None,
             output_all_encoded_layers=True)
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)
+
+    def to(self, *args, **kwargs):
+
+        device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
+
+        if dtype is not None:
+            if not dtype.is_floating_point:
+                raise TypeError('nn.Module.to only accepts floating point '
+                                'dtypes, but got desired dtype={}'.format(dtype))
+
+        forced_cpu = list()
+
+        def set_forced_cpu(module):
+            for child in module.children():
+                set_forced_cpu(child)
+            force_cpu = getattr(module, 'force_cpu', False)
+            if force_cpu:
+                def set_forced_cpu_tensor(t):
+                    forced_cpu.append(t)
+                    return t
+                module._apply(set_forced_cpu_tensor)
+
+        set_forced_cpu(self)
+
+        def is_forced_cpu(t):
+            for have in forced_cpu:
+                if have.is_set_to(t):
+                    return True
+            return False
+
+        def convert(t):
+            if is_forced_cpu(t):
+                return t.to(torch.device('cpu'), dtype if t.is_floating_point() else None, non_blocking)
+            else:
+                return t.to(device, dtype if t.is_floating_point() else None, non_blocking)
+
+        self._apply(convert)
+
+    def cuda(self, device=None):
+        forced_cpu = list()
+
+        def set_forced_cpu(module):
+            for child in module.children():
+                set_forced_cpu(child)
+            force_cpu = getattr(module, 'force_cpu', False)
+            if force_cpu:
+                def set_forced_cpu_tensor(t):
+                    forced_cpu.append(t)
+                    return t
+
+                module._apply(set_forced_cpu_tensor)
+
+        set_forced_cpu(self)
+
+        def is_forced_cpu(t):
+            for have in forced_cpu:
+                if have.is_set_to(t):
+                    return True
+            return False
+
+        def convert(t):
+            if is_forced_cpu(t):
+                return t.cpu()
+            return t.cuda(device)
+        return self._apply(convert)
 
 
 class OutputCache:

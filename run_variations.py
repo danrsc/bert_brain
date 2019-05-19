@@ -352,10 +352,11 @@ def named_variations(name):
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_meg_joint':
-        fmri_subjects_ = ['H', 'I', 'K', 'L']
+        fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
+        # fmri_subjects_ = ['H', 'I', 'K', 'L']
         fmri_tasks_ = tuple('hp_fmri_{}'.format(s) for s in fmri_subjects_)
         training_variations = [
-            fmri_tasks_ + ('hp_meg',),]
+            fmri_tasks_ + ('hp_meg',)]
             # ('hp_meg',),
             # fmri_tasks_]
         settings = Settings(
@@ -381,9 +382,9 @@ def named_variations(name):
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True, force_cpu=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(

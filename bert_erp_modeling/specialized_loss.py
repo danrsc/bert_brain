@@ -326,6 +326,7 @@ class _NamedTargetMaskedLoss:
 
         predictions = prediction_dict[self.field]
         target = batch[self.field]
+        target = target.to(predictions.device)
         mask = self._get_mask(is_eval, epoch, global_step, batch, predictions, target)
 
         try:
@@ -419,7 +420,8 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
 
     def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
         return stop_word_and_target_not_nan_mask(
-            self.keep_content, target, batch['is_stop'], batch['is_begin_word_pieces'])
+            self.keep_content,
+            target, batch['is_stop'].to(target.device), batch['is_begin_word_pieces'].to(target.device))
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))

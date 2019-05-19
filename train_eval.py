@@ -84,6 +84,8 @@ def evaluate(
 
     total_loss = 0
     total_count = 0
+    losses_to_write = OrderedDict()
+    losses_to_write_counts = OrderedDict()
     for batch in batch_iterator:
         # if len(all_results) % 1000 == 0:
         #     logger.info("Processing example: %d" % (len(all_results)))
@@ -109,20 +111,40 @@ def evaluate(
                 loss_dict = loss_result
             for data_key in loss_dict:
                 weight, (data_loss, data_valid_count) = loss_dict[data_key]
+                if data_key not in losses_to_write:
+                    losses_to_write[data_key] = 0
+                    losses_to_write_counts[data_key] = 0
                 if data_valid_count == 0:
                     current = np.nan
+                    losses_to_write_counts[data_key] += data_valid_count
                 else:
                     current = np.sum(data_loss)
+                    losses_to_write[data_key] += current
+
                 kind = eval_data_set.response_data_kind(data_key)
                 if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and data_valid_count > 0:
                     total_loss += current
                     total_count += data_valid_count
                 eval_results.add_result(data_key, epoch, global_step, current)
 
+    for k in losses_to_write:
+        if losses_to_write_counts[k] == 0:
+            losses_to_write[k] = np.nan
+        else:
+            losses_to_write[k] /= losses_to_write_counts[k]
+
     if total_count > 0:
-        logger.info('eval: {}'.format(total_loss / total_count))
+        if len(losses_to_write) < 4:
+            logger.info('eval: {:.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+        else:
+            logger.info('eval: {}'.format(total_loss / total_count))
     else:
-        logger.info('eval: {}'.format(np.nan))
+        if len(losses_to_write) < 4:
+            logger.info('eval: {:.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+        else:
+            logger.info('eval: {}'.format(np.nan))
 
     if return_detailed:
         return all_results
@@ -363,12 +385,14 @@ def train(
             del batch
 
             loss = None
+            losses_to_write = OrderedDict()
             for data_key in loss_dict:
                 weight, data_loss = loss_dict[data_key]
                 no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
                 kind = train_data_set.response_data_kind(data_key)
                 if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
                     current = weight * data_loss
+                    losses_to_write[data_key] = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
                     if loss is None:
                         loss = current
                     else:
@@ -383,7 +407,11 @@ def train(
             del loss_dict
 
             if loss is not None:
-                logger.info('train: {}'.format(loss.item()))
+                if len(losses_to_write) < 4:
+                    logger.info('train: {:.6}, ' + ', '.join(
+                        ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+                else:
+                    logger.info('train: {}'.format(loss.item()))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
