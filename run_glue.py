@@ -965,7 +965,6 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
-    parser.add_argument('--num_runs_per_input_run', default=1, type=int)
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
     args = parser.parse_args()
@@ -1004,22 +1003,46 @@ def main():
         "wnli": "classification",
     }
 
-    setattr(args, 'name', 'hp_meg_simple_fmri')
+    num_runs_per_input_run = {
+        "cola": 1,
+        "mnli": 1,
+        "mrpc": 10,
+        "sst-2": 1,
+        "sts-b": 1,
+        "qqp": 1,
+        "qnli": 1,
+        "rte": 10,
+        "wnli": 10,
+    }
+
+    learning_rates = {
+        "cola": 2e-5,
+        "mnli": 5e-5,
+        "mrpc": 2e-5,
+        "sst-2": 5e-5,
+        "sts-b": 3e-5,
+        "qqp": 5e-5,
+        "qnli": 3e-5,
+        "rte": 2e-5,
+        "wnli": 5e-5,
+    }
+
+    setattr(args, 'name', 'hp_fmri_meg_joint')
 
     training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(args.name)
     settings.optimization_settings.num_epochs_train_prediction_heads_only = 0
     settings.optimization_settings.num_final_epochs_train_prediction_heads_only = 0
     settings.optimization_settings.num_train_epochs = args.num_train_epochs
 
-    chosen_variation = None
-    for training_variation in training_variations:
-        if isinstance(training_variation, TrainingVariation) and training_variation.loss_tasks == ('hp_fmri_I',):
-            if chosen_variation is not None:
-                raise ValueError('2 matches to hard coded training variation')
-            chosen_variation = training_variation
-    if chosen_variation is None:
-        raise ValueError('Unable to find variation which matches chosen variation')
-    training_variations = [chosen_variation]
+    # chosen_variation = None
+    # for training_variation in training_variations:
+    #     if isinstance(training_variation, TrainingVariation) and training_variation.loss_tasks == ('hp_fmri_I',):
+    #         if chosen_variation is not None:
+    #             raise ValueError('2 matches to hard coded training variation')
+    #         chosen_variation = training_variation
+    # if chosen_variation is None:
+    #     raise ValueError('Unable to find variation which matches chosen variation')
+    # training_variations = [chosen_variation]
     num_runs = 4
 
     if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
@@ -1052,13 +1075,13 @@ def main():
     if not args.do_train and not args.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
-    task_name = args.task_name.lower()
-
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % (task_name))
-
-    processor = processors[task_name]()
-    output_mode = output_modes[task_name]
+    task_names = args.task_name.lower()
+    if task_names == 'all':
+        task_names = [k for k in learning_rates]
+    elif task_names not in processors:
+        raise ValueError("Task not found: {}".format(task_names))
+    else:
+        task_names = [task_names]
 
     def io_setup(training_variation_):
         temp_paths = Paths()
@@ -1075,32 +1098,36 @@ def main():
 
     tokenizer = BertTokenizer.from_pretrained(settings.bert_model, do_lower_case=True)
 
-    train_features = None
-    paths = Paths()
-    if args.do_train:
-        train_features = convert_examples_to_features(
-            processor.get_train_examples(os.path.join(paths.glue_path, task_name.upper())),
-            processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
+    for task_name in task_names:
+        processor = processors[task_name]()
+        output_mode = output_modes[task_name]
 
-    eval_features = None
-    mnli_mm_eval_features = None
-    if args.do_eval:
-        eval_features = convert_examples_to_features(
-            processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
-            processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
-        if task_name == 'mnli':
-            mnli_mm_processor = processors['mnli-mm']()
-            mnli_mm_eval_features = convert_examples_to_features(
-                mnli_mm_processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
+        train_features = None
+        paths = Paths()
+        if args.do_train:
+            train_features = convert_examples_to_features(
+                processor.get_train_examples(os.path.join(paths.glue_path, task_name.upper())),
                 processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
-    for training_variation in training_variations:
-        result_path, model_path = io_setup(training_variation)
-        for index_run in range(num_runs):
-            for learning_rate in [2e-5, 3e-5, 4e-5, 5e-5]:
-                for index_sub_run in range(args.num_runs_per_input_run):
-                    settings.optimization_settings.learning_rate = learning_rate
-                    set_random_seeds(settings.seed, index_run * args.num_runs_per_input_run + index_sub_run, n_gpu)
+        eval_features = None
+        mnli_mm_eval_features = None
+        if args.do_eval:
+            eval_features = convert_examples_to_features(
+                processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
+                processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
+            if task_name == 'mnli':
+                mnli_mm_processor = processors['mnli-mm']()
+                mnli_mm_eval_features = convert_examples_to_features(
+                    mnli_mm_processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
+                    processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
+
+        for training_variation in training_variations:
+            result_path, model_path = io_setup(training_variation)
+            for index_run in range(num_runs):
+                for index_sub_run in range(num_runs_per_input_run[task_name]):
+                    settings.optimization_settings.learning_rate = learning_rates[task_name]
+                    set_random_seeds(
+                        settings.seed, index_run * num_runs_per_input_run[task_name] + index_sub_run, n_gpu)
                     _run_glue_for_variation(
                         model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
                         settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
