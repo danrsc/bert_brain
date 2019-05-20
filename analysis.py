@@ -1003,3 +1003,105 @@ def min_max_per_group(
         vmin_vmax[key][0].append(vmin)
         vmin_vmax[key][1].append(vmax)
     return vmin_vmax
+
+
+def one_sample_permutation_test(
+        sample_predictions,
+        sample_target,
+        value_fn,
+        num_contiguous_examples=10,
+        num_permutation_samples=1000,
+        unique_ids=None,
+        side='both'):
+
+    if side not in ['both', 'less', 'greater']:
+        raise ValueError('side must be one of: \'both\', \'less\', \'greater\'')
+
+    def _sort(predictions, targets, ids):
+        if ids is None:
+            return predictions, targets, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return predictions[sort_order], targets[sort_order], ids[sort_order]
+
+    sample_predictions, sample_target, unique_ids = _sort(sample_predictions, sample_target, unique_ids)
+
+    keep_length = int(np.ceil(len(sample_predictions) / num_contiguous_examples)) * num_contiguous_examples
+    sample_predictions = sample_predictions[:keep_length]
+    sample_target = sample_target[:keep_length]
+    true_values = value_fn(sample_predictions, sample_target)
+    abs_true_values = np.abs(true_values) if side == 'both' else None
+
+    sample_target = np.reshape(
+        sample_target,
+        (sample_target.shape[0] // num_contiguous_examples, num_contiguous_examples) + sample_target.shape[1:])
+
+    count_as_extreme = np.zeros(abs_true_values.shape, np.int64)
+    for _ in range(num_permutation_samples):
+        indices_target = np.random.permutation(len(sample_target))
+        permuted_target = np.reshape(
+            sample_target[indices_target], (sample_predictions.shape[0],) + sample_target.shape[2:])
+        permuted_values = value_fn(sample_predictions, permuted_target)
+        if side == 'less':
+            as_extreme = np.where(np.less_equal(permuted_values, true_values), 1, 0)
+        elif side == 'greater':
+            as_extreme = np.where(np.greater_equal(permuted_values, true_values), 1, 0)
+        else:
+            assert(side == 'both')
+            as_extreme = np.where(np.greater_equal(permuted_values, abs_true_values), 1, 0)
+        count_as_extreme += as_extreme
+
+    p_values = count_as_extreme / num_permutation_samples
+    return p_values, true_values
+
+
+def two_sample_permutation_test(
+        sample_a_values,
+        sample_b_values,
+        num_contiguous_examples=10,
+        num_permutation_samples=1000,
+        unique_ids_a=None,
+        unique_ids_b=None):
+
+    def _sort(values, ids):
+        if ids is None:
+            return values, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return values[sort_order], ids[sort_order]
+
+    sample_a_values, unique_ids_a = _sort(sample_a_values, unique_ids_a)
+    sample_b_values, unique_ids_b = _sort(sample_b_values, unique_ids_b)
+
+    if unique_ids_a is not None and unique_ids_b is not None:
+        if not np.array_equal(unique_ids_a, unique_ids_b):
+            raise ValueError('Ids do not match between unique_ids_a and unique_ids_b')
+
+    def _contiguous_values(s):
+        fill_length = int(np.ceil(len(s) / num_contiguous_examples)) * num_contiguous_examples
+        temp = np.full((fill_length,) + s.shape[1:], np.nan)
+        temp[:len(s)] = s
+        temp = np.reshape(temp, (len(s) // num_contiguous_examples, num_contiguous_examples))
+        return np.nanmean(temp, axis=1)
+
+    sample_a_values = _contiguous_values(sample_a_values)
+    sample_b_values = _contiguous_values(sample_b_values)
+
+    true_difference = np.mean(sample_a_values - sample_b_values, axis=0)
+    abs_true_difference = np.abs(true_difference)
+
+    all_values = np.concatenate([sample_a_values, sample_b_values], axis=0)
+
+    indicator_first = np.full(len(all_values), False)
+    count_greater_equal = np.zeros(true_difference.shape, np.int64)
+    for _ in range(num_permutation_samples):
+        indices_first = np.random.permutation(len(all_values))[:len(sample_a_values)]
+        indicator_first[:] = False
+        indicator_first[indices_first] = True
+        first = all_values[indicator_first]
+        second = all_values[np.logical_not(indicator_first)]
+        permutation_difference = np.abs(np.mean(first - second, axis=0))
+        greater_equal = np.where(np.greater_equal(permutation_difference, abs_true_difference), 1, 0)
+        count_greater_equal += greater_equal
+    p_values = count_greater_equal / num_permutation_samples
+    return p_values, true_difference
