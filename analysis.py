@@ -4,6 +4,7 @@ from functools import partial
 from collections import OrderedDict
 import dataclasses
 from typing import Tuple, Optional
+from tqdm import trange
 import inspect
 import fnmatch
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -1037,7 +1038,7 @@ def one_sample_permutation_test(
         (sample_target.shape[0] // num_contiguous_examples, num_contiguous_examples) + sample_target.shape[1:])
 
     count_as_extreme = np.zeros(abs_true_values.shape, np.int64)
-    for _ in range(num_permutation_samples):
+    for _ in trange(num_permutation_samples, desc='Permutation'):
         indices_target = np.random.permutation(len(sample_target))
         permuted_target = np.reshape(
             sample_target[indices_target], (sample_predictions.shape[0],) + sample_target.shape[2:])
@@ -1081,7 +1082,7 @@ def two_sample_permutation_test(
         fill_length = int(np.ceil(len(s) / num_contiguous_examples)) * num_contiguous_examples
         temp = np.full((fill_length,) + s.shape[1:], np.nan)
         temp[:len(s)] = s
-        temp = np.reshape(temp, (len(s) // num_contiguous_examples, num_contiguous_examples))
+        temp = np.reshape(temp, (len(temp) // num_contiguous_examples, num_contiguous_examples) + temp.shape[1:])
         return np.nanmean(temp, axis=1)
 
     sample_a_values = _contiguous_values(sample_a_values)
@@ -1094,7 +1095,7 @@ def two_sample_permutation_test(
 
     indicator_first = np.full(len(all_values), False)
     count_greater_equal = np.zeros(true_difference.shape, np.int64)
-    for _ in range(num_permutation_samples):
+    for _ in trange(num_permutation_samples, desc='Permutation'):
         indices_first = np.random.permutation(len(all_values))[:len(sample_a_values)]
         indicator_first[:] = False
         indicator_first[indices_first] = True
