@@ -116,10 +116,10 @@ def evaluate(
                     losses_to_write_counts[data_key] = 0
                 if data_valid_count == 0:
                     current = np.nan
-                    losses_to_write_counts[data_key] += data_valid_count
                 else:
                     current = np.sum(data_loss)
                     losses_to_write[data_key] += current
+                    losses_to_write_counts[data_key] += data_valid_count
 
                 kind = eval_data_set.response_data_kind(data_key)
                 if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and data_valid_count > 0:
@@ -135,16 +135,16 @@ def evaluate(
 
     if total_count > 0:
         if len(losses_to_write) < 4:
-            logger.info('eval: {:.6}, '.format(total_loss / total_count) + ', '.join(
-                ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+            logger.info('eval:  {:<#8.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
         else:
-            logger.info('eval: {}'.format(total_loss / total_count))
+            logger.info('eval:  {}'.format(total_loss / total_count))
     else:
         if len(losses_to_write) < 4:
-            logger.info('eval: {:.6}, '.format(total_loss / total_count) + ', '.join(
-                ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+            logger.info('eval:  {:<#8.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
         else:
-            logger.info('eval: {}'.format(np.nan))
+            logger.info('eval:  {}'.format(np.nan))
 
     if return_detailed:
         return all_results
@@ -159,8 +159,10 @@ def _loss_weights(loss_count_dict):
 
 def make_datasets(
         data: Mapping[str, PreparedData],
+        loss_tasks,
         which: Optional[Union[str, Sequence[str]]] = None,
-        data_id_in_batch_keys: Optional[Sequence[str]] = None):
+        data_id_in_batch_keys: Optional[Sequence[str]] = None,
+        filter_when_not_in_loss_keys: Optional[Sequence[str]] = None):
     if which is None:
         which = ['train', 'validation', 'test']
     max_sequence_length = max_example_sequence_length(data)
@@ -168,7 +170,9 @@ def make_datasets(
     if is_single:
         which = [which]
     result = [
-        PreparedDataDataset(max_sequence_length, data, which=w, data_id_in_batch_keys=data_id_in_batch_keys)
+        PreparedDataDataset(
+            max_sequence_length, data, loss_tasks, which=w,
+            data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
         for w in which]
     if is_single:
         result = result[0]
@@ -408,8 +412,8 @@ def train(
 
             if loss is not None:
                 if len(losses_to_write) < 4:
-                    logger.info('train: {:.6}, ' + ', '.join(
-                        ['{}: {:.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+                    logger.info('train: {:<#8.6}, '.format(loss.item()) + ', '.join(
+                        ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
                 else:
                     logger.info('train: {}'.format(loss.item()))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work

@@ -113,15 +113,24 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             back_fill = field_spec.fill_value
         example_tensors[field] = [back_fill] * num_seen
 
+    @staticmethod
+    def _is_field_allowed(filter_when_not_in_loss_keys, loss_keys, field_name, kind):
+        return (
+            filter_when_not_in_loss_keys is None
+            or (field_name not in filter_when_not_in_loss_keys and kind not in filter_when_not_in_loss_keys)
+            or field_name in loss_keys)
+
     def __init__(
             self,
             max_sequence_length,
             prepared_data,
+            loss_keys,
             which='train',
             token_field='tokens',
             id_field='unique_id',
             data_index_field='data_ids',
-            data_id_in_batch_keys=None):
+            data_id_in_batch_keys=None,
+            filter_when_not_in_loss_keys=None):
 
         self._field_specs = dict()
 
@@ -159,6 +168,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             for key in current.data:
                 if key in self._response_data:
                     raise ValueError('Multiple corpora use the same key in data: {}'.format(key))
+                if not PreparedDataDataset._is_field_allowed(
+                        filter_when_not_in_loss_keys, loss_keys, key, current.data[key].kind):
+                    continue
+
                 self._field_to_data_set_key[key] = data_key
 
             fields_as_none = set()
@@ -169,6 +182,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                     for field in fields:
 
                         if current.field_specs[field].tensor_dtype == str:
+                            continue
+
+                        if not PreparedDataDataset._is_field_allowed(
+                                filter_when_not_in_loss_keys, loss_keys, field, kind=None):
                             continue
 
                         # this is an optional field; we know that the field is either always None for a given dataset
@@ -182,6 +199,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                             PreparedDataDataset._add_field_or_check_consistent(
                                 self._field_specs, field, current.field_specs)
                             for response_data_key in current.data:
+                                if not PreparedDataDataset._is_field_allowed(
+                                        filter_when_not_in_loss_keys,
+                                        loss_keys, response_data_key, current.data[response_data_key].kind):
+                                    continue
                                 if not PreparedDataDataset._add_field_or_check_consistent(
                                         self._field_specs, response_data_key, current.field_specs):
                                     raise ValueError('Field name conflict: {}'.format(response_data_key))
@@ -240,6 +261,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                                          'if they are ever None in that dataset')
 
                 for response_data_key in current.data:
+                    if not PreparedDataDataset._is_field_allowed(
+                            filter_when_not_in_loss_keys, loss_keys, response_data_key,
+                            current.data[response_data_key].kind):
+                        continue
                     self._response_data[response_data_key] = current.data[response_data_key].data
                     self._response_data_kind[response_data_key] = current.data[response_data_key].kind
 

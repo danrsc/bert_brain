@@ -144,6 +144,13 @@ class LoadFrom:
     variation_name: str
     loss_tasks: Union[Sequence[str], 'TrainingVariation']
     map_run: Optional[Callable[[int], int]] = None
+    name: Optional[str] = None
+
+    def __post_init__(self):
+        if self.name is None:
+            self.name = '{}:{}'.format(
+                self.variation_name,
+                self.loss_tasks.name if isinstance(self.loss_tasks, TrainingVariation) else tuple(self.loss_tasks))
 
 
 @dataclass
@@ -151,6 +158,12 @@ class TrainingVariation:
     loss_tasks: Sequence[str]
     # If specified, then this causes a partially fine-tuned model to be loaded instead of the base pre-trained model.
     load_from: Optional[LoadFrom] = None
+    name: Optional[str] = None
+
+    def __post_init__(self):
+        if self.name is None:
+            suffix = '.' + self.load_from.name if self.load_from is not None else ''
+            self.name = '{}{}'.format(tuple(self.loss_tasks), suffix)
 
 
 @dataclass
@@ -206,6 +219,10 @@ class Settings:
     # the predictions it made for that field. The system will then go fetch the data corresponding to those data_ids
     # and put them into the batch before the losses are computed.
     data_id_in_batch_keys: Sequence[str] = (ResponseKind.ns_froi, ResponseKind.hp_fmri)
+
+    # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into the dataset
+    # unless those fields are in the loss
+    filter_when_not_in_loss_keys: Optional[Sequence[str]] = None
 
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
     critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)

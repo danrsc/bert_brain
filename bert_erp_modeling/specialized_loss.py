@@ -389,7 +389,7 @@ class _NamedTargetMaskedLoss:
                     if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
-                        mask=np.abs(np.squeeze(example_mask, axis=0) - 1) < 1e-5,  # convert to bool
+                        mask=np.abs(np.squeeze(example_mask, axis=0) - 1) < 1e-4,  # convert to bool
                         prediction=np.squeeze(example_predictions, axis=0),
                         target=np.squeeze(example_targets, axis=0),
                         sequence_type=sequence_type,

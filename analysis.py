@@ -1093,16 +1093,198 @@ def two_sample_permutation_test(
 
     all_values = np.concatenate([sample_a_values, sample_b_values], axis=0)
 
-    indicator_first = np.full(len(all_values), False)
     count_greater_equal = np.zeros(true_difference.shape, np.int64)
     for _ in trange(num_permutation_samples, desc='Permutation'):
-        indices_first = np.random.permutation(len(all_values))[:len(sample_a_values)]
-        indicator_first[:] = False
-        indicator_first[indices_first] = True
-        first = all_values[indicator_first]
-        second = all_values[np.logical_not(indicator_first)]
+        permuted = np.random.permutation(all_values)
+        first, second = np.split(permuted, 2)
         permutation_difference = np.abs(np.mean(first - second, axis=0))
         greater_equal = np.where(np.greater_equal(permutation_difference, abs_true_difference), 1, 0)
         count_greater_equal += greater_equal
     p_values = count_greater_equal / num_permutation_samples
     return p_values, true_difference
+
+
+def sample_differences(
+        sample_a_values,
+        sample_b_values,
+        num_contiguous_examples=10,
+        unique_ids_a=None,
+        unique_ids_b=None):
+
+    def _sort(values, ids):
+        if ids is None:
+            return values, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return values[sort_order], ids[sort_order]
+
+    sample_a_values, unique_ids_a = _sort(sample_a_values, unique_ids_a)
+    sample_b_values, unique_ids_b = _sort(sample_b_values, unique_ids_b)
+
+    if unique_ids_a is not None and unique_ids_b is not None:
+        if not np.array_equal(unique_ids_a, unique_ids_b):
+            raise ValueError('Ids do not match between unique_ids_a and unique_ids_b')
+
+    def _contiguous_values(s):
+        fill_length = int(np.ceil(len(s) / num_contiguous_examples)) * num_contiguous_examples
+        temp = np.full((fill_length,) + s.shape[1:], np.nan)
+        temp[:len(s)] = s
+        temp = np.reshape(temp, (len(temp) // num_contiguous_examples, num_contiguous_examples) + temp.shape[1:])
+        return np.nanmean(temp, axis=1)
+
+    sample_a_values = _contiguous_values(sample_a_values)
+    sample_b_values = _contiguous_values(sample_b_values)
+
+    return sample_a_values - sample_b_values
+
+
+def wilcoxon_axis(x, y=None, zero_method="wilcox", correction=False):
+    # copied from scipy.stats with adjustments so we can do it along axis=0
+    from scipy.stats import distributions
+    from scipy.stats.mstats import rankdata
+    """
+    Calculate the Wilcoxon signed-rank test.
+
+    The Wilcoxon signed-rank test tests the null hypothesis that two
+    related paired samples come from the same distribution. In particular,
+    it tests whether the distribution of the differences x - y is symmetric
+    about zero. It is a non-parametric version of the paired T-test.
+
+    Parameters
+    ----------
+    x : array_like
+        The first set of measurements.
+    y : array_like, optional
+        The second set of measurements.  If `y` is not given, then the `x`
+        array is considered to be the differences between the two sets of
+        measurements.
+    zero_method : string, {"pratt", "wilcox", "zsplit"}, optional
+        "pratt":
+            Pratt treatment: includes zero-differences in the ranking process
+            (more conservative)
+        "wilcox":
+            Wilcox treatment: discards all zero-differences
+        "zsplit":
+            Zero rank split: just like Pratt, but spliting the zero rank
+            between positive and negative ones
+    correction : bool, optional
+        If True, apply continuity correction by adjusting the Wilcoxon rank
+        statistic by 0.5 towards the mean value when computing the
+        z-statistic.  Default is False.
+
+    Returns
+    -------
+    T : float
+        The sum of the ranks of the differences above or below zero, whichever
+        is smaller.
+    p-value : float
+        The two-sided p-value for the test.
+
+    Notes
+    -----
+    Because the normal approximation is used for the calculations, the
+    samples used should be large.  A typical rule is to require that
+    n > 20.
+
+    References
+    ----------
+    .. [1] http://en.wikipedia.org/wiki/Wilcoxon_signed-rank_test
+
+    """
+
+    if zero_method not in ["wilcox", "pratt", "zsplit"]:
+        raise ValueError("Zero method should be either 'wilcox' \
+                          or 'pratt' or 'zsplit'")
+
+    if y is None:
+        d = x
+    else:
+        x, y = map(np.asarray, (x, y))
+        if len(x) != len(y):
+            raise ValueError('Unequal N in wilcoxon.  Aborting.')
+        d = x-y
+
+    d_shape = d.shape
+    d = np.reshape(d, (d.shape[0], -1))
+
+    if zero_method == "wilcox":
+        d = np.where(np.not_equal(d, 0), d, np.nan)  # Keep all non-zero differences
+
+    count = np.sum(np.logical_not(np.isnan(d)), axis=0)
+    if np.any(count < 10):
+        warnings.warn("Warning: sample size too small for normal approximation.")
+    ranked = rankdata(np.ma.masked_invalid(np.abs(d[:, count > 0])), axis=0)
+    r = np.full(d.shape, np.nan, ranked.dtype)
+    r[:, count > 0] = ranked
+    r = np.where(r == 0, np.nan, r)
+    r_plus = np.nansum((d > 0) * r, axis=0)
+    r_minus = np.nansum((d < 0) * r, axis=0)
+    if zero_method == "zsplit":
+        r_zero = np.nansum((d == 0) * r, axis=0)
+        r_plus += r_zero / 2.
+        r_minus += r_zero / 2.
+
+    T = np.minimum(r_plus, r_minus)
+    mn = count*(count + 1.) * 0.25
+    se = count*(count + 1.) * (2. * count + 1.)
+
+    if zero_method == "pratt":
+        r = np.where(d == 0, np.nan, r)
+
+    flat_r = np.reshape(r, (r.shape[0], -1, 1))
+    column_id = np.tile(np.reshape(np.arange(flat_r.shape[1]), (1, -1, 1)), (r.shape[0], 1, 1))
+    flat_r_with_column = np.reshape(np.concatenate([column_id, flat_r], axis=2), (-1, 2))
+
+    repeats_with_column, repnum = np.unique(flat_r_with_column, return_counts=True, axis=0)
+    repeats_with_column = repeats_with_column[repnum > 1]
+    repnum = repnum[repnum > 1]
+    if len(repnum) != 0:
+        column_id = np.asarray(np.round(repeats_with_column[:, 0]), dtype=np.int64)
+        weights = repnum * (repnum * repnum - 1)
+        weights = np.asarray(weights, dtype=np.float64)
+        repeat_correction = 0.5 * np.bincount(column_id, weights=weights)
+        column_repeat_correction = np.zeros(flat_r.shape[1], se.dtype)
+        column_repeat_correction[:len(repeat_correction)] += repeat_correction
+        column_repeat_correction = np.reshape(column_repeat_correction, se.shape)
+        # Correction for repeated elements.
+        se -= column_repeat_correction
+
+    se = np.sqrt(se / 24)
+    correction = 0.5 * int(bool(correction)) * np.sign(T - mn)
+    z = (T - mn - correction) / se
+    prob = 2. * distributions.norm.sf(np.abs(z))
+    return np.reshape(T, d_shape[1:]), np.reshape(prob, d_shape[1:])
+
+
+def bhy_multiple_comparisons_procedure(uncorrected_pvalues, alpha=0.05, assume_independence=False):
+    # Benjamini-Hochberg-Yekutieli
+    # originally from Mariya Toneva
+    if len(uncorrected_pvalues.shape) == 1:
+        uncorrected_pvalues = np.reshape(uncorrected_pvalues, (1, -1))
+
+    # get ranks of all p-values in ascending order
+    sorting_inds = np.argsort(uncorrected_pvalues, axis=1)
+    ranks = sorting_inds + 1  # add 1 to make the ranks start at 1 instead of 0
+
+    # calculate critical values under arbitrary dependence
+    if assume_independence:
+        dependency_constant = 1.0
+    else:
+        dependency_constant = np.sum(1.0 / ranks)
+    critical_values = ranks * alpha / float(uncorrected_pvalues.shape[1] * dependency_constant)
+
+    # find largest pvalue that is <= than its critical value
+    sorted_pvalues = np.empty(uncorrected_pvalues.shape)
+    sorted_critical_values = np.empty(critical_values.shape)
+    for i in range(uncorrected_pvalues.shape[0]):
+        sorted_pvalues[i, :] = uncorrected_pvalues[i, sorting_inds[i, :]]
+        sorted_critical_values[i, :] = critical_values[i, sorting_inds[i, :]]
+    bh_thresh = np.zeros((sorted_pvalues.shape[0],))
+    for j in range(sorted_pvalues.shape[0]):
+        for i in range(sorted_pvalues.shape[1] - 1, -1, -1):  # start from the back
+            if sorted_pvalues[j, i] <= sorted_critical_values[j, i]:
+                bh_thresh[j] = sorted_pvalues[j, i]
+                # print('threshold for row {} is: {}; critical value: {} (i: {})'.format(
+                #     j, bh_thresh[j], sorted_critical_values[j, i], i))
+                break
+    return bh_thresh

@@ -18,8 +18,10 @@
 import argparse
 import csv
 import logging
+import dataclasses
 import os
 import gc
+from itertools import groupby
 
 import numpy as np
 import torch
@@ -936,6 +938,17 @@ def _run_glue_for_variation(
                     writer.write("%s = %s\n" % (key, str(result[key])))
 
 
+@dataclasses.dataclass
+class Result:
+    task_name: str
+    training_variation_name: str
+    index_run: int
+    index_sub_run: int
+    learning_rate: float
+    metric: str
+    value: float
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -1072,8 +1085,8 @@ def main():
         settings.optimization_settings.train_batch_size \
         // settings.optimization_settings.gradient_accumulation_steps
 
-    if not args.do_train and not args.do_eval:
-        raise ValueError("At least one of `do_train` or `do_eval` must be True.")
+    # if not args.do_train and not args.do_eval:
+    #     raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     task_names = args.task_name.lower()
     if task_names == 'all':
@@ -1098,7 +1111,12 @@ def main():
 
     tokenizer = BertTokenizer.from_pretrained(settings.bert_model, do_lower_case=True)
 
+    results = list()
+
     for task_name in task_names:
+
+        print(task_name)
+
         processor = processors[task_name]()
         output_mode = output_modes[task_name]
 
@@ -1121,18 +1139,78 @@ def main():
                     mnli_mm_processor.get_dev_examples(os.path.join(paths.glue_path, task_name.upper())),
                     processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
+        if args.do_train or args.do_eval:
+            for training_variation in training_variations:
+                result_path, model_path = io_setup(training_variation)
+                for index_run in range(num_runs):
+                    for index_sub_run in range(num_runs_per_input_run[task_name]):
+                        settings.optimization_settings.learning_rate = learning_rates[task_name]
+                        set_random_seeds(
+                            settings.seed, index_run * num_runs_per_input_run[task_name] + index_sub_run, n_gpu)
+                        _run_glue_for_variation(
+                            model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
+                            settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
         for training_variation in training_variations:
             result_path, model_path = io_setup(training_variation)
             for index_run in range(num_runs):
                 for index_sub_run in range(num_runs_per_input_run[task_name]):
-                    settings.optimization_settings.learning_rate = learning_rates[task_name]
-                    set_random_seeds(
-                        settings.seed, index_run * num_runs_per_input_run[task_name] + index_sub_run, n_gpu)
-                    _run_glue_for_variation(
-                        model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
-                        settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    output_eval_file = os.path.join(
+                        result_path,
+                        'run_{}'.format(index_run),
+                        '{}_{:.0e}_{}_results.txt'.format(task_name, learning_rates[task_name], index_sub_run))
+
+                    training_variation_name = training_variation.name \
+                        if isinstance(training_variation, TrainingVariation) else str(training_variation)
+
+                    def _read_eval_file(eval_file_path, task_name_):
+                        with open(eval_file_path, 'rt') as eval_file:
+                            for line in eval_file:
+                                line = line.strip()
+                                if len(line) == 0:
+                                    continue
+                                index_equals = line.index(' = ')
+                                metric = line[:index_equals].strip()
+                                if metric == 'global_step' or metric == 'loss' or metric == 'eval_loss':
+                                    continue
+                                value_str = line[index_equals + len(' = '):].strip()
+                                if value_str == 'None':
+                                    continue
+                                value = float(value_str)
+                                results.append(Result(
+                                    task_name_, training_variation_name, index_run, index_sub_run,
+                                    learning_rates[task_name], metric, value))
+
+                    _read_eval_file(output_eval_file, task_name)
+
+                    if task_name == 'mnli':
+                        second_task_name = 'mnli-mm'
+                        output_eval_file_2 = os.path.join(
+                            result_path,
+                            'run_{}'.format(index_run),
+                            '{}_{:.0e}_{}_results.txt'.format(
+                                second_task_name, learning_rates[task_name], index_sub_run))
+                        _read_eval_file(output_eval_file_2, second_task_name)
+
+    results = sorted(
+        results, key=lambda r: dataclasses.astuple(dataclasses.replace(r, value=0., index_sub_run=-1)))
+
+    aggregated = list()
+    for group_key, group in groupby(
+            results, key=lambda r: dataclasses.astuple(dataclasses.replace(r, value=0., index_sub_run=-1))):
+        group = list(group)
+        total = sum(r.value for r in group)
+        aggregated.append(dataclasses.replace(group[0], value=total/len(group), index_sub_run=-1))
+
+    paths = Paths()
+    summary_path = os.path.join(paths.result_path, args.name, 'glue_summary.txt')
+
+    with open(summary_path, 'wt') as summary_file:
+        for result in aggregated:
+            summary_file.write(str(result))
+            summary_file.write('\n')
 
 
 if __name__ == "__main__":
