@@ -84,6 +84,8 @@ def evaluate(
 
     total_loss = 0
     total_count = 0
+    losses_to_write = OrderedDict()
+    losses_to_write_counts = OrderedDict()
     for batch in batch_iterator:
         # if len(all_results) % 1000 == 0:
         #     logger.info("Processing example: %d" % (len(all_results)))
@@ -95,7 +97,7 @@ def evaluate(
                 (h.field,
                  (h.weight,
                   h(True, epoch, global_step, batch, predictions,
-                    return_detailed=return_detailed, apply_weight=False, as_numpy=True)))
+                    return_detailed=return_detailed, apply_weight=False, as_numpy=True, reduction='none')))
                 for h in loss_handlers)
             if return_detailed:
                 loss_dict = OrderedDict()
@@ -107,29 +109,42 @@ def evaluate(
                     all_results[k].extend(detailed)
             else:
                 loss_dict = loss_result
-            loss = None
             for data_key in loss_dict:
-                weight, data_loss = loss_dict[data_key]
-                no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
-                if no_valid_inputs:
+                weight, (data_loss, data_valid_count) = loss_dict[data_key]
+                if data_key not in losses_to_write:
+                    losses_to_write[data_key] = 0
+                    losses_to_write_counts[data_key] = 0
+                if data_valid_count == 0:
                     current = np.nan
                 else:
-                    current = data_loss
+                    current = np.sum(data_loss)
+                    losses_to_write[data_key] += current
+                    losses_to_write_counts[data_key] += data_valid_count
+
                 kind = eval_data_set.response_data_kind(data_key)
-                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
-                    if loss is None:
-                        loss = weight * current
-                    else:
-                        loss += weight * current
+                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and data_valid_count > 0:
+                    total_loss += current
+                    total_count += data_valid_count
                 eval_results.add_result(data_key, epoch, global_step, current)
-            if loss is not None:
-                total_loss += loss * len(batch['unique_id'])
-                total_count += len(batch['unique_id'])
+
+    for k in losses_to_write:
+        if losses_to_write_counts[k] == 0:
+            losses_to_write[k] = np.nan
+        else:
+            losses_to_write[k] /= losses_to_write_counts[k]
 
     if total_count > 0:
-        logger.info('eval: {}'.format(total_loss / total_count))
+        if len(losses_to_write) < 4:
+            logger.info('eval:  {:<#8.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+        else:
+            logger.info('eval:  {}'.format(total_loss / total_count))
     else:
-        logger.info('eval: {}'.format(np.nan))
+        if len(losses_to_write) < 4:
+            logger.info('eval:  {:<#8.6}, '.format(total_loss / total_count) + ', '.join(
+                ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+        else:
+            logger.info('eval:  {}'.format(np.nan))
 
     if return_detailed:
         return all_results
@@ -144,8 +159,10 @@ def _loss_weights(loss_count_dict):
 
 def make_datasets(
         data: Mapping[str, PreparedData],
+        loss_tasks,
         which: Optional[Union[str, Sequence[str]]] = None,
-        data_id_in_batch_keys: Optional[Sequence[str]] = None):
+        data_id_in_batch_keys: Optional[Sequence[str]] = None,
+        filter_when_not_in_loss_keys: Optional[Sequence[str]] = None):
     if which is None:
         which = ['train', 'validation', 'test']
     max_sequence_length = max_example_sequence_length(data)
@@ -153,7 +170,9 @@ def make_datasets(
     if is_single:
         which = [which]
     result = [
-        PreparedDataDataset(max_sequence_length, data, which=w, data_id_in_batch_keys=data_id_in_batch_keys)
+        PreparedDataDataset(
+            max_sequence_length, data, loss_tasks, which=w,
+            data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
         for w in which]
     if is_single:
         result = result[0]
@@ -247,7 +266,8 @@ def train(
         validation_data_set: PreparedDataDataset,
         test_data_set: Optional[PreparedDataDataset],
         n_gpu: int,
-        device):
+        device,
+        load_from_path: str = None):
 
     output_train_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'train_curve.npz')
     output_validation_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'validation_curve.npz')
@@ -268,8 +288,10 @@ def train(
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
-    model = BertMultiPredictionHead.from_pretrained(
-        settings.bert_model,
+    model_loader = BertMultiPredictionHead.from_fine_tuned \
+        if load_from_path is not None else BertMultiPredictionHead.from_pretrained
+    model = model_loader(
+        load_from_path if load_from_path is not None else settings.bert_model,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
         prediction_head_settings=prediction_heads,
         token_supplemental_key_to_shape=token_supplemental_key_to_shape,
@@ -367,12 +389,14 @@ def train(
             del batch
 
             loss = None
+            losses_to_write = OrderedDict()
             for data_key in loss_dict:
                 weight, data_loss = loss_dict[data_key]
                 no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
                 kind = train_data_set.response_data_kind(data_key)
                 if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
                     current = weight * data_loss
+                    losses_to_write[data_key] = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
                     if loss is None:
                         loss = current
                     else:
@@ -387,7 +411,11 @@ def train(
             del loss_dict
 
             if loss is not None:
-                logger.info('train: {}'.format(loss.item()))
+                if len(losses_to_write) < 4:
+                    logger.info('train: {:<#8.6}, '.format(loss.item()) + ', '.join(
+                        ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
+                else:
+                    logger.info('train: {}'.format(loss.item()))
                 if n_gpu > 1:  # hmm - not sure how this is supposed to work
                     loss = loss.mean()  # mean() to average on multi-gpu.
                 if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:

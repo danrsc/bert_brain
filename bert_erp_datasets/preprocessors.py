@@ -147,10 +147,11 @@ class PreprocessDetrend:
 
     def __call__(self, loaded_data_tuple, metadata):
 
-        indicator_train = None
-        if not self.train_on_all:
-            indicator_train = _indicator_from_examples(
-                len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
+        train_examples = loaded_data_tuple.train
+        if self.train_on_all:
+            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+        indicator_train = _indicator_from_examples(
+            len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
         if self.metadata_example_group_by is not None:
             if metadata is None or self.metadata_example_group_by not in metadata:
@@ -397,10 +398,11 @@ class PreprocessStandardize:
 
     def __call__(self, loaded_data_tuple, metadata):
 
-        indicator_train = None
-        if not self.train_on_all:
-            indicator_train = _indicator_from_examples(
-                len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
+        train_examples = loaded_data_tuple.train
+        if self.train_on_all:
+            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+        indicator_train = _indicator_from_examples(
+            len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
         if self.metadata_example_group_by is not None:
             if metadata is None or self.metadata_example_group_by not in metadata:
@@ -417,6 +419,8 @@ class PreprocessStandardize:
             for group, group_examples in grouped_examples:
                 indicator_group = _indicator_from_examples(len(data), group_examples)
                 group_data = loaded_data_tuple.data[indicator_group]
+                if len(group_data) == 0:
+                    continue
                 group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
                 group_data = self._standardize(group_data, group_indicator_train)
                 data[indicator_group] = group_data

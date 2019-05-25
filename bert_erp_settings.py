@@ -8,7 +8,7 @@ from bert_erp_datasets import CorpusKeys, PreprocessMany, PreprocessStandardize,
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
-__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'Settings']
+__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'Settings']
 
 
 @dataclass
@@ -140,6 +140,33 @@ def _default_critics():
 
 
 @dataclass
+class LoadFrom:
+    variation_name: str
+    loss_tasks: Union[Sequence[str], 'TrainingVariation']
+    map_run: Optional[Callable[[int], int]] = None
+    name: Optional[str] = None
+
+    def __post_init__(self):
+        if self.name is None:
+            self.name = '{}:{}'.format(
+                self.variation_name,
+                self.loss_tasks.name if isinstance(self.loss_tasks, TrainingVariation) else tuple(self.loss_tasks))
+
+
+@dataclass
+class TrainingVariation:
+    loss_tasks: Sequence[str]
+    # If specified, then this causes a partially fine-tuned model to be loaded instead of the base pre-trained model.
+    load_from: Optional[LoadFrom] = None
+    name: Optional[str] = None
+
+    def __post_init__(self):
+        if self.name is None:
+            suffix = '.' + self.load_from.name if self.load_from is not None else ''
+            self.name = '{}{}'.format(tuple(self.loss_tasks), suffix)
+
+
+@dataclass
 class Settings:
     # which data to load
     corpus_keys: Optional[Sequence[str]] = (CorpusKeys.ucl,)
@@ -193,6 +220,10 @@ class Settings:
     # and put them into the batch before the losses are computed.
     data_id_in_batch_keys: Sequence[str] = (ResponseKind.ns_froi, ResponseKind.hp_fmri)
 
+    # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into the dataset
+    # unless those fields are in the loss
+    filter_when_not_in_loss_keys: Optional[Sequence[str]] = None
+
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
     critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)
 
@@ -200,18 +231,15 @@ class Settings:
     # but only the fields listed here will be considered part of the loss for the purpose of optimization and
     # only those fields will be reported in train_loss / eval_loss. Other critic output is available as metrics for
     # reporting, but is otherwise ignored by training.
-    loss_tasks: set = field(default_factory=set)
+    loss_tasks: Union[set, TrainingVariation] = field(default_factory=set)
 
     # fields which are not in the response_data part of the RawData structure, but which should nevertheless be used
     # as output targets of the model. If a field is already in loss_tasks then it does not need to also be specified
     # here, but this allows non-loss fields to be output/evaluated. This is useful when we want to predict something
-    # like syntax that is on the input features rather than in the response data. The use-case for this is is a model
+    # like syntax that is on the input features rather than in the response data. The use-case for this is a model
     # has been pre-trained to make a prediction on a non-response field, and we want to track how those predictions
     # are changing as we target a different optimization metric.
     non_response_outputs: set = field(default_factory=set)
-
-    # TODO: not currently used, but we need to save the model
-    save_checkpoints_steps: int = 1000
 
     # TODO: not currently used. Should revive from ulmfit code
     # can use an extension to render to file, e.g. 'png', or 'show' to plot

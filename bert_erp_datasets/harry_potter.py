@@ -20,7 +20,7 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
-           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates']
+           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
 
 
 @dataclass
@@ -45,7 +45,7 @@ class HarryPotterCorpus(CorpusBase):
     def __init__(
             self,
             path: str,
-            include_meg: bool = True,
+            meg_subjects: Optional[Sequence[str]] = None,
             meg_kind: str = 'pca',
             separate_meg_axes: Optional[Union[str, Sequence[str]]] = None,
             group_meg_sentences_like_fmri: bool = False,
@@ -61,7 +61,8 @@ class HarryPotterCorpus(CorpusBase):
         Loader for Harry Potter data
         Args:
             path: The path to the directory where the data is stored
-            include_meg: Whether to load the MEG data
+            meg_subjects: Which subjects' data to load for MEG. None will cause all subjects' data to load. An
+                empty list can be provided to cause MEG loading to be skipped.
             meg_kind: One of ('pca_label', 'mean_label', 'pca_sensor')
                 pca_label is source localized and uses the pca within an ROI label for the label with
                     100ms slices of time
@@ -104,7 +105,7 @@ class HarryPotterCorpus(CorpusBase):
         """
         self.path = path
         self.fmri_subjects = fmri_subjects
-        self.include_meg = include_meg
+        self.meg_subjects = meg_subjects
         self.meg_kind = meg_kind
         self.separate_meg_axes = separate_meg_axes
         self.group_meg_sentences_like_fmri = group_meg_sentences_like_fmri
@@ -125,7 +126,7 @@ class HarryPotterCorpus(CorpusBase):
         run_at_unique_id = list()
 
         fmri_examples = None
-        if ((self.include_meg and self.group_meg_sentences_like_fmri)
+        if (((self.meg_subjects is None or len(self.meg_subjects) > 0) and self.group_meg_sentences_like_fmri)
                 or self.fmri_subjects is None  # None means all subjects
                 or len(self.fmri_subjects)) > 0:
             fmri_examples = self._compute_examples_for_fmri()
@@ -143,7 +144,7 @@ class HarryPotterCorpus(CorpusBase):
                 assert(features.unique_id == len(run_at_unique_id))
                 run_at_unique_id.append(example.words[0].run)
         meg_examples = None
-        if self.include_meg:
+        if self.meg_subjects is None or len(self.meg_subjects) > 0:
             if not self.group_meg_sentences_like_fmri:
                 # add all of the sentences first to guarantee consistent example ids
                 sentences, _ = self._harry_potter_fmri_word_info(HarryPotterCorpus.static_run_lengths)
@@ -172,13 +173,14 @@ class HarryPotterCorpus(CorpusBase):
 
         metadata = dict(fmri_runs=run_at_unique_id)
 
-        if self.include_meg:
+        if self.meg_subjects is None or len(self.meg_subjects) > 0:
             meg, block_metadata = self._read_meg(example_manager, meg_examples)
             for k in meg:
                 data[k] = KindData(ResponseKind.hp_meg, meg[k])
-            metadata['meg_blocks'] = block_metadata
+            if block_metadata is not None:
+                metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri = self._read_fmri(example_manager, fmri_examples)
+            fmri, good_regions = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
                 data[k] = KindData(ResponseKind.hp_fmri, fmri[k])
 
@@ -206,7 +208,9 @@ class HarryPotterCorpus(CorpusBase):
             'pca_label': 'harry_potter_meg_100ms_pca.npz',
             'mean_label': 'harry_potter_meg_100ms_mean_flip.npz',
             'pca_sensor': 'harry_potter_meg_sensor_pca_35_word_mean.npz',
-            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz'
+            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz',
+            'ica_sensor_full': 'harry_potter_meg_sensor_ica_35_word_full.npz',
+            'leila': 'harry_potter_meg_sensor_25ms_leila.npz'
         }
 
         if self.meg_kind not in file_names:
@@ -214,7 +218,7 @@ class HarryPotterCorpus(CorpusBase):
 
         meg_path = os.path.join(self.path, file_names[self.meg_kind])
 
-        loaded = np.load(meg_path)
+        loaded = np.load(meg_path, allow_pickle=True)
 
         stimuli = loaded['stimuli']
 
@@ -222,17 +226,28 @@ class HarryPotterCorpus(CorpusBase):
         stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
 
         # blocks should be int, but is stored as float
-        blocks = loaded['blocks']
-        blocks = np.round(blocks).astype(np.int64)
+        blocks = loaded['blocks'] if 'blocks' in loaded else None
+        blocks = np.round(blocks).astype(np.int64) if blocks is not None else None
         # (subjects, words, rois, 100ms_slices)
         data = loaded['data']
         rois = loaded['rois'] if 'rois' in loaded else None
         subjects = loaded['subjects']
+
+        if self.meg_subjects is not None:
+            indicator_subjects = np.array([s in self.meg_subjects for s in subjects])
+            subjects = subjects[indicator_subjects]
+            data = data[indicator_subjects]
+
         if len(data.shape) == 4:
             if data.shape[-1] == 500:
                 data = np.reshape(data, data.shape[:-1] + (data.shape[-1] // 100, 100))
                 data = np.mean(data, axis=-1)
-            times = np.arange(data.shape[-1]) * 100
+            elif data.shape[-1] == 5:
+                times = np.arange(data.shape[-1]) * 100
+            elif data.shape[-1] == 20:
+                times = np.arange(data.shape[-1]) * 25
+            else:
+                times = None
         else:
             times = None
 
@@ -270,7 +285,8 @@ class HarryPotterCorpus(CorpusBase):
         not_plus = np.logical_not(indicator_plus)
         data = data[not_plus]
         stimuli = stimuli[not_plus]
-        blocks = blocks[not_plus]
+        if blocks is not None:
+            blocks = blocks[not_plus]
 
         new_indices[not_plus] = np.arange(len(data))
 
@@ -314,7 +330,7 @@ class HarryPotterCorpus(CorpusBase):
                     separated_data[k_new] = np.take(data[k], idx_time, axis=time_axis)
             data = separated_data
 
-        block_metadata = np.full(len(example_manager), -1, dtype=np.int64)
+        block_metadata = np.full(len(example_manager), -1, dtype=np.int64) if blocks is not None else None
 
         for example in examples:
             indices = np.array([w.index_in_all_words for w in example.full_sentences])
@@ -333,11 +349,10 @@ class HarryPotterCorpus(CorpusBase):
                 allow_new_examples=False)
             assert (features is not None)
 
-            example_blocks = blocks[new_indices[indices]]
-            assert(np.all(example_blocks == example_blocks[0]))
-            block_metadata[features.unique_id] = example_blocks[0]
-
-        assert(np.all(block_metadata) >= 0)
+            if blocks is not None:
+                example_blocks = blocks[new_indices[indices]]
+                assert(np.all(example_blocks == example_blocks[0]))
+                block_metadata[features.unique_id] = example_blocks[0]
 
         return data, block_metadata
 
@@ -382,20 +397,25 @@ class HarryPotterCorpus(CorpusBase):
                 data = nibabel.load(functional_file).get_data()
                 subject_data.append(np.transpose(data))
 
-            masks[subject] = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+            masks[subject] = get_mask_for_subject(subject)
             all_subject_data[subject] = subject_data
             if subject in good_region_args:
                 good_indices, _, _ = get_indices_from_normalized_coordinates(subject, **good_region_args[subject])
-                good_regions[subject] = good_indices
+                temp_mask = np.full_like(masks[subject], False)
+                temp_mask = np.reshape(temp_mask, -1)
+                temp_mask[good_indices] = True
+                # mask the good_indices mask, so we can compute the indices within the mask
+                temp_mask = temp_mask[np.reshape(masks[subject], -1)]
+                good_regions[subject] = np.where(temp_mask)[0]
 
         return all_subject_data, masks, good_regions
 
     def _harry_potter_fmri_word_info(self, run_lengths):
 
         time_images = np.arange(1351) * 2
-        words = np.load(os.path.join(self.path, 'words_fmri.npy'))
+        words = np.load(os.path.join(self.path, 'words_fmri.npy'), allow_pickle=True)
         words = [w.item() for w in words]
-        time_words = np.load(os.path.join(self.path, 'time_words_fmri.npy'))
+        time_words = np.load(os.path.join(self.path, 'time_words_fmri.npy'), allow_pickle=True)
         assert (len(words) == len(time_words))
 
         # searchsorted returns first location such that time_words[i] < time_images[word_images[i]]
@@ -511,8 +531,8 @@ class HarryPotterCorpus(CorpusBase):
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
             masked_data['hp_fmri_{}'.format(subject)] = np.expand_dims(subject_data, axis=1)
             if subject in good_regions:
-                masked_data['hp_fmri_good_{}'.format(subject)] = np.expand_dims(
-                    subject_data[:, good_regions[subject]], axis=1)
+                good_regions['hp_fmri_{}'.format(subject)] = good_regions[subject]
+                del good_regions[subject]
         data = masked_data
 
         for example in fmri_examples:
@@ -536,7 +556,7 @@ class HarryPotterCorpus(CorpusBase):
                 allow_new_examples=False)
             assert(features is not None)
 
-        return data
+        return data, good_regions
 
 
 def read_harry_potter_story_features(path):
@@ -638,9 +658,15 @@ def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=
     return train_examples, validation_examples, test_examples
 
 
+def get_mask_for_subject(subject):
+    if subject in ['H', 'L', 'K']:
+        return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars_auto2'.format(subject), 'thick')
+    return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+
+
 def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, distance=None):
 
-    mask = cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+    mask = get_mask_for_subject(subject)
 
     max_z, max_y, max_x = mask.shape
 

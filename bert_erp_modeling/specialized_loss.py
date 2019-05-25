@@ -24,6 +24,7 @@ __all__ = [
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
     'NamedTargetSingleMSE',
     'NamedTargetSingleKLeastSE',
+    'NamedTargetSinglePearsonDistance',
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
     'NamedTargetSingleCrossEntropy',
     'NamedTargetSingleSoftLabelCrossEntropy',
@@ -98,18 +99,21 @@ def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
 
     # min_value is an epsilon to avoid divide-by-zero, and to prevent sqrt from blowing up numerically
     min_value = torch.zeros((), dtype=var_predictions.dtype, device=var_predictions.device) + 1e-8
-    var_predictions = torch.max(var_predictions, min_value)
-    var_target = torch.max(var_target, min_value)
+    safe_var_predictions = torch.max(var_predictions, min_value)
+    safe_var_target = torch.max(var_target, min_value)
 
     # scale by the std
-    predictions = predictions / torch.sqrt(var_predictions)
-    target = target / torch.sqrt(var_target)
+    predictions = predictions / torch.sqrt(safe_var_predictions)
+    target = target / torch.sqrt(safe_var_target)
 
     # now r is straightforward to compute
     r = (predictions * target).sum(dim=sequence_axis, keepdim=True) / (valid_counts_per_example - 1)
 
     # convert to distance
     distance = 1 - r
+
+    # final masking to get rid of numerically unstable values
+    distance = _values_or_zeros(indicator_valid_example, distance)
 
     return distance, valid_count, var_predictions, var_target, mean_predictions, mean_target
 
@@ -197,9 +201,6 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
 
 def k_least_squared_error(
         is_eval, is_sequence, k, mask, predictions, target, accumulator, active_mask, moving_average_decay):
-
-    if is_eval:
-        print(k)
 
     if is_sequence:
         flat_shape = (target.size()[0] * target.size()[1], -1)
@@ -305,7 +306,8 @@ class _NamedTargetMaskedLoss:
             loss = result
         if isinstance(loss, str):
             assert(loss == 'no_valid_inputs')
-        loss = self.weight * loss
+        else:
+            loss = self.weight * loss
         if is_tuple:
             return (loss,) + result[1:]
         return loss
@@ -324,6 +326,7 @@ class _NamedTargetMaskedLoss:
 
         predictions = prediction_dict[self.field]
         target = batch[self.field]
+        target = target.to(predictions.device)
         mask = self._get_mask(is_eval, epoch, global_step, batch, predictions, target)
 
         try:
@@ -380,11 +383,13 @@ class _NamedTargetMaskedLoss:
                 if example_indices is not None:
                     idx = example_indices[idx]
 
-                data_set_id = batch['data_set_id'][idx] if 'data_set_id' in batch else None
-                unique_id = batch['unique_id'][idx] if 'unique_id' in batch else None
+                data_set_id = batch['data_set_id'].detach().cpu().numpy()[idx] \
+                    if 'data_set_id' in batch else None
+                unique_id = batch['unique_id'].detach().cpu().numpy()[idx] \
+                    if 'unique_id' in batch else None
                 detailed_result.append(
                     DetailedResult(
-                        mask=np.squeeze(example_mask, axis=0) == 1,  # convert to bool
+                        mask=np.abs(np.squeeze(example_mask, axis=0) - 1) < 1e-4,  # convert to bool
                         prediction=np.squeeze(example_predictions, axis=0),
                         target=np.squeeze(example_targets, axis=0),
                         sequence_type=sequence_type,
@@ -415,7 +420,8 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
 
     def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
         return stop_word_and_target_not_nan_mask(
-            self.keep_content, target, batch['is_stop'], batch['is_begin_word_pieces'])
+            self.keep_content,
+            target, batch['is_stop'].to(target.device), batch['is_begin_word_pieces'].to(target.device))
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
@@ -452,13 +458,14 @@ class NamedTargetStopWordAwareKLeastSE(_NamedTargetStopWordAwareLoss):
 
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
 
-    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1.):
+    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1., axis=1):
         super().__init__(field, keep_content, weight)
         self.should_penalize_scale = should_penalize_scale
+        self.axis = axis
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
-            mask, predictions, target)
+            mask, predictions, target, sequence_axis=self.axis)
         loss = distance
         if self.should_penalize_scale:
             loss = loss + (var_input - var_target) ** 2
@@ -512,7 +519,7 @@ class KLeastSEHalvingEpochs:
             return num_features
         epoch = max(0, epoch - self.delay_in_epochs)
         k = int(np.round(np.power(2., -epoch / self.half_life_in_epochs) * num_features))
-        return max(k, self.minimum_k)
+        return max(k, min(self.minimum_k, num_features))
 
 
 class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):
@@ -532,6 +539,22 @@ class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):
             accumulator=self._accumulator, active_mask=self._active_mask,
             moving_average_decay=self.moving_average_decay)
         return result
+
+
+class NamedTargetSinglePearsonDistance(_NamedTargetMaskedLoss):
+
+    def __init__(self, field, should_penalize_scale=False, weight=1., axis=0):
+        super().__init__(field, weight)
+        self.should_penalize_scale = should_penalize_scale
+        self.axis = axis
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
+            mask, predictions, target, sequence_axis=self.axis)
+        loss = distance
+        if self.should_penalize_scale:
+            loss = loss + (var_input - var_target) ** 2
+        return loss, valid_count
 
 
 class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
@@ -577,6 +600,7 @@ class CriticMapping:
         metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
     single_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMSE))
     single_k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastSE))
+    single_pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSinglePearsonDistance))
     single_cross_entropy: Any = dataclasses.field(
         metadata=dict(hidden_value=NamedTargetSingleCrossEntropy))
     single_binary_cross_entropy: Any = dataclasses.field(

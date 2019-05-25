@@ -103,7 +103,7 @@ def write_predictions(output_path, all_results, data_set, settings):
 
 
 def read_predictions(output_path):
-    npz = np.load(output_path)
+    npz = np.load(output_path, allow_pickle=True)
 
     keys = [k.item() for k in npz['keys']]
 
@@ -167,7 +167,7 @@ def write_loss_curve(output_path, task_results):
 
 
 def read_loss_curve(output_path):
-    npz = np.load(output_path)
+    npz = np.load(output_path, allow_pickle=True)
     keys = npz['__keys__']
     result = OrderedDict()
     for key in keys:

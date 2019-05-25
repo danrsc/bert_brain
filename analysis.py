@@ -4,13 +4,16 @@ from functools import partial
 from collections import OrderedDict
 import dataclasses
 from typing import Tuple, Optional
+from tqdm import trange
 import inspect
 import fnmatch
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 from scipy.misc import logsumexp
 
 from run_variations import task_hash, named_variations
+from bert_erp_settings import TrainingVariation
 from bert_erp_modeling import CriticMapping
 from result_output import read_predictions, read_loss_curve
 from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
@@ -100,43 +103,84 @@ class Aggregator:
         return self._counts[name]
 
 
-def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
-                           compute_scalar=True, **loss_handler_kwargs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
-    aggregated = dict()
+def _read_variation_parallel_helper(item):
+    (result_path, variation_set_name, variation_hash, index_run, aux_loss,
+     compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) = item
+    training_variations, _, _, _, _ = named_variations(variation_set_name)
+    training_variation = None
+    for v in training_variations:
+        if task_hash(v) == variation_hash:
+            training_variation = v
+            break
+    if training_variation is None:
+        raise RuntimeError('Bad variation hash')
+    output_dir = os.path.join(result_path, variation_set_name, variation_hash)
+    validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+    if not os.path.exists(validation_npz_path):
+        return index_run, None
+    output_results_by_name = read_predictions(validation_npz_path)
+    run_aggregated = dict()
     losses = dict()
-    count_runs = 0
+    for name in output_results_by_name:
+        if isinstance(training_variation, TrainingVariation):
+            in_training_variation = name in training_variation.loss_tasks
+        else:
+            in_training_variation = name in training_variation
+        if not in_training_variation and name not in aux_loss:
+            continue
+        output_results = output_results_by_name[name]
+        for output_result in output_results:
+            if name not in run_aggregated:
+                run_aggregated[name] = Aggregator()
+            if name not in losses:
+                losses[name] = output_result.critic_type
+            else:
+                assert (losses[name] == output_result.critic_type)
+            run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
+    run_results = dict()
+    for name in run_aggregated:
+        loss_handler_kwargs = dict(loss_handler_kwargs)
+        if isinstance(k_vs_k_feature_axes, dict):
+            if name in k_vs_k_feature_axes:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes[name]
+            else:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = -1
+        else:
+            loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
+        handler = make_prediction_handler(losses[name], loss_handler_kwargs)
+        result_dict = handler(run_aggregated[name])
+        if compute_scalar:
+            with warnings.catch_warnings():
+                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+        run_results[name] = result_dict
+    return index_run, run_results
+
+
+def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
+                           compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
+
+    task_arguments = [(paths.result_path, variation_set_name, task_hash(training_variation), i,
+                       aux_loss, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(num_runs)]
+
+    with ThreadPoolExecutor() as ex:
+        mapped = ex.map(_read_variation_parallel_helper, task_arguments)
+    # mapped = map(_read_variation_parallel_helper, task_arguments)
+
     has_warned = False
-    for index_run in range(num_runs):
-        run_aggregated = dict()
-        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
-        if not os.path.exists(validation_npz_path):
+    count_runs = 0
+    aggregated = dict()
+    for index_run, run_results in mapped:
+        if run_results is None:
             if not has_warned:
                 print('Warning: results incomplete. Some output files not found')
             has_warned = True
             continue
+
         count_runs += 1
-        output_results_by_name = read_predictions(validation_npz_path)
-        for name in output_results_by_name:
-            if name not in training_variation and name not in aux_loss:
-                continue
-            output_results = output_results_by_name[name]
-            for output_result in output_results:
-                if name not in run_aggregated:
-                    run_aggregated[name] = Aggregator()
-                if name not in losses:
-                    losses[name] = output_result.critic_type
-                else:
-                    assert (losses[name] == output_result.critic_type)
-                run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
-        for name in run_aggregated:
-            handler = make_prediction_handler(losses[name], loss_handler_kwargs)
-            result_dict = handler(run_aggregated[name])
-            if compute_scalar:
-                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+        for name in run_results:
             if name not in aggregated:
                 aggregated[name] = Aggregator()
-            aggregated[name].update(result_dict, is_sequence=False)
+            aggregated[name].update(run_results[name], is_sequence=False)
 
     return aggregated, count_runs
 
@@ -212,14 +256,18 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
             text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
 
-    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, ', '.join(sorted(training_variation))))
+    if isinstance(training_variation, TrainingVariation):
+        training_variation_name = str(training_variation)
+    else:
+        training_variation_name = ', '.join(sorted(training_variation))
+    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, training_variation_name))
     write_text_grid_to_console(text_grid, width='tight')
     print('')
     print('')
 
 
 def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation)))
+    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
     result = dict()
     has_warned = False
     for index_run in range(num_runs):
@@ -229,7 +277,7 @@ def sentence_predictions(paths, variation_set_name, training_variation, aux_loss
                 print('warning: results are incomplete. Some runs not found')
             has_warned = True
             continue
-        output_results = np.load(validation_npz_path)
+        output_results = np.load(validation_npz_path, allow_pickle=True)
         for output_result in output_results:
             name = output_result.name
             if name not in training_variation and name not in aux_loss:
@@ -280,7 +328,7 @@ def nan_pearson(x, y, axis=0, keepdims=False):
     return result
 
 
-def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20):
+def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1):
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
@@ -293,11 +341,14 @@ def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20)
     if np.any(target_counts > 1):
         splits = np.cumsum(target_counts)[:-1]
 
-    return regression_handler(predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, splits, is_single_example=False)
+    return regression_handler(
+        predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, k_vs_k_feature_axes, splits, is_single_example=False)
 
 
 def regression_handler(
-        predictions, target, mask, k_vs_k_num_samples=0, k_vs_k_k=20, splits=None, is_single_example=False):
+        predictions, target, mask,
+        k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1,
+        splits=None, is_single_example=False):
 
     if is_single_example and len(target) > 1:
         seq_r = nan_pearson(predictions, target)
@@ -337,7 +388,8 @@ def regression_handler(
             raise ValueError('For k_vs_k, the mask must be the same for all features')
         k_vs_k_mask = k_vs_k_mask[:, 0]
         accuracy = k_vs_k(
-            predictions[k_vs_k_mask], target[k_vs_k_mask], k=k_vs_k_k, num_samples=k_vs_k_num_samples)
+            predictions[k_vs_k_mask], target[k_vs_k_mask], k=k_vs_k_k, num_samples=k_vs_k_num_samples,
+            feature_axes=k_vs_k_feature_axes)
         result['{0}_vs_{0}'.format(k_vs_k_k)] = np.mean(accuracy, axis=0)
 
     return result
@@ -522,6 +574,7 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
     soft_label_cross_entropy=aggregator_class_handler,
     single_mse=aggregator_regression_handler,
     single_k_least_se=aggregator_regression_handler,
+    single_pearson=aggregator_regression_handler,
     single_cross_entropy=aggregator_class_handler,
     single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=aggregator_class_handler), dict_factory=OrderedDict)
@@ -536,6 +589,7 @@ _no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
     soft_label_cross_entropy=class_handler,
     single_mse=regression_handler,
     single_k_least_se=regression_handler,
+    single_pearson=regression_handler,
     single_cross_entropy=class_handler,
     single_binary_cross_entropy=(class_handler, dict(is_binary=True)),
     single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
@@ -557,7 +611,7 @@ def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True)
     return partial(factory, **loss_kwargs)
 
 
-def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
+def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None, feature_axes=-1):
     """
     Estimates how accurate a classifier would be if the classifier chose between
     1) the concatenated predictions of (e.g.) brain activity for the k examples corresponding to the true k examples
@@ -578,22 +632,38 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
             concatenated vector where word i is. Letting distractor_word_indices be the set of indices used in the
             distractor, and true_word_indices be the indices used in the true k examples, then:
             pair_examples[true_word_indices[j]] == pair_examples[distractor_word_indices[j]]
+        feature_axes: An int or tuple indicating which axes to compute accuracy for. Axes which are neither the example
+            axis (axis 0) or feature_axes will be used to make joint predictions.
 
     Returns:
-        An accuracy array of shape (num_samples, features)
+        An accuracy array of shape
+        (num_samples, predictions.shape[feature_axis_0], predictions.shape[feature_axis_1], ...)
     """
 
     if not np.array_equal(predictions.shape, target.shape):
         raise ValueError('predictions and target must have the same shape')
 
-    value_shape = predictions.shape[1:]
-    predictions = np.reshape(predictions, (predictions.shape[0], -1))
-    target = np.reshape(target, (target.shape[0], -1))
+    if np.isscalar(feature_axes):
+        feature_axes = [feature_axes]
+    feature_axes = list(sorted([f if f > 0 else len(predictions.shape) + f for f in feature_axes]))
+    transpose_axes = [i for i in range(len(predictions.shape)) if i not in feature_axes] + feature_axes
+    if np.array_equal(transpose_axes, np.arange(len(predictions.shape))):
+        transpose_axes = None
+    if transpose_axes is not None:
+        predictions = np.transpose(predictions, transpose_axes)
+        target = np.transpose(target, transpose_axes)
+
+    value_shape = predictions.shape[-len(feature_axes):]
+
+    predictions = np.reshape(
+        predictions, (predictions.shape[0], int(np.prod(predictions.shape[1:-len(feature_axes)])), -1,))
+    target = np.reshape(
+        target, (target.shape[0], int(np.prod(target.shape[1:-len(feature_axes)])), -1))
 
     # predictions, target data with the same shape: (words, ..., features)
     # k = how many words to classify at once
     # num_samples = how many words to classify
-    accuracy = np.full((num_samples, target.shape[1]), np.nan)
+    accuracy = np.full((num_samples, target.shape[-1]), np.nan)
 
     if pair_examples is not None and len(pair_examples) > 0:
         if len(pair_examples) != len(predictions):
@@ -612,10 +682,17 @@ def k_vs_k(predictions, target, k=20, num_samples=1000, pair_examples=None):
             indices_distractor = np.random.choice(len(target), k)
         sample_predictions_incorrect = predictions[indices_distractor]
 
+        sample_target = np.reshape(sample_target, (-1, sample_target.shape[-1]))
+        sample_predictions_correct = np.reshape(
+            sample_predictions_correct, (-1, sample_predictions_correct.shape[-1]))
+        sample_predictions_incorrect = np.reshape(
+            sample_predictions_incorrect, (-1, sample_predictions_incorrect.shape[-1]))
+
         distance_correct = np.sum((sample_target - sample_predictions_correct) ** 2, axis=0)
         distance_incorrect = np.sum((sample_target - sample_predictions_incorrect) ** 2, axis=0)
         accuracy[index_sample] = \
             (distance_correct < distance_incorrect) * 1.0 + (distance_correct == distance_incorrect) * 0.5
+
     return np.reshape(accuracy, (accuracy.shape[0],) + value_shape)
 
 
@@ -679,7 +756,7 @@ def loss_curves_for_variation(paths, variation_set_name):
 
     def read_curve(kind, training_variation_, index_run_):
         file_name = 'train_curve.npz' if kind == 'train' else 'validation_curve.npz'
-        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(set(training_variation_)))
+        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation_))
         curve_path = os.path.join(output_dir, 'run_{}'.format(index_run_), file_name)
         result_ = list()
         if os.path.exists(curve_path):
@@ -698,31 +775,116 @@ def loss_curves_for_variation(paths, variation_set_name):
     return result
 
 
+def remove_prefix(prefix, x):
+    if x.startswith(prefix):
+        return x[len(prefix):]
+    return x
+
+
+def remove_hp_fmri_prefix(x):
+    return remove_prefix('hp_fmri_', x)
+
+
 @dataclasses.dataclass
 class ResultQuery:
-    variant_set_name: str
+    variation_set_name: str
     metric: str
     key: str
     training_variation: Optional[str] = None
     second_variation_set_name: Optional[str] = None
     second_training_variation: Optional[str] = None
 
+    def as_dict_with_combined_second(self, sep=':', key_shorten_fn=None):
+        result = dataclasses.asdict(self, dict_factory=OrderedDict)
+        if key_shorten_fn is not None:
+            result['key'] = key_shorten_fn(result['key'])
+            result['training_variation'] = tuple(key_shorten_fn(x) for x in result['training_variation'])
+            if result['second_training_variation'] is not None:
+                result['second_training_variation'] = tuple(
+                    key_shorten_fn(x) for x in result['second_training_variation'])
+        result['combined_variation_set_name'] = result['variation_set_name']
+        result['combined_training_variation'] = result['training_variation']
+        if self.second_variation_set_name is not None and self.second_variation_set_name != self.variation_set_name:
+            result['combined_variation_set_name'] = \
+                result['variation_set_name'] + sep + result['second_variation_set_name']
+        if self.second_variation_set_name is not None and self.second_training_variation != self.training_variation:
+            result['combined_training_variation'] = \
+                str(result['training_variation']) + sep + str(result['second_training_variation'])
+        return result
+
+
+def is_metric_k_vs_k(metric):
+    split_metric = metric.split('_')
+    if len(split_metric) == 3 and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+        return True
+
+
+def _run_query(item):
+    paths, variation_set_name, variation_hash, needs_k_vs_k, compute_scalar, loss_handler_kwargs = item
+    variations, _, num_runs, _, aux_loss = named_variations(variation_set_name)
+    variation = None
+    for v in variations:
+        if task_hash(v) == variation_hash:
+            variation = v
+            break
+    if variation is None:
+        raise RuntimeError('Bad hash: unable to find match')
+    current_loss_handler_kwargs = loss_handler_kwargs
+    if needs_k_vs_k:
+        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
+            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
+            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
+    query_key = variation_set_name, variation_hash
+    result = read_variation_results(
+        paths, variation_set_name, variation, aux_loss, num_runs, compute_scalar=compute_scalar,
+        **current_loss_handler_kwargs)
+    return query_key, result
+
 
 def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
-    cache = dict()
-    result = list()
+    needs_k_vs_k = set()
+    query_set = set()
     for result_query in result_queries:
         training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
-        query_training_variation = set(result_query.training_variation) \
+        query_training_variation_hash = task_hash(result_query.training_variation) \
             if result_query.training_variation is not None else None
         for training_variation in training_variations:
-            training_variation = set(training_variation)
-            if query_training_variation is None or query_training_variation == training_variation:
-                cache_key = result_query.variation_set_name, training_variation
-                if cache_key not in cache:
-                    cache[cache_key] = read_variation_results(
-                        paths, result_query.variation_set_name, training_variation, aux_loss, num_runs,
-                        compute_scalar=compute_scalar, **loss_handler_kwargs)
+            training_variation_hash = task_hash(training_variation)
+            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
+                result_key = result_query.variation_set_name, training_variation_hash
+                query_set.add(result_key)
+                if result_query.metric == 'k_vs_k':
+                    needs_k_vs_k.add(result_key)
+                if result_query.second_variation_set_name is not None:
+                    second_variation = result_query.second_training_variation \
+                        if result_query.second_training_variation is not None else training_variation
+                    second_key = result_query.second_variation_set_name, task_hash(second_variation)
+                    query_set.add(second_key)
+                    if result_query.metric == 'k_vs_k':
+                        needs_k_vs_k.add(second_key)
+
+    query_items = list()
+    for query_key in query_set:
+        variation_set_name, variation_hash = query_key
+        query_items.append(
+            (paths, variation_set_name, variation_hash, query_key in needs_k_vs_k, compute_scalar, loss_handler_kwargs))
+
+    cache = dict()
+    result = list()
+    with ProcessPoolExecutor() as ex:
+        query_results = ex.map(_run_query, query_items)
+    for query_key, query_result in query_results:
+        cache[query_key] = query_result
+
+    for result_query in result_queries:
+        matched = False
+        training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
+        query_training_variation_hash = task_hash(result_query.training_variation) \
+            if result_query.training_variation is not None else None
+        for training_variation in training_variations:
+            training_variation_hash = task_hash(training_variation)
+            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
+                cache_key = result_query.variation_set_name, training_variation_hash
                 aggregated, count_runs = cache[cache_key]
                 for aggregated_key in aggregated:
                     if fnmatch.fnmatch(aggregated_key, result_query.key):
@@ -730,9 +892,7 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                         if result_query.metric == 'k_vs_k':
                             values = None
                             for metric in aggregated[result_query.key]:
-                                split_metric = metric.split('_')
-                                if len(split_metric) == 3 \
-                                        and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                                if is_metric_k_vs_k(metric):
                                     values = aggregated[result_query.key].values(metric)
                                     break
                             if values is None:
@@ -741,7 +901,10 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
                             values = aggregated[result_query.key].values(result_query.metric)
                         if result_query.training_variation is None:
                             result_query = dataclasses.replace(result_query, training_variation=training_variation)
-                        result.append((result_query, values))
+                        matched = True
+                        result.append((result_query, np.asarray(values)))
+        if not matched:
+            raise ValueError('No match for query: {}'.format(result_query))
     for idx_result in range(len(result)):
         if result[idx_result][0].second_variation_set_name is not None:
             result_query, first_values = result[idx_result]
@@ -749,27 +912,379 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
             if result_query.second_training_variation is None:
                 result_query = dataclasses.replace(
                     result_query, second_training_variation=result_query.training_variation)
-            query_training_variation = set(result_query.second_training_variation)
+            query_training_variation_hash = task_hash(result_query.second_training_variation)
             for training_variation in training_variations:
-                if query_training_variation == training_variation:
-                    cache_key = result_query.second_variation_set_name, training_variation
-                    if cache_key not in cache:
-                        cache[cache_key] = read_variation_results(
-                            paths, result_query.second_variation_set_name, training_variation, aux_loss, num_runs,
-                            compute_scalar=compute_scalar, **loss_handler_kwargs)
+                training_variation_hash = task_hash(training_variation)
+                if query_training_variation_hash == training_variation_hash:
+                    cache_key = result_query.second_variation_set_name, training_variation_hash
                     aggregated, count_runs = cache[cache_key]
                     if result_query.metric == 'k_vs_k':
                         second_values = None
                         for metric in aggregated[result_query.key]:
-                            split_metric = metric.split('_')
-                            if len(split_metric) == 3 \
-                                    and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
+                            if is_metric_k_vs_k(metric):
                                 second_values = aggregated[result_query.key].values(metric)
                                 break
                         if second_values is None:
                             raise ValueError('k_vs_k not found')
                     else:
                         second_values = aggregated[result_query.key].values(result_query.metric)
-                    result[idx_result] = (result_query, first_values, second_values)
+                    result[idx_result] = (result_query, first_values, np.asarray(second_values))
                     break  # break out of looping over training variations
+            if len(result[idx_result]) == 2:
+                raise ValueError('No match for query: {}'.format(result_query))
     return result
+
+
+def data_combine_subtract(x, y):
+    return x - y
+
+
+def default_filter_combine(result_query, x, y):
+    if result_query.metric == 'pove':
+        return np.logical_or(x >= 0.05, y >= 0.05)
+    elif result_query.metric == 'k_vs_k':
+        return np.logical_or(x >= 0.5, y >= 0.5)
+    else:
+        return np.full(x.shape, True)
+
+
+def print_min_max(
+        result_queries,
+        key_format='{combined_variation_set_name}, {combined_training_variation}, {key}, {metric}',
+        data_combine_fn=data_combine_subtract,
+        filter_combine_fn=default_filter_combine,
+        key_shorten_fn=None):
+    for result in result_queries:
+        if len(result) == 3:
+            result_query, data_1, data_2 = result
+            data = data_combine_fn(data_1, data_2)
+            if filter_combine_fn is not None:
+                data = np.where(filter_combine_fn(result_query, data_1, data_2), data, np.nan)
+        else:
+            result_query, data = result
+        vmin, vmax = np.nanmin(data), np.nanmax(data)
+        print('{key}, min: {vmin}, max: {vmax}'.format(
+            key=key_format.format(
+                **result_query.as_dict_with_combined_second(key_shorten_fn=key_shorten_fn)), vmin=vmin, vmax=vmax))
+
+
+def min_max_default_group_key_fn(result):
+    if len(result) == 3:
+        return result[0].metric, 'combined'
+    return result[0].metric
+
+
+def min_max_per_group(
+        result_queries,
+        group_key_fn=min_max_default_group_key_fn,
+        data_combine_fn=data_combine_subtract,
+        filter_combine_fn=default_filter_combine,
+        percentile_min=None,
+        percentile_max=None):
+    vmin_vmax = dict()
+    for result in result_queries:
+        key = group_key_fn(result)
+        if len(result) == 3:
+            result_query, data_1, data_2 = result
+            data = data_combine_fn(data_1, data_2)
+            if filter_combine_fn is not None:
+                data = np.where(filter_combine_fn(result_query, data_1, data_2), data, np.nan)
+        else:
+            result_query, data = result
+        if percentile_min is not None:
+            vmin = np.nanpercentile(data, percentile_min, interpolation='higher').item()
+        else:
+            vmin = np.nanmin(data).item()
+        if percentile_max is not None:
+            vmax = np.nanpercentile(data, percentile_max, interpolation='lower').item()
+        else:
+            vmax = np.nanmax(data).item()
+        if key not in vmin_vmax:
+            vmin_vmax[key] = list(), list()
+        vmin_vmax[key][0].append(vmin)
+        vmin_vmax[key][1].append(vmax)
+    return vmin_vmax
+
+
+def one_sample_permutation_test(
+        sample_predictions,
+        sample_target,
+        value_fn,
+        num_contiguous_examples=10,
+        num_permutation_samples=1000,
+        unique_ids=None,
+        side='both'):
+
+    if side not in ['both', 'less', 'greater']:
+        raise ValueError('side must be one of: \'both\', \'less\', \'greater\'')
+
+    def _sort(predictions, targets, ids):
+        if ids is None:
+            return predictions, targets, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return predictions[sort_order], targets[sort_order], ids[sort_order]
+
+    sample_predictions, sample_target, unique_ids = _sort(sample_predictions, sample_target, unique_ids)
+
+    keep_length = int(np.ceil(len(sample_predictions) / num_contiguous_examples)) * num_contiguous_examples
+    sample_predictions = sample_predictions[:keep_length]
+    sample_target = sample_target[:keep_length]
+    true_values = value_fn(sample_predictions, sample_target)
+    abs_true_values = np.abs(true_values) if side == 'both' else None
+
+    sample_target = np.reshape(
+        sample_target,
+        (sample_target.shape[0] // num_contiguous_examples, num_contiguous_examples) + sample_target.shape[1:])
+
+    count_as_extreme = np.zeros(abs_true_values.shape, np.int64)
+    for _ in trange(num_permutation_samples, desc='Permutation'):
+        indices_target = np.random.permutation(len(sample_target))
+        permuted_target = np.reshape(
+            sample_target[indices_target], (sample_predictions.shape[0],) + sample_target.shape[2:])
+        permuted_values = value_fn(sample_predictions, permuted_target)
+        if side == 'less':
+            as_extreme = np.where(np.less_equal(permuted_values, true_values), 1, 0)
+        elif side == 'greater':
+            as_extreme = np.where(np.greater_equal(permuted_values, true_values), 1, 0)
+        else:
+            assert(side == 'both')
+            as_extreme = np.where(np.greater_equal(permuted_values, abs_true_values), 1, 0)
+        count_as_extreme += as_extreme
+
+    p_values = count_as_extreme / num_permutation_samples
+    return p_values, true_values
+
+
+def two_sample_permutation_test(
+        sample_a_values,
+        sample_b_values,
+        num_contiguous_examples=10,
+        num_permutation_samples=1000,
+        unique_ids_a=None,
+        unique_ids_b=None):
+
+    def _sort(values, ids):
+        if ids is None:
+            return values, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return values[sort_order], ids[sort_order]
+
+    sample_a_values, unique_ids_a = _sort(sample_a_values, unique_ids_a)
+    sample_b_values, unique_ids_b = _sort(sample_b_values, unique_ids_b)
+
+    if unique_ids_a is not None and unique_ids_b is not None:
+        if not np.array_equal(unique_ids_a, unique_ids_b):
+            raise ValueError('Ids do not match between unique_ids_a and unique_ids_b')
+
+    def _contiguous_values(s):
+        fill_length = int(np.ceil(len(s) / num_contiguous_examples)) * num_contiguous_examples
+        temp = np.full((fill_length,) + s.shape[1:], np.nan)
+        temp[:len(s)] = s
+        temp = np.reshape(temp, (len(temp) // num_contiguous_examples, num_contiguous_examples) + temp.shape[1:])
+        return np.nanmean(temp, axis=1)
+
+    sample_a_values = _contiguous_values(sample_a_values)
+    sample_b_values = _contiguous_values(sample_b_values)
+
+    true_difference = np.mean(sample_a_values - sample_b_values, axis=0)
+    abs_true_difference = np.abs(true_difference)
+
+    all_values = np.concatenate([sample_a_values, sample_b_values], axis=0)
+
+    count_greater_equal = np.zeros(true_difference.shape, np.int64)
+    for _ in trange(num_permutation_samples, desc='Permutation'):
+        permuted = np.random.permutation(all_values)
+        first, second = np.split(permuted, 2)
+        permutation_difference = np.abs(np.mean(first - second, axis=0))
+        greater_equal = np.where(np.greater_equal(permutation_difference, abs_true_difference), 1, 0)
+        count_greater_equal += greater_equal
+    p_values = count_greater_equal / num_permutation_samples
+    return p_values, true_difference
+
+
+def sample_differences(
+        sample_a_values,
+        sample_b_values,
+        num_contiguous_examples=10,
+        unique_ids_a=None,
+        unique_ids_b=None):
+
+    def _sort(values, ids):
+        if ids is None:
+            return values, ids
+        ids = np.asarray(ids)
+        sort_order = np.argsort(ids)
+        return values[sort_order], ids[sort_order]
+
+    sample_a_values, unique_ids_a = _sort(sample_a_values, unique_ids_a)
+    sample_b_values, unique_ids_b = _sort(sample_b_values, unique_ids_b)
+
+    if unique_ids_a is not None and unique_ids_b is not None:
+        if not np.array_equal(unique_ids_a, unique_ids_b):
+            raise ValueError('Ids do not match between unique_ids_a and unique_ids_b')
+
+    def _contiguous_values(s):
+        fill_length = int(np.ceil(len(s) / num_contiguous_examples)) * num_contiguous_examples
+        temp = np.full((fill_length,) + s.shape[1:], np.nan)
+        temp[:len(s)] = s
+        temp = np.reshape(temp, (len(temp) // num_contiguous_examples, num_contiguous_examples) + temp.shape[1:])
+        return np.nanmean(temp, axis=1)
+
+    sample_a_values = _contiguous_values(sample_a_values)
+    sample_b_values = _contiguous_values(sample_b_values)
+
+    return sample_a_values - sample_b_values
+
+
+def wilcoxon_axis(x, y=None, zero_method="wilcox", correction=False):
+    # copied from scipy.stats with adjustments so we can do it along axis=0
+    from scipy.stats import distributions
+    from scipy.stats.mstats import rankdata
+    """
+    Calculate the Wilcoxon signed-rank test.
+
+    The Wilcoxon signed-rank test tests the null hypothesis that two
+    related paired samples come from the same distribution. In particular,
+    it tests whether the distribution of the differences x - y is symmetric
+    about zero. It is a non-parametric version of the paired T-test.
+
+    Parameters
+    ----------
+    x : array_like
+        The first set of measurements.
+    y : array_like, optional
+        The second set of measurements.  If `y` is not given, then the `x`
+        array is considered to be the differences between the two sets of
+        measurements.
+    zero_method : string, {"pratt", "wilcox", "zsplit"}, optional
+        "pratt":
+            Pratt treatment: includes zero-differences in the ranking process
+            (more conservative)
+        "wilcox":
+            Wilcox treatment: discards all zero-differences
+        "zsplit":
+            Zero rank split: just like Pratt, but spliting the zero rank
+            between positive and negative ones
+    correction : bool, optional
+        If True, apply continuity correction by adjusting the Wilcoxon rank
+        statistic by 0.5 towards the mean value when computing the
+        z-statistic.  Default is False.
+
+    Returns
+    -------
+    T : float
+        The sum of the ranks of the differences above or below zero, whichever
+        is smaller.
+    p-value : float
+        The two-sided p-value for the test.
+
+    Notes
+    -----
+    Because the normal approximation is used for the calculations, the
+    samples used should be large.  A typical rule is to require that
+    n > 20.
+
+    References
+    ----------
+    .. [1] http://en.wikipedia.org/wiki/Wilcoxon_signed-rank_test
+
+    """
+
+    if zero_method not in ["wilcox", "pratt", "zsplit"]:
+        raise ValueError("Zero method should be either 'wilcox' \
+                          or 'pratt' or 'zsplit'")
+
+    if y is None:
+        d = x
+    else:
+        x, y = map(np.asarray, (x, y))
+        if len(x) != len(y):
+            raise ValueError('Unequal N in wilcoxon.  Aborting.')
+        d = x-y
+
+    d_shape = d.shape
+    d = np.reshape(d, (d.shape[0], -1))
+
+    if zero_method == "wilcox":
+        d = np.where(np.not_equal(d, 0), d, np.nan)  # Keep all non-zero differences
+
+    count = np.sum(np.logical_not(np.isnan(d)), axis=0)
+    if np.any(count < 10):
+        warnings.warn("Warning: sample size too small for normal approximation.")
+    ranked = rankdata(np.ma.masked_invalid(np.abs(d[:, count > 0])), axis=0)
+    r = np.full(d.shape, np.nan, ranked.dtype)
+    r[:, count > 0] = ranked
+    r = np.where(r == 0, np.nan, r)
+    r_plus = np.nansum((d > 0) * r, axis=0)
+    r_minus = np.nansum((d < 0) * r, axis=0)
+    if zero_method == "zsplit":
+        r_zero = np.nansum((d == 0) * r, axis=0)
+        r_plus += r_zero / 2.
+        r_minus += r_zero / 2.
+
+    T = np.minimum(r_plus, r_minus)
+    mn = count*(count + 1.) * 0.25
+    se = count*(count + 1.) * (2. * count + 1.)
+
+    if zero_method == "pratt":
+        r = np.where(d == 0, np.nan, r)
+
+    flat_r = np.reshape(r, (r.shape[0], -1, 1))
+    column_id = np.tile(np.reshape(np.arange(flat_r.shape[1]), (1, -1, 1)), (r.shape[0], 1, 1))
+    flat_r_with_column = np.reshape(np.concatenate([column_id, flat_r], axis=2), (-1, 2))
+
+    repeats_with_column, repnum = np.unique(flat_r_with_column, return_counts=True, axis=0)
+    repeats_with_column = repeats_with_column[repnum > 1]
+    repnum = repnum[repnum > 1]
+    if len(repnum) != 0:
+        column_id = np.asarray(np.round(repeats_with_column[:, 0]), dtype=np.int64)
+        weights = repnum * (repnum * repnum - 1)
+        weights = np.asarray(weights, dtype=np.float64)
+        repeat_correction = 0.5 * np.bincount(column_id, weights=weights)
+        column_repeat_correction = np.zeros(flat_r.shape[1], se.dtype)
+        column_repeat_correction[:len(repeat_correction)] += repeat_correction
+        column_repeat_correction = np.reshape(column_repeat_correction, se.shape)
+        # Correction for repeated elements.
+        se -= column_repeat_correction
+
+    se = np.sqrt(se / 24)
+    correction = 0.5 * int(bool(correction)) * np.sign(T - mn)
+    z = (T - mn - correction) / se
+    prob = 2. * distributions.norm.sf(np.abs(z))
+    return np.reshape(T, d_shape[1:]), np.reshape(prob, d_shape[1:])
+
+
+def bhy_multiple_comparisons_procedure(uncorrected_pvalues, alpha=0.05, assume_independence=False):
+    # Benjamini-Hochberg-Yekutieli
+    # originally from Mariya Toneva
+    if len(uncorrected_pvalues.shape) == 1:
+        uncorrected_pvalues = np.reshape(uncorrected_pvalues, (1, -1))
+
+    # get ranks of all p-values in ascending order
+    sorting_inds = np.argsort(uncorrected_pvalues, axis=1)
+    ranks = sorting_inds + 1  # add 1 to make the ranks start at 1 instead of 0
+
+    # calculate critical values under arbitrary dependence
+    if assume_independence:
+        dependency_constant = 1.0
+    else:
+        dependency_constant = np.sum(1.0 / ranks)
+    critical_values = ranks * alpha / float(uncorrected_pvalues.shape[1] * dependency_constant)
+
+    # find largest pvalue that is <= than its critical value
+    sorted_pvalues = np.empty(uncorrected_pvalues.shape)
+    sorted_critical_values = np.empty(critical_values.shape)
+    for i in range(uncorrected_pvalues.shape[0]):
+        sorted_pvalues[i, :] = uncorrected_pvalues[i, sorting_inds[i, :]]
+        sorted_critical_values[i, :] = critical_values[i, sorting_inds[i, :]]
+    bh_thresh = np.zeros((sorted_pvalues.shape[0],))
+    for j in range(sorted_pvalues.shape[0]):
+        for i in range(sorted_pvalues.shape[1] - 1, -1, -1):  # start from the back
+            if sorted_pvalues[j, i] <= sorted_critical_values[j, i]:
+                bh_thresh[j] = sorted_pvalues[j, i]
+                # print('threshold for row {} is: {}; critical value: {} (i: {})'.format(
+                #     j, bh_thresh[j], sorted_critical_values[j, i], i))
+                break
+    return bh_thresh
