@@ -633,7 +633,7 @@ def named_variations(name):
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
             ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
-        num_runs = 4
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_combined':
         training_variations = [
@@ -817,7 +817,7 @@ def named_variations(name):
         for subject in fmri_subjects_:
             training_variations.append(TrainingVariation(
                 ('hp_fmri_{}'.format(subject),), load_from=LoadFrom(
-                    'hp_fmri_meg',
+                    'hp_meg',
                     loss_tasks=('hp_meg',))))
             training_variations.append(('hp_fmri_{}'.format(subject),))
         settings = Settings(
@@ -840,7 +840,7 @@ def named_variations(name):
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
-        num_runs = 4
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_simple_fmri_linear':
         fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
