@@ -146,12 +146,13 @@ class KeyedLinear(KeyedBase):
                 p = p.view(p.size()[:1] + self.prediction_key_to_shape[k])
             result[k] = p
             if not self.is_sequence and k not in batch:
-                # we are in data_ids mode, there must be at most one valid data_id per example
-                data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
-                indicator_valid = data_ids >= 0
-                result[k] = result[k][indicator_valid]
-                result[(k, 'data_ids')] = data_ids[indicator_valid]
-                result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
+                if (k, 'data_ids') in batch:
+                    # we are in data_ids mode, there must be at most one valid data_id per example
+                    data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
+                    indicator_valid = data_ids >= 0
+                    result[k] = result[k][indicator_valid]
+                    result[(k, 'data_ids')] = data_ids[indicator_valid]
+                    result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
 
         return result
 

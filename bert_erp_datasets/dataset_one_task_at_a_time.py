@@ -8,7 +8,7 @@ from torch.utils.data import TensorDataset
 from bert_erp_common import SwitchRemember
 from .input_features import FieldSpec
 
-__all__ = ['PreparedDataDatasetOneTaskAtATime']
+__all__ = ['PreparedDataDatasetOneTaskAtATime', 'BatchOneTaskRandomSampler', 'BatchOneTaskSequentialSampler']
 
 
 def _pad(to_pad, sequence_length, value=0):

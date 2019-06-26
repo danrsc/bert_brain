@@ -41,6 +41,9 @@ def write_predictions(output_path, all_results, data_set, settings):
     output_dict = dict()
     for key in all_results:
 
+        if len(all_results[key]) == 0:
+            continue
+
         critic_settings = settings.get_critic(key, data_set)
 
         predictions = list()
@@ -99,7 +102,7 @@ def write_predictions(output_path, all_results, data_set, settings):
             for critic_key in critic_settings.critic_kwargs:
                 output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_settings.critic_kwargs[critic_key]
 
-    np.savez(output_path, keys=np.array([k for k in all_results]), **output_dict)
+    np.savez(output_path, keys=np.array([k for k in all_results if len(all_results[k]) > 0]), **output_dict)
 
 
 def read_predictions(output_path):

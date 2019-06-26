@@ -121,11 +121,16 @@ def evaluate(
                     losses_to_write[data_key] += current
                     losses_to_write_counts[data_key] += data_valid_count
 
-                kind = eval_data_set.response_data_kind(data_key)
-                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and data_valid_count > 0:
-                    total_loss += current
-                    total_count += data_valid_count
+                if data_valid_count > 0:
+                    kind = eval_data_set.response_data_kind(data_key)
+                    if data_key in settings.loss_tasks or kind in settings.loss_tasks:
+                        total_loss += current
+                        total_count += data_valid_count
                 eval_results.add_result(data_key, epoch, global_step, current)
+
+    for h in loss_handlers:
+        if hasattr(h, 'after_eval_batches'):
+            h.after_eval_batches(epoch, global_step)
 
     for k in losses_to_write:
         if losses_to_write_counts[k] == 0:

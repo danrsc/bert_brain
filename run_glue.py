@@ -1040,7 +1040,7 @@ def main():
         "wnli": 5e-5,
     }
 
-    setattr(args, 'name', 'hp_fmri_meg_joint')
+    setattr(args, 'name', 'hp_meg_simple_fmri')
 
     training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(args.name)
     settings.optimization_settings.num_epochs_train_prediction_heads_only = 0
@@ -1056,6 +1056,7 @@ def main():
     # if chosen_variation is None:
     #     raise ValueError('Unable to find variation which matches chosen variation')
     # training_variations = [chosen_variation]
+    training_variations = [('hp_fmri_I',)]
     num_runs = 4
 
     if settings.optimization_settings.local_rank == -1 or settings.no_cuda:

@@ -27,12 +27,13 @@ from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
 
 import numpy as np
+from scipy import signal
 import torch
 
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
     PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
-    PreprocessSequenceStandardize
+    PreprocessSequenceStandardize, PreprocessSoSFilter, HarryPotterMakeLeaveOutFmriRun
 from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
     TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
@@ -234,7 +235,7 @@ def named_variations(name):
                                ns_froi_tasks + ('hp_fmri_I',)]
         settings = Settings(
             corpus_keys=(CorpusKeys.natural_stories, CorpusKeys.harry_potter),
-            optimization_settings=OptimizationSettings(num_train_epochs=20, num_epochs_train_prediction_heads_only=2))
+            optimization_settings=OptimizationSettings(num_train_epochs=30, num_epochs_train_prediction_heads_only=10))
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
@@ -250,8 +251,23 @@ def named_variations(name):
             fmri_subjects='I',
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
-            fmri_minimum_duration_required=9.6)
-        num_runs = 10
+            fmri_minimum_duration_required=9.6,
+            meg_subjects=[])
+        settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessSoSFilter(signal.butter(10, 0.05, 'hp', fs=0.5, output='sos')),
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+            critic_type=CriticKeys.single_k_least_se_on_eval,
+            critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+        #         critic_type=CriticKeys.single_k_least_se,
+        #         critic_kwargs=dict(
+        #             k_fn=KLeastSEHalvingEpochs(
+        #                 0.5, delay_in_epochs=9, minimum_k=5000),
+        #             moving_average_decay=0.999))
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]

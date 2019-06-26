@@ -3,7 +3,7 @@ from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, U
 
 import numpy as np
 from bert_erp_datasets import CorpusKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessClip, PreprocessDetrend, harry_potter_make_leave_out_fmri_run, PreparedDataView, \
+    PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
@@ -61,7 +61,7 @@ def _default_corpus_kwargs():
 def _default_split_functions():
 
     return {
-        CorpusKeys.harry_potter: harry_potter_make_leave_out_fmri_run,
+        CorpusKeys.harry_potter: HarryPotterMakeLeaveOutFmriRun(),
         CorpusKeys.natural_stories: natural_stories_make_leave_stories_out
     }
 

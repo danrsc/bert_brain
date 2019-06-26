@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+from itertools import combinations
 from dataclasses import dataclass
 from typing import Mapping, Sequence, Optional, Union
 from functools import partial
@@ -20,7 +21,7 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
-           'harry_potter_make_leave_out_fmri_run', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
+           'HarryPotterMakeLeaveOutFmriRun', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
 
 
 @dataclass
@@ -630,31 +631,55 @@ def _clean_word(w):
     return _replacer.replace(w)
 
 
-def harry_potter_make_leave_out_fmri_run(index_variation_run):
-    return partial(harry_potter_leave_out_fmri_run, index_variation_run=index_variation_run)
+class HarryPotterMakeLeaveOutFmriRun:
+
+    def __init__(self, shuffle=True, make_test=False):
+        self.shuffle = shuffle
+        self.make_test = make_test
+
+    def __call__(self, index_variation_run):
+        return partial(
+            harry_potter_leave_out_fmri_run,
+            index_variation_run=index_variation_run,
+            shuffle=self.shuffle,
+            make_test=self.make_test)
 
 
-def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=None, shuffle=True):
+def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=None, shuffle=True, make_test=False):
     runs = raw_data.metadata['fmri_runs']
     unique_runs = np.unique(runs)
-    index_validation = index_variation_run % len(unique_runs)
-    validation_run = unique_runs[index_validation]
+    if make_test:
+        folds = list(combinations(unique_runs, 2))
+        index_validation, index_test = folds[index_variation_run % len(folds)]
+        if index_variation_run % (len(folds) * 2) >= len(folds):
+            index_test, index_validation = index_validation, index_test
+        validation_run = unique_runs[index_validation]
+        test_run = unique_runs[index_test]
+    else:
+        test_run = None
+        index_validation = index_variation_run % len(unique_runs)
+        validation_run = unique_runs[index_validation]
+
     train_examples = list()
     validation_examples = list()
+    test_examples = list()
 
     for example in raw_data.input_examples:
         if runs[example.unique_id] == validation_run:
             validation_examples.append(example)
+        elif runs[example.unique_id] == test_run:
+            test_examples.append(example)
         else:
             train_examples.append(example)
     if shuffle:
         if random_state is not None:
             random_state.shuffle(train_examples)
             random_state.shuffle(validation_examples)
+            random_state.shuffle(test_examples)
         else:
             np.random.shuffle(train_examples)
             np.random.shuffle(validation_examples)
-    test_examples = list()
+            np.random.shuffle(test_examples)
     return train_examples, validation_examples, test_examples
 
 
