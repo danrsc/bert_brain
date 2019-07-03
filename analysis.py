@@ -21,9 +21,13 @@ from text_grid import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 output_order = (
     'mse',       # mean squared error
+    'mae',       # mean absolute error
     'pove',      # proportion of variance explained
     'povu',      # proportion of variance unexplained
+    'podu',      # proportion of mean absolute deviation unexplained
+    'pode',      # proportion of mean absolute deviation explained
     'variance',
+    'mad',       # mean absolute deviation
     'r_seq',     # avg (over batch) of sequence correlation values (i.e. correlation within a sequence)
     'xent',      # cross entropy
     'acc',       # accuracy
@@ -151,6 +155,7 @@ def _read_variation_parallel_helper(item):
         result_dict = handler(run_aggregated[name])
         if compute_scalar:
             with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
                 result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
         run_results[name] = result_dict
     return index_run, run_results
@@ -252,7 +257,9 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
     for name in aggregated:
         text_grid.append_value(name, column_padding=2)
         for metric in metrics:
-            value = np.nanmean(aggregated[name].values(metric)) if metric in aggregated[name] else np.nan
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
+                value = np.nanmean(aggregated[name].values(metric)) if metric in aggregated[name] else np.nan
             text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
 
@@ -371,15 +378,24 @@ def regression_handler(
         masked_target = target
 
     variance = np.nanvar(masked_target, axis=0)
+
+    mu = np.nanmean(masked_target, axis=0)
+    mean_abs_deviation = np.nanmean(np.abs(masked_target - mu))
+
     mse = np.nanmean(np.square(predictions - masked_target), axis=0)
+    mae = np.nanmean(np.abs(predictions - masked_target), axis=0)
 
     variance = np.where(variance < 1e-8, np.nan, variance)
 
     result = dict(
         mse=mse,
+        mae=mae,
         pove=1 - (mse / variance),
         povu=(mse / variance),
+        pode=1 - (mse / mean_abs_deviation),
+        podu=(mae / mean_abs_deviation),
         variance=variance,
+        mad=mean_abs_deviation,
         r_seq=seq_r)
 
     if k_vs_k_num_samples > 0:
@@ -452,7 +468,9 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
             predictions - predictions * target + max_val \
             + np.log(log_weight * (np.exp(-max_val) + np.exp(-predictions - max_val)))
 
-        cross_entropy = np.nanmean(cross_entropy, axis=0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            cross_entropy = np.nanmean(cross_entropy, axis=0)
 
         indicator_valid = np.logical_not(np.isnan(target))
         with warnings.catch_warnings():
@@ -567,15 +585,21 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
 
 _prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=aggregator_regression_handler,
+    mae=aggregator_regression_handler,
     k_least_se=aggregator_regression_handler,
     k_least_se_on_eval=aggregator_regression_handler,
+    k_least_ae=aggregator_regression_handler,
+    k_least_ae_on_eval=aggregator_regression_handler,
     pearson=aggregator_regression_handler,
     cross_entropy=aggregator_class_handler,
     binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=aggregator_class_handler,
     single_mse=aggregator_regression_handler,
+    single_mae=aggregator_regression_handler,
     single_k_least_se=aggregator_regression_handler,
     single_k_least_se_on_eval=aggregator_regression_handler,
+    single_k_least_ae=aggregator_regression_handler,
+    single_k_least_ae_on_eval=aggregator_regression_handler,
     single_pearson=aggregator_regression_handler,
     single_cross_entropy=aggregator_class_handler,
     single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
@@ -584,15 +608,21 @@ _prediction_handlers = dataclasses.asdict(CriticMapping(
 
 _no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
     mse=regression_handler,
+    mae=regression_handler,
     k_least_se=regression_handler,
     k_least_se_on_eval=regression_handler,
+    k_least_ae=regression_handler,
+    k_least_ae_on_eval=regression_handler,
     pearson=regression_handler,
     cross_entropy=class_handler,
     binary_cross_entropy=(class_handler, dict(is_binary=True)),
     soft_label_cross_entropy=class_handler,
     single_mse=regression_handler,
+    single_mae=regression_handler,
     single_k_least_se=regression_handler,
     single_k_least_se_on_eval=regression_handler,
+    single_k_least_ae=regression_handler,
+    single_k_least_ae_on_eval=regression_handler,
     single_pearson=regression_handler,
     single_cross_entropy=class_handler,
     single_binary_cross_entropy=(class_handler, dict(is_binary=True)),

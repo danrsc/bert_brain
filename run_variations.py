@@ -33,7 +33,8 @@ import torch
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
     PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
-    PreprocessSequenceStandardize, PreprocessSoSFilter, HarryPotterMakeLeaveOutFmriRun
+    PreprocessSequenceStandardize, PreprocessSoSFilter, HarryPotterMakeLeaveOutFmriRun, \
+    PreprocessMakeBinary, PreprocessSqueeze
 from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
     TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
@@ -253,21 +254,23 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             meg_subjects=[])
-        settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
+        # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
         settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
-            PreprocessSoSFilter(signal.butter(10, 0.05, 'hp', fs=0.5, output='sos')),
+            PreprocessSoSFilter(signal.butter(10, 0.1, 'hp', fs=0.5, output='sos')),
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
-        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
-            critic_type=CriticKeys.single_k_least_se_on_eval,
-            critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
+            PreprocessStandardize(
+                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_se_on_eval,
+        #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
         #         critic_type=CriticKeys.single_k_least_se,
         #         critic_kwargs=dict(
         #             k_fn=KLeastSEHalvingEpochs(
         #                 0.5, delay_in_epochs=9, minimum_k=5000),
         #             moving_average_decay=0.999))
-        num_runs = 100
+        num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'nat_stories_head_loc':
         training_variations = [('ns_spr',), erp_tasks + ('ns_spr',), erp_tasks]
@@ -1023,6 +1026,47 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             meg_subjects=[])
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_diff':
+        fmri_subjects_ = ['I']
+        # fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
+        # fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=6,
+                num_epochs_train_prediction_heads_only=3,
+                num_final_epochs_train_prediction_heads_only=0),
+            filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=[],  # None means everyone
+            fmri_diff=True,
+            diff_scramble_samples=5000)
+        # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
+        # settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        #     PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+        #     PreprocessStandardize(
+        #         stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True))
+        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+            PreprocessSqueeze(),  # remove the subject axis
+            PreprocessMakeBinary(threshold=0))
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_ae_on_eval,
+        #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:

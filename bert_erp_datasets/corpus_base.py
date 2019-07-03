@@ -31,8 +31,9 @@ class CorpusExampleUnifier:
             data_ids: Optional[Sequence[int]],
             start: int = 0,
             stop: Optional[int] = None,
+            start_sequence_2: Optional[int] = None,
+            stop_sequence_2: Optional[int] = None,
             is_apply_data_id_to_entire_group: bool = False,
-            type_ids: int = 0,
             allow_new_examples: bool = True) -> Optional[InputFeatures]:
         """
         Adds an example for the current data loader to return later. Simplifies the process of merging examples
@@ -56,9 +57,9 @@ class CorpusExampleUnifier:
                 parameter is set to True, then all of the multiple tokens corresponding to a word are assigned the same
                 data_id, and none are set to -1. This can be a better option for fMRI where the predictions are not at
                 the word level, but rather at the level of an image containing multiple words.
-            type_ids: Used for bert to combine multiple sequences as a single input. Generally this is used for tasks
-                like question answering where type_id=0 is the question and type_id=1 is the answer. If not specified,
-                type_id=0 is used for every token
+            start_sequence_2: Used for bert to combine multiple sequences as a single input. Generally this is used for
+                tasks like question answering where type_id=0 is the question and type_id=1 is the answer.
+                If not specified, type_id=0 is used for every token
             allow_new_examples: If False, then if the example does not already exist in this instance, it will not
                 be added. Only new data_ids will be added to existing examples. Returns None when the example does
                 not exist.
@@ -67,7 +68,8 @@ class CorpusExampleUnifier:
         """
         input_features = bert_tokenize_with_spacy_meta(
             self.spacy_tokenize_model, self.bert_tokenizer,
-            len(self._examples), words, sentence_ids, data_key, data_ids, start, stop, type_ids,
+            len(self._examples), words, sentence_ids, data_key, data_ids,
+            start, stop, start_sequence_2, stop_sequence_2,
             is_apply_data_id_to_entire_group)
 
         if example_key is None:

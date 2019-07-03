@@ -27,6 +27,7 @@ __all__ = [
     'PreprocessGaussianBlur',
     'PreprocessCompress',
     'PreprocessSoSFilter',
+    'PreprocessSqueeze',
     'PreprocessMany']
 
 
@@ -356,11 +357,13 @@ class PreprocessStandardize:
             average_axis: Optional[int] = 1,
             stop_mode: Optional[str] = None,
             metadata_example_group_by: Optional[str] = None,
-            train_on_all: Optional[bool] = False):
+            train_on_all: Optional[bool] = False,
+            use_absolute: Optional[bool] = False):
         self.stop_mode = stop_mode
         self.average_axis = average_axis
         self.metadata_example_group_by = metadata_example_group_by
         self.train_on_all = train_on_all
+        self.use_absolute = use_absolute
 
     def _standardize(self, data, indicator_train):
 
@@ -376,7 +379,10 @@ class PreprocessStandardize:
             # within the training examples
             warnings.filterwarnings('ignore', category=RuntimeWarning)
             pre_average_mean = np.nanmean(valid_train_values, axis=0, keepdims=True)
-            pre_average_std = np.nanstd(valid_train_values, axis=0, keepdims=True)
+            if self.use_absolute:
+                pre_average_std = np.nanmean(np.abs(valid_train_values - pre_average_mean), axis=0, keepdims=True)
+            else:
+                pre_average_std = np.nanstd(valid_train_values, axis=0, keepdims=True)
 
         transformed_data = np.divide(data - pre_average_mean, pre_average_std, where=pre_average_std != 0)
 
@@ -390,7 +396,11 @@ class PreprocessStandardize:
                 standardized_train_values = np.nanmean(standardized_train_values, axis=self.average_axis)
                 transformed_data = np.nanmean(transformed_data, axis=self.average_axis)
             post_average_mean = np.nanmean(standardized_train_values, axis=0, keepdims=True)
-            post_average_std = np.nanstd(standardized_train_values, axis=0, keepdims=True)
+            if self.use_absolute:
+                post_average_std = np.nanmean(
+                    np.abs(standardized_train_values - post_average_mean), axis=0, keepdims=True)
+            else:
+                post_average_std = np.nanstd(standardized_train_values, axis=0, keepdims=True)
             transformed_data = np.divide(
                 transformed_data - post_average_mean, post_average_std, where=post_average_std != 0)
 
@@ -460,6 +470,15 @@ class PreprocessNanMean:
             data = np.nanmean(loaded_data_tuple.data, self.axis)
 
         return replace(loaded_data_tuple, data=data)
+
+
+class PreprocessSqueeze:
+
+    def __init__(self, axis: int = 1):
+        self.axis = axis
+
+    def __call__(self, loaded_data_tuple, metadata):
+        return replace(loaded_data_tuple, data=np.squeeze(loaded_data_tuple.data, self.axis))
 
 
 class PreprocessClip:

@@ -1,14 +1,14 @@
 import os
 from collections import OrderedDict
 from itertools import combinations
-from dataclasses import dataclass
-from typing import Mapping, Sequence, Optional, Union
+from dataclasses import dataclass, replace as dataclass_replace
+from typing import Mapping, Sequence, Optional, Union, Tuple
 from functools import partial
 
 import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.io import loadmat
-from scipy.ndimage.filters import gaussian_filter1d
+from scipy.ndimage.filters import gaussian_filter
 from scipy.signal import butter, sosfilt
 
 import nibabel
@@ -16,7 +16,7 @@ import cortex
 
 from bert_erp_common import MultiReplace
 from .corpus_base import CorpusBase, CorpusExampleUnifier
-from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample
+from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample, PairFMRIExample
 from .input_features import RawData, KindData, ResponseKind
 
 
@@ -57,7 +57,9 @@ class HarryPotterCorpus(CorpusBase):
             fmri_window_duration: float = 8.,
             fmri_minimum_duration_required: float = 7.8,
             fmri_sentence_mode: str = 'multiple',
-            fmri_high_pass: float = None):
+            fmri_high_pass: float = None,
+            fmri_diff: bool = False,
+            diff_scramble_samples: Optional[Union[int, Tuple[int, float]]] = None):
         """
         Loader for Harry Potter data
         Args:
@@ -103,6 +105,13 @@ class HarryPotterCorpus(CorpusBase):
                 sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
                 without consideration of the sentence boundaries
             fmri_high_pass: If specified, apply a high-pass butterworth filter to the data using this cutoff
+            fmri_diff: If True, then images are paired, the diff is computed, and the 2 examples are combined into
+                sequence-type-id-0 + sequence-type-id-1
+            diff_scramble_samples: Only applies when fmri_diff is True. When None, consecutive trs are used. If an int,
+                then this many random combinations of trs are used. If a tuple of (int, float), then the int specifies
+                the total number of returned pairs and the float must be a number between 0 and 1 which specifies
+                the proportion of total samples which should be consecutive. A ValueError will be raised if a tuple
+                is specified and not enough consecutive samples are available
         """
         self.path = path
         self.fmri_subjects = fmri_subjects
@@ -119,6 +128,37 @@ class HarryPotterCorpus(CorpusBase):
             use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
             sentence_mode=fmri_sentence_mode)
         self.fmri_high_pass = fmri_high_pass
+        self.fmri_diff = fmri_diff
+        self.diff_scramble_samples = diff_scramble_samples
+
+    @staticmethod
+    def _add_fmri_example(
+            example, example_manager: CorpusExampleUnifier, data_keys=None, data_ids=None,
+            is_apply_data_id_to_entire_group=False, allow_new_examples=True, words_override=None):
+        key = tuple(w.index_in_all_words for w in example.words)
+        if isinstance(example, PairFMRIExample):
+            len_1 = example.len_1
+            start_2 = example.second_offset
+            stop_2 = len(example.words) - len_1 + start_2
+        else:
+            len_1 = len(example.words)
+            start_2 = None
+            stop_2 = None
+        features = example_manager.add_example(
+            key,
+            words_override if words_override is not None else [w.word for w in example.full_sentences],
+            [w.sentence_id for w in example.full_sentences],
+            data_keys,
+            data_ids,
+            start=example.offset,
+            stop=example.offset + len_1,
+            start_sequence_2=start_2,
+            stop_sequence_2=stop_2,
+            is_apply_data_id_to_entire_group=is_apply_data_id_to_entire_group,
+            allow_new_examples=allow_new_examples)
+
+        assert (all(w.run == example.words[0].run for w in example.words[1:]))
+        return features
 
     def _load(self, example_manager: CorpusExampleUnifier):
 
@@ -132,16 +172,7 @@ class HarryPotterCorpus(CorpusBase):
                 or len(self.fmri_subjects)) > 0:
             fmri_examples = self._compute_examples_for_fmri()
             for example in fmri_examples:
-                key = tuple(w.index_in_all_words for w in example.words)
-                features = example_manager.add_example(
-                    key,
-                    [w.word for w in example.full_sentences],
-                    [w.sentence_id for w in example.full_sentences],
-                    None,
-                    None,
-                    start=example.offset,
-                    stop=example.offset + len(example.words))
-                assert(all(w.run == example.words[0].run for w in example.words[1:]))
+                features = HarryPotterCorpus._add_fmri_example(example, example_manager)
                 assert(features.unique_id == len(run_at_unique_id))
                 run_at_unique_id.append(example.words[0].run)
         meg_examples = None
@@ -181,7 +212,7 @@ class HarryPotterCorpus(CorpusBase):
             if block_metadata is not None:
                 metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri, good_regions = self._read_fmri(example_manager, fmri_examples)
+            fmri = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
                 data[k] = KindData(ResponseKind.hp_fmri, fmri[k])
 
@@ -339,14 +370,12 @@ class HarryPotterCorpus(CorpusBase):
             # we will fail an assert below if we try to add something messed up
             example_stimuli = stimuli[new_indices[indices]]
 
-            features = example_manager.add_example(
-                tuple(w.index_in_all_words for w in example.words),
-                [_clean_word(w) for w in example_stimuli],
-                [w.sentence_id for w in example.full_sentences],
-                [k for k in data],
-                new_indices[indices],
-                example.offset,
-                example.offset + len(example.words),
+            features = HarryPotterCorpus._add_fmri_example(
+                example,
+                example_manager,
+                words_override=[_clean_word(w) for w in example_stimuli],
+                data_keys=[k for k in data],
+                data_ids=new_indices[indices],
                 allow_new_examples=False)
             assert (features is not None)
 
@@ -370,12 +399,6 @@ class HarryPotterCorpus(CorpusBase):
             M=[7, 8, 9, 10],
             N=[7, 8, 9, 10])
 
-        # if subject is in this dict, we will add a separate response data for this subset of indices
-        # to more easily track the train/eval curves
-        good_region_args = dict(
-            I=dict(x=0.73, y=0.35, z=0.5, distance=3)
-        )
-
         subjects = self.fmri_subjects
         if subjects is None:
             subjects = list(subject_runs.keys())
@@ -387,7 +410,6 @@ class HarryPotterCorpus(CorpusBase):
 
         all_subject_data = OrderedDict()
         masks = OrderedDict()
-        good_regions = dict()
 
         for subject in subjects:
             if subject not in subject_runs:
@@ -400,16 +422,8 @@ class HarryPotterCorpus(CorpusBase):
 
             masks[subject] = get_mask_for_subject(subject)
             all_subject_data[subject] = subject_data
-            if subject in good_region_args:
-                good_indices, _, _ = get_indices_from_normalized_coordinates(subject, **good_region_args[subject])
-                temp_mask = np.full_like(masks[subject], False)
-                temp_mask = np.reshape(temp_mask, -1)
-                temp_mask[good_indices] = True
-                # mask the good_indices mask, so we can compute the indices within the mask
-                temp_mask = temp_mask[np.reshape(masks[subject], -1)]
-                good_regions[subject] = np.where(temp_mask)[0]
 
-        return all_subject_data, masks, good_regions
+        return all_subject_data, masks
 
     def _harry_potter_fmri_word_info(self, run_lengths):
 
@@ -479,18 +493,88 @@ class HarryPotterCorpus(CorpusBase):
             assert (len(time_images) > self.fmri_skip_start_trs + self.fmri_skip_end_trs)
             offset_increment = len(time_images)
             time_images = time_images[self.fmri_skip_start_trs:(len(time_images) - self.fmri_skip_end_trs)]
-            examples.extend(self.fmri_example_builder(
+            run_examples = self.fmri_example_builder(
                 run_words[run],
                 [w.time for w in run_words[run]],
                 [w.sentence_id for w in run_words[run]],
                 time_images,
-                tr_offset=tr_offset + self.fmri_skip_start_trs))
+                tr_offset=tr_offset + self.fmri_skip_start_trs)
+            if self.fmri_diff:
+                def _get_unique_tr(ex_):
+                    r = None
+                    for t in ex_.tr_target:
+                        if t is not None:
+                            if r is None:
+                                r = t[0]
+                            else:
+                                raise ValueError('Multiple targets')
+                    if r is None:
+                        raise ValueError('No targets')
+                    return r
+                pairs = list()
+                if self.diff_scramble_samples is None or isinstance(self.diff_scramble_samples, tuple):
+                    for idx in range(1, len(run_examples)):
+                        ex1, ex2 = run_examples[idx - 1], run_examples[idx]
+                        tr1, tr2 = _get_unique_tr(ex1), _get_unique_tr(ex2)
+                        if tr2 == tr1 + 1:
+                            pair_ex = PairFMRIExample(
+                                ex1.words + ex2.words,
+                                ex1.sentence_ids + ex2.sentence_ids,
+                                ex1.tr_target + ex2.tr_target,
+                                ex1.full_sentences + ex2.full_sentences,
+                                ex1.offset,
+                                ex2.offset + len(ex1.full_sentences),
+                                len(ex1.words),
+                                len(ex1.full_sentences))
+                            pairs.append(pair_ex)
+                if self.diff_scramble_samples is not None:
+                    if isinstance(self.diff_scramble_samples, tuple):
+                        num_total, proportion_consecutive = self.diff_scramble_samples
+                    else:
+                        num_total = self.diff_scramble_samples
+                        proportion_consecutive = 0.0
+                    if proportion_consecutive < 0 or proportion_consecutive > 1:
+                        raise ValueError('proportion_consecutive out of bounds')
+                    num_consecutive = int(np.round(proportion_consecutive * num_total))
+                    if num_consecutive > len(pairs):
+                        raise ValueError(
+                            'Not enough consecutive samples to satisfy diff_scramble_samples specification')
+                    if num_consecutive < len(pairs):
+                        pairs = np.random.permutation(pairs)[:num_consecutive]
+                    num_random = num_total - num_consecutive
+                    picked = set()
+                    while num_random > 0:
+                        while True:
+                            i1 = np.random.choice(len(run_examples))
+                            while True:
+                                i2 = np.random.choice(len(run_examples))
+                                if i2 != i1:
+                                    break
+                            if (i1, i2) not in picked:
+                                picked.add((i1, i2))
+                                break
+                        ex1, ex2 = run_examples[i1], run_examples[i2]
+                        pair_ex = PairFMRIExample(
+                            ex1.words + ex2.words,
+                            ex1.sentence_ids + ex2.sentence_ids,
+                            ex1.tr_target + ex2.tr_target,
+                            ex1.full_sentences + ex2.full_sentences,
+                            ex1.offset,
+                            ex2.offset + len(ex1.full_sentences),
+                            len(ex1.words),
+                            len(ex1.full_sentences))
+                        pairs.append(pair_ex)
+                        num_random -= 1
+
+                run_examples = pairs
+
+            examples.extend(run_examples)
             tr_offset += offset_increment
         return examples
 
     def _read_fmri(self, example_manager: CorpusExampleUnifier, fmri_examples):
 
-        data, spatial_masks, good_regions = self._read_harry_potter_fmri_files()
+        data, spatial_masks = self._read_harry_potter_fmri_files()
 
         # we assume that the runs are the same across subjects below. assert it here
         run_lengths = None
@@ -502,62 +586,94 @@ class HarryPotterCorpus(CorpusBase):
 
         assert(np.array_equal(run_lengths, HarryPotterCorpus.static_run_lengths))
 
-        # filter unused images
-        active_sentence_images_to_new_index = dict()
-        active_image_indices = list()
-        for example in fmri_examples:
-            for target_tr in example.tr_target:
-                if target_tr is not None:
-                    for tr in target_tr:
-                        if tr not in active_sentence_images_to_new_index:
-                            # store the new index
-                            active_sentence_images_to_new_index[tr] = len(active_image_indices)
-                            # prepare to filter
-                            active_image_indices.append(tr)
+        if self.fmri_diff:
+            active_1 = list()
+            active_2 = list()
 
-        active_image_indices = np.array(active_image_indices)
+            def _get_tr_pair(ex_, new_idx):
+                r1 = None
+                r2 = None
+                data_ids = [-1] * len(ex_.full_sentences)
+                for i, t in enumerate(ex_.tr_target):
+                    if t is not None:
+                        assert(len(t) == 1)
+                        if r1 is None:
+                            r1 = t[0]
+                        elif r2 is None:
+                            r2 = t[0]
+                            assert(i >= ex_.len_1)
+                            data_ids[i - ex_.len_1 + ex_.second_offset] = new_idx
+                        else:
+                            raise ValueError('Multiple targets')
+                if r1 is None or r2 is None:
+                    raise ValueError('Not a pair')
+                return r1, r2, data_ids
 
-        masked_data = OrderedDict()
+            local_examples = list()
+            for example in fmri_examples:
+                tr1, tr2, target_tr = _get_tr_pair(example, len(active_1))
+                local_examples.append(dataclass_replace(example, tr_target=target_tr))
+                active_1.append(tr1)
+                active_2.append(tr2)
+
+            masked_data = OrderedDict()
+            active_1 = np.array(active_1)
+            active_2 = np.array(active_2)
+            for subject in data:
+                subject_data = np.concatenate(data[subject])
+                masked_data['hp_fmri_{}'.format(subject)] = subject_data[active_2] - subject_data[active_1]
+            data = masked_data
+
+        else:
+            active_image_indices = list()
+
+            def _replace_tr(ex_, active_list_):
+                data_ids = [-1] * len(ex_.full_sentences)
+                for i, t in enumerate(ex_.tr_target):
+                    if t is not None:
+                        # keep only the first target if there are multiple
+                        data_ids[i + ex_.offset] = len(active_list_)
+                        active_list_.append(t[0])
+                return dataclass_replace(ex_, tr_target=data_ids)
+
+            # filter unused images
+            local_examples = [_replace_tr(ex, active_image_indices) for ex in fmri_examples]
+
+            active_image_indices = np.array(active_image_indices)
+
+            masked_data = OrderedDict()
+            for subject in data:
+                masked_data['hp_fmri_{}'.format(subject)] = np.concatenate(data[subject])[active_image_indices]
+            data = masked_data
+
         for subject in data:
-            subject_data = np.concatenate(data[subject])[active_image_indices]
+            orig_subject = subject[len('hp_fmri_'):]
+            subject_data = data[subject]
             if self.fmri_high_pass is not None:
                 fs = 0.5  # sample rate is 0.5 Hz
                 sos = butter(10, 2 * self.fmri_high_pass / fs, 'high', output='sos')
                 subject_data = sosfilt(sos, subject_data, axis=0)
             if self.fmri_smooth_factor is not None:
-                subject_data = gaussian_filter1d(
-                    subject_data, sigma=self.fmri_smooth_factor, axis=1, order=0, mode='reflect', truncate=4.0)
+                for idx in range(len(subject_data)):
+                    subject_data[idx] = gaussian_filter(
+                        subject_data[idx], sigma=self.fmri_smooth_factor, order=0, mode='reflect', truncate=4.0)
             # apply spatial mask
-            subject_data = subject_data[:, spatial_masks[subject]]
+            subject_data = subject_data[:, spatial_masks[orig_subject]]
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
-            masked_data['hp_fmri_{}'.format(subject)] = np.expand_dims(subject_data, axis=1)
-            if subject in good_regions:
-                good_regions['hp_fmri_{}'.format(subject)] = good_regions[subject]
-                del good_regions[subject]
-        data = masked_data
+            data[subject] = np.expand_dims(subject_data, axis=1)
 
-        for example in fmri_examples:
-            images = list()
-            for target_tr in example.tr_target:
-                if target_tr is None:
-                    images.append(-1)
-                else:
-                    # keep only the first target if there are multiple
-                    images.append(active_sentence_images_to_new_index[target_tr[0]])
-            pad_end = len(example.full_sentences) - len(example.words) - example.offset
-            features = example_manager.add_example(
-                tuple(w.index_in_all_words for w in example.words),
-                [w.word for w in example.full_sentences],
-                [w.sentence_id for w in example.full_sentences],
-                [k for k in data],
-                [-1] * example.offset + images + [-1] * pad_end,
-                example.offset,
-                example.offset + len(example.words),
+        for example in local_examples:
+            features = HarryPotterCorpus._add_fmri_example(
+                example,
+                example_manager,
+                data_keys=[k for k in data],
+                data_ids=example.tr_target,
                 is_apply_data_id_to_entire_group=True,
                 allow_new_examples=False)
+
             assert(features is not None)
 
-        return data, good_regions
+        return data
 
 
 def read_harry_potter_story_features(path):
