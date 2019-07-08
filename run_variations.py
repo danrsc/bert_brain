@@ -32,9 +32,9 @@ import torch
 
 from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_empty_cache_context
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
-    PreprocessMany, PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
+    PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
     PreprocessSequenceStandardize, PreprocessSoSFilter, HarryPotterMakeLeaveOutFmriRun, \
-    PreprocessMakeBinary, PreprocessSqueeze
+    PreprocessMakeBinary, PreprocessSqueeze, PreprocessKMeans, PreprocessRandomPair
 from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
     TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
@@ -84,6 +84,11 @@ def progress_iterate(iterable, progress_bar):
     for item in iterable:
         yield item
         progress_bar.update()
+
+
+def rank_space(data):
+    from scipy.stats.mstats import rankdata
+    return rankdata(data, axis=0)
 
 
 def run_variation(
@@ -150,7 +155,8 @@ def run_variation(
         output_model_path = os.path.join(model_path, 'run_{}'.format(index_run))
 
         seed = set_random_seeds(settings.seed, index_run, n_gpu)
-        data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
+        data_preparer = DataPreparer(
+            seed, settings.preprocessors, settings.get_split_functions(index_run), output_model_path)
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
             loss_tasks,
@@ -255,11 +261,11 @@ def named_variations(name):
             fmri_minimum_duration_required=9.6,
             meg_subjects=[])
         # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessSoSFilter(signal.butter(10, 0.1, 'hp', fs=0.5, output='sos')),
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True))
+                stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True)]
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
         #     critic_type=CriticKeys.single_k_least_se_on_eval,
@@ -308,9 +314,9 @@ def named_variations(name):
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
             meg_subjects=[])
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4
@@ -341,14 +347,14 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
@@ -394,14 +400,14 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
@@ -447,14 +453,14 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
@@ -502,14 +508,14 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
@@ -555,9 +561,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=False,
             meg_kind='leila',
             meg_subjects=[])
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 100
@@ -581,9 +587,9 @@ def named_variations(name):
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
             meg_subjects=[])
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         # for subject in subjects_:
@@ -615,9 +621,9 @@ def named_variations(name):
             fmri_minimum_duration_required=9.6,
             group_meg_sentences_like_fmri=False,
             meg_subjects=[])
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         # for subject in subjects_:
@@ -645,11 +651,11 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
             ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         num_runs = 100
@@ -675,14 +681,14 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
@@ -705,11 +711,11 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
             ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         num_runs = 4
@@ -750,11 +756,11 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=None)  # None means everyone
-        settings.preprocessors[ResponseKind.hp_meg] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
-                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None))
+                stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
         settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
             ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         num_runs = 12
@@ -787,9 +793,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[])  # None means everyone
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4
@@ -822,9 +828,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[])  # None means everyone
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4
@@ -854,9 +860,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[])  # None means everyone
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 100
@@ -886,9 +892,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[])  # None means everyone
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4
@@ -916,9 +922,9 @@ def named_variations(name):
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[])  # None means everyone
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         num_runs = 4
@@ -932,9 +938,9 @@ def named_variations(name):
                 num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=-1),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -956,9 +962,9 @@ def named_variations(name):
                 num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=-1),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -988,9 +994,9 @@ def named_variations(name):
                 num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=-1),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -999,7 +1005,7 @@ def named_variations(name):
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
             meg_subjects=[])
-        num_runs = 4
+        num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HKL_from_I_fine_tune':
         load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
@@ -1015,9 +1021,9 @@ def named_variations(name):
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=10))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True))
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
         settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
@@ -1047,21 +1053,71 @@ def named_variations(name):
             fmri_sentence_mode='ignore',
             fmri_window_duration=10.1,
             fmri_minimum_duration_required=9.6,
+            fmri_high_pass=None,  # 0.1,
+            fmri_internal_detrend=True,
+            fmri_internal_standardize=True,
             group_meg_sentences_like_fmri=True,
             meg_kind='leila',
             meg_subjects=[],  # None means everyone
             fmri_diff=True,
             diff_scramble_samples=5000)
         # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
-        # settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
+        # settings.preprocessors[ResponseKind.hp_fmri] = [
         #     PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
         #     PreprocessStandardize(
-        #         stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True))
-        settings.preprocessors[ResponseKind.hp_fmri] = PreprocessMany(
-            PreprocessSqueeze(),  # remove the subject axis
-            PreprocessMakeBinary(threshold=0))
+        #         stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessSqueeze(),
+            PreprocessMakeBinary(threshold=0, strict=True)]
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
             ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
+        # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+        #     critic_type=CriticKeys.single_k_least_ae_on_eval,
+        #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
+        num_runs = 4
+        min_memory = 4 * 1024 ** 3
+    elif name == 'hp_fmri_diff_cluster':
+        fmri_subjects_ = ['I']
+        # fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
+        # fmri_subjects_ = ['H', 'I', 'K', 'L']
+        training_variations = list()
+        for subject in fmri_subjects_:
+            training_variations.append(('hp_fmri_{}'.format(subject),))
+        settings = Settings(
+            corpus_keys=(CorpusKeys.harry_potter,),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=3,
+                num_epochs_train_prediction_heads_only=1,
+                num_final_epochs_train_prediction_heads_only=0),
+            filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
+        settings.corpus_key_kwargs[CorpusKeys.harry_potter] = dict(
+            fmri_subjects=fmri_subjects_,
+            fmri_sentence_mode='ignore',
+            fmri_window_duration=10.1,
+            fmri_minimum_duration_required=9.6,
+            fmri_high_pass=None,  # 0.1,
+            fmri_internal_detrend=True,
+            fmri_internal_standardize=True,
+            group_meg_sentences_like_fmri=True,
+            meg_kind='leila',
+            meg_subjects=[])  # None means everyone
+        # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
+        # settings.preprocessors[ResponseKind.hp_fmri] = [
+        #     PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+        #     PreprocessStandardize(
+        #         stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True, use_absolute=True)]
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessSqueeze(),
+            PreprocessKMeans(num_clusters=12, transform_fn=rank_space),
+            ('diff', PreprocessRandomPair(
+                num_samples_per_group=20000,
+                metadata_example_group_by='fmri_runs',
+                data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
+            PreprocessMakeBinary(threshold=0, strict=True)]
+        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[5]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(

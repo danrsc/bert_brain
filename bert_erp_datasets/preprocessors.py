@@ -1,13 +1,16 @@
+import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor
 from itertools import chain
-from dataclasses import replace
+from dataclasses import replace, asdict
 from typing import Optional
 import numpy as np
 from scipy.stats import boxcox
 from scipy.ndimage.filters import gaussian_filter1d
 from scipy.signal import sosfilt
 from sklearn.decomposition import PCA
+
+from .input_features import InputFeatures, KindData
 
 __all__ = [
     'PreprocessBoxcox',
@@ -28,7 +31,8 @@ __all__ = [
     'PreprocessCompress',
     'PreprocessSoSFilter',
     'PreprocessSqueeze',
-    'PreprocessMany']
+    'PreprocessKMeans',
+    'PreprocessRandomPair']
 
 
 def _fit_boxcox(item):
@@ -172,6 +176,42 @@ class PreprocessDetrend:
             data = PreprocessDetrend._detrend(loaded_data_tuple.data, indicator_train)
 
         return replace(loaded_data_tuple, data=data)
+
+
+class PreprocessKMeans:
+
+    def __init__(self, num_clusters, stop_mode=None, transform_fn=None):
+        self.num_clusters = num_clusters
+        self.stop_mode = stop_mode
+        self.transform_fn = transform_fn
+        self.output_model_path = None
+        self.data_key = None
+
+    def set_model_path(self, output_model_path, data_key):
+        self.output_model_path = output_model_path
+        self.data_key = data_key
+
+    def __call__(self, loaded_data_tuple, metadata):
+        from sklearn.cluster import KMeans
+        indicator_train = _indicator_from_examples(len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
+        valid_train_values = loaded_data_tuple.data[indicator_train]
+        if self.transform_fn is not None:
+            valid_train_values = self.transform_fn(valid_train_values)
+        k_means = KMeans(self.num_clusters)
+        clusters = k_means.fit_predict(
+            np.transpose(np.reshape(valid_train_values, (valid_train_values.shape[0], -1))))
+        cluster_means = np.full((loaded_data_tuple.data.shape[0], self.num_clusters), np.nan)
+        data = np.reshape(loaded_data_tuple.data, (len(loaded_data_tuple.data), -1))
+        for index_cluster, cluster in enumerate(np.unique(clusters)):
+            indicator_cluster = clusters == cluster
+            cluster_means[:, index_cluster] = np.mean(data[:, indicator_cluster], axis=1)
+
+        clusters = np.reshape(clusters, valid_train_values.shape[1:])
+        if not os.path.exists(self.output_model_path):
+            os.makedirs(self.output_model_path)
+        np.save(os.path.join(self.output_model_path, 'kmeans_clusters_{}.npy'.format(self.data_key)), clusters)
+
+        return replace(loaded_data_tuple, data=cluster_means)
 
 
 class PreprocessDiscretize:
@@ -442,15 +482,20 @@ class PreprocessStandardize:
 
 class PreprocessMakeBinary:
 
-    def __init__(self, threshold, dtype=np.int32):
+    def __init__(self, threshold, dtype=np.int32, strict=False):
         self.threshold = threshold
         self.dtype = dtype
+        self.strict = strict
 
     def __call__(self, loaded_data_tuple, metadata):
         data = loaded_data_tuple.data
         indicator_nan = np.isnan(data)
         safe_compare = np.where(indicator_nan, self.threshold - 1, data)
-        indicator = np.logical_and(np.logical_not(indicator_nan), safe_compare >= self.threshold)
+        if self.strict:
+            indicator = safe_compare > self.threshold
+        else:
+            indicator = safe_compare >= self.threshold
+        indicator = np.logical_and(np.logical_not(indicator_nan), indicator)
         if self.dtype == np.bool_ or self.dtype == bool:
             data = indicator
         else:
@@ -570,13 +615,139 @@ class PreprocessSoSFilter:
         return replace(loaded_data_tuple, data=sosfilt(self.sos, loaded_data_tuple.data, axis=self.axis))
 
 
-class PreprocessMany:
+class PreprocessRandomPair:
 
-    def __init__(self, *steps):
-        self.steps = steps
+    def __init__(self, num_samples_per_group, metadata_example_group_by, data_id_pair_fn_map, combine_fn=None):
+        self.num_samples_per_group = num_samples_per_group
+        self.metadata_example_group_by = metadata_example_group_by
+        self.data_id_pair_fn_per_response_data = data_id_pair_fn_map
+        self.combine_fn = combine_fn
+
+    @staticmethod
+    def pair_from_end(data_ids1, data_ids2):
+        skip = len(data_ids2) - (len(data_ids1) - 1)
+        skip1, skip2 = 0, 0
+        if skip < 0:  # seq 2 is shorter, skip some of seq 1
+            start = len(data_ids1)
+            skip1 = -skip
+        else:
+            start = len(data_ids1) + skip
+            skip2 = skip
+        return [(data_ids1[i - start + 1 + skip1], data_ids2[i - start + skip2])
+                if start <= i else None for i in range(len(data_ids1) + len(data_ids2))]
+
+    @staticmethod
+    def pair_from_start(data_ids1, data_ids2):
+        end = len(data_ids1) + min(len(data_ids1) - 1, len(data_ids2))
+        return [(data_ids1[i - len(data_ids1) + 1], data_ids2[i - len(data_ids1)])
+                if len(data_ids1) <= i < end else None for i in range(len(data_ids1) + len(data_ids2))]
+
+    def _get_data_id_pair_fn(self, response_key, kind):
+        if callable(self.data_id_pair_fn_per_response_data):
+            return self.data_id_pair_fn_per_response_data
+        if response_key in self.data_id_pair_fn_per_response_data:
+            return self.data_id_pair_fn_per_response_data[response_key]
+        elif kind in self.data_id_pair_fn_per_response_data:
+            return self.data_id_pair_fn_per_response_data[kind]
+        else:
+            raise ValueError('Unspecified data_id_pair_fn')
 
     def __call__(self, loaded_data_tuple, metadata):
-        for step in self.steps:
-            loaded_data_tuple = step(loaded_data_tuple, metadata)
+        if metadata is None or self.metadata_example_group_by not in metadata:
+            raise ValueError('metadata_example_group_by {} not found in metadata'.format(
+                self.metadata_example_group_by))
+        combined = dict()
+        old_to_new = dict()
+        metadata_indices = list()
+        unique_id = 0
+        for split_name in ['train', 'validation', 'test']:
+            split = getattr(loaded_data_tuple, split_name)
+            grouped_examples = _unsorted_group_by(
+                split, lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
+            paired = list()
+            len1 = list()
+            for idx_group, (group, group_examples) in enumerate(grouped_examples):
+                picked = set()
+                while len(paired) < self.num_samples_per_group * (idx_group + 1):
+                    while True:
+                        i1 = np.random.choice(len(group_examples))
+                        while True:
+                            i2 = np.random.choice(len(group_examples))
+                            if i2 != i1:
+                                break
+                        if (i1, i2) not in picked:
+                            picked.add((i1, i2))
+                            break
 
-        return loaded_data_tuple
+                    ex1 = asdict(group_examples[i1])
+                    ex2 = asdict(group_examples[i2])
+
+                    assert(ex2['tokens'][0] == '[CLS]')  # skip token 0 on ex2
+
+                    pair = dict()
+                    for key in ex1:
+                        if key == 'unique_id':
+                            pair[key] = unique_id
+                            unique_id += 1
+                        elif key == 'data_ids':
+                            pair[key] = type(ex1[key])()
+                            for k in ex1[key]:
+                                assert(isinstance(ex1[key][k], np.ndarray))
+                                pair[key][k] = np.concatenate([ex1[key][k], ex2[key][k][1:]])
+                        elif key == 'index_word_in_example':
+                            pair[key] = np.concatenate([ex1[key], ex2[key][1:] - 1 + ex1[key][-1]])
+                        elif key == 'index_token_in_sentence':
+                            pair[key] = np.concatenate([ex1[key], ex2[key][1:] - 1 + ex1[key][-1]])
+                        elif isinstance(ex1[key], tuple):
+                            pair[key] = ex1[key] + ex2[key][1:]
+                        else:
+                            assert(isinstance(ex1[key], np.ndarray))
+                            pair[key] = np.concatenate([ex1[key], ex2[key][1:]])
+
+                    paired.append(InputFeatures(**pair))
+                    len1.append(len(ex1['tokens']))
+                    metadata_indices.append(ex1['unique_id'])
+
+            for response_k in loaded_data_tuple.data:
+                if response_k not in combined:
+                    combined[response_k] = list()
+                    old_to_new[response_k] = dict()
+                data_id_pair_fn = self._get_data_id_pair_fn(response_k, loaded_data_tuple.data[response_k].kind)
+                data = loaded_data_tuple.data[response_k].data
+                for ex1_len, pair in zip(len1, paired):
+                    data_id_pairs = data_id_pair_fn(
+                        pair.data_ids[response_k][:ex1_len],
+                        pair.data_ids[response_k][ex1_len:])
+                    assert(len(data_id_pairs) == len(pair.data_ids[response_k]))
+                    new_data_ids = list()
+                    for data_id_pair in data_id_pairs:
+                        if isinstance(data_id_pair, tuple):
+                            id1, id2 = data_id_pair
+                            if id1 < 0 or id2 < 0:
+                                new_data_ids.append(-1)
+                            else:
+                                if (id1, id2) in old_to_new:
+                                    new_data_ids.append(old_to_new[(id1, id2)])
+                                else:
+                                    old_to_new[(id1, id2)] = len(combined[response_k])
+                                    new_data_ids.append(len(combined[response_k]))
+                                    if self.combine_fn is None:
+                                        combined[response_k].append(data[id2] - data[id1])
+                                    else:
+                                        combined[response_k].append(self.combine_fn(data[id1], data[id2]))
+                        elif isinstance(data_id_pair, int):
+                            if data_id_pair >= 0:
+                                raise ValueError('Invalid data_id_pair: {}'.format(data_id_pair))
+                            else:
+                                new_data_ids.append(-1)
+                        elif data_id_pair is None:
+                            new_data_ids.append(-1)
+                        else:
+                            raise ValueError('Invalid data_id_pair: {}'.format(data_id_pair))
+                    assert(len(new_data_ids) == len(pair.data_ids[response_k]))
+                    pair.data_ids[response_k] = np.array(new_data_ids)
+            loaded_data_tuple = replace(loaded_data_tuple, **{split_name: paired})
+        loaded_data_tuple = replace(loaded_data_tuple, data=type(loaded_data_tuple.data)(
+            (k, KindData(loaded_data_tuple.data[k].kind, np.array(combined[k]))) for k in loaded_data_tuple.data))
+        metadata = type(metadata)((k, metadata[k][metadata_indices]) for k in metadata)
+        return loaded_data_tuple, metadata

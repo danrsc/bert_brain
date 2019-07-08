@@ -9,7 +9,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.io import loadmat
 from scipy.ndimage.filters import gaussian_filter
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfilt, detrend
 
 import nibabel
 import cortex
@@ -59,7 +59,9 @@ class HarryPotterCorpus(CorpusBase):
             fmri_sentence_mode: str = 'multiple',
             fmri_high_pass: float = None,
             fmri_diff: bool = False,
-            diff_scramble_samples: Optional[Union[int, Tuple[int, float]]] = None):
+            diff_scramble_samples: Optional[Union[int, Tuple[int, float]]] = None,
+            fmri_internal_detrend=False,
+            fmri_internal_standardize=False):
         """
         Loader for Harry Potter data
         Args:
@@ -128,6 +130,8 @@ class HarryPotterCorpus(CorpusBase):
             use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
             sentence_mode=fmri_sentence_mode)
         self.fmri_high_pass = fmri_high_pass
+        self.fmri_internal_detrend = fmri_internal_detrend
+        self.fmri_internal_standardize = fmri_internal_standardize
         self.fmri_diff = fmri_diff
         self.diff_scramble_samples = diff_scramble_samples
 
@@ -586,6 +590,28 @@ class HarryPotterCorpus(CorpusBase):
 
         assert(np.array_equal(run_lengths, HarryPotterCorpus.static_run_lengths))
 
+        # apply some special processing before we select any examples
+        for subject in data:
+            subject_data = data[subject]
+            if self.fmri_high_pass is not None:
+                fs = 0.5  # sample rate is 0.5 Hz
+                sos = butter(10, 2 * self.fmri_high_pass / fs, 'high', output='sos')
+                subject_data = [sosfilt(sos, d, axis=0) for d in subject_data]
+            if self.fmri_smooth_factor is not None:
+                for idx in range(len(subject_data)):
+                    for ax_idx in range(len(subject_data[idx])):
+                        subject_data[idx][ax_idx] = gaussian_filter(
+                            subject_data[idx][ax_idx],
+                            sigma=self.fmri_smooth_factor, order=0, mode='reflect', truncate=4.0)
+            if self.fmri_internal_detrend:
+                subject_data = [detrend(d, axis=0) for d in subject_data]
+            if self.fmri_internal_standardize:
+                subject_data = [np.divide(d - np.nanmean(d, axis=0, keepdims=True), np.nanstd(d, axis=0, keepdims=True),
+                                          where=np.nanstd(d, axis=0, keepdims=True) != 0)
+                                for d in subject_data]
+            # apply spatial mask
+            data[subject] = [d[:, spatial_masks[subject]] for d in subject_data]
+
         if self.fmri_diff:
             active_1 = list()
             active_2 = list()
@@ -647,20 +673,8 @@ class HarryPotterCorpus(CorpusBase):
             data = masked_data
 
         for subject in data:
-            orig_subject = subject[len('hp_fmri_'):]
-            subject_data = data[subject]
-            if self.fmri_high_pass is not None:
-                fs = 0.5  # sample rate is 0.5 Hz
-                sos = butter(10, 2 * self.fmri_high_pass / fs, 'high', output='sos')
-                subject_data = sosfilt(sos, subject_data, axis=0)
-            if self.fmri_smooth_factor is not None:
-                for idx in range(len(subject_data)):
-                    subject_data[idx] = gaussian_filter(
-                        subject_data[idx], sigma=self.fmri_smooth_factor, order=0, mode='reflect', truncate=4.0)
-            # apply spatial mask
-            subject_data = subject_data[:, spatial_masks[orig_subject]]
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
-            data[subject] = np.expand_dims(subject_data, axis=1)
+            data[subject] = np.expand_dims(data[subject], axis=1)
 
         for example in local_examples:
             features = HarryPotterCorpus._add_fmri_example(

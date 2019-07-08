@@ -2,13 +2,14 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple
 
 import numpy as np
-from bert_erp_datasets import CorpusKeys, PreprocessMany, PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, \
+from bert_erp_datasets import CorpusKeys, PreprocessStandardize, PreprocessLog, \
+    PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, PreparedData, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
-__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'Settings']
+__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'LoadFrom',
+           'Settings']
 
 
 @dataclass
@@ -74,29 +75,29 @@ def _default_preprocessors():
     # ResponseKind.linzen_agree defaults to None
 
     # alternate hp_meg for soft_label_cross_entropy
-    #     PreprocessMany(
+    #     [
     #         #  preprocess_detrend,
     #         #  partial(preprocess_standardize, average_axis=None),
     #         PreprocessDiscretize(bins=np.exp(np.linspace(-0.2, 1., 5))),  # bins=np.arange(6) - 2.5
-    #         PreprocessNanMean()))
+    #         PreprocessNanMean())]
 
     return {
-        ResponseKind.hp_fmri: PreprocessMany(
+        ResponseKind.hp_fmri: [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None)),
-        ResponseKind.hp_meg: PreprocessMany(
+            PreprocessStandardize(stop_mode=None)],
+        ResponseKind.hp_meg: [
             PreprocessStandardize(average_axis=None, stop_mode='content'),
             PreprocessPCA(stop_mode='content'),
-            PreprocessStandardize(average_axis=None, stop_mode='content')),
-        # ResponseKind.hp_meg: PreprocessMany(
+            PreprocessStandardize(average_axis=None, stop_mode='content')],
+        # ResponseKind.hp_meg: [
         #     PreprocessDetrend(stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
-        #     PreprocessStandardize(stop_mode='content', average_axis=None)),
+        #     PreprocessStandardize(stop_mode='content', average_axis=None)],
 
         ResponseKind.ucl_erp: preprocess_standardize,
-        ResponseKind.ucl_eye: PreprocessMany(PreprocessLog(), preprocess_standardize),
-        ResponseKind.ucl_self_paced: PreprocessMany(PreprocessLog(), preprocess_standardize),
-        ResponseKind.ns_reaction_times: PreprocessMany(
-            PreprocessClip(maximum=3000, value_beyond_max=np.nan), PreprocessLog(), preprocess_standardize),
+        ResponseKind.ucl_eye: [PreprocessLog(), preprocess_standardize],
+        ResponseKind.ucl_self_paced: [PreprocessLog(), preprocess_standardize],
+        ResponseKind.ns_reaction_times: [
+            PreprocessClip(maximum=3000, value_beyond_max=np.nan), PreprocessLog(), preprocess_standardize],
         ResponseKind.ns_froi: PreprocessStandardize(stop_mode=None),
     }
 
@@ -192,7 +193,24 @@ class Settings:
     # Mapping from [response_key, kind, or corpus_key] to a preprocessor. Lookups fall back in that
     # order. This determines how the data will be processed. If not specified, no preprocessing is applied
     preprocessors: MutableMapping[
-        str, Callable[[PreparedDataView, Optional[Mapping[str, np.array]]], PreparedDataView]] = \
+            str,
+            Union[
+                Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
+                Tuple[
+                    str,
+                    Callable[
+                        [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
+                        Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
+                str,
+                Sequence[
+                    Union[
+                        Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
+                        Tuple[
+                            str,
+                            Callable[
+                                [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
+                                Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
+                        str]]]] = \
         field(default_factory=_default_preprocessors)
 
     bert_model: str = 'bert-base-uncased'
