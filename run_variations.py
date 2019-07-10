@@ -34,7 +34,8 @@ from bert_erp_common import SwitchRemember, cuda_most_free_device, cuda_auto_emp
 from bert_erp_datasets import CorpusKeys, DataPreparer, ResponseKind, \
     PreprocessStandardize, PreprocessDetrend, PreprocessFeatureStandardize, \
     PreprocessSequenceStandardize, PreprocessSoSFilter, HarryPotterMakeLeaveOutFmriRun, \
-    PreprocessMakeBinary, PreprocessSqueeze, PreprocessKMeans, PreprocessRandomPair
+    PreprocessMakeBinary, PreprocessSqueeze, PreprocessKMeans, PreprocessRandomPair, \
+    preprocess_fork_no_cluster_to_disk
 from bert_erp_settings import Settings, OptimizationSettings, PredictionHeadSettings, CriticSettings, \
     TrainingVariation, LoadFrom
 from bert_erp_paths import Paths
@@ -156,7 +157,8 @@ def run_variation(
 
         seed = set_random_seeds(settings.seed, index_run, n_gpu)
         data_preparer = DataPreparer(
-            seed, settings.preprocessors, settings.get_split_functions(index_run), output_model_path)
+            seed, settings.preprocessors, settings.get_split_functions(index_run), settings.preprocess_fork_fn,
+            output_model_path)
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
             loss_tasks,
@@ -1079,16 +1081,14 @@ def named_variations(name):
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_diff_cluster':
-        fmri_subjects_ = ['I']
-        # fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
+        # fmri_subjects_ = ['I']
+        fmri_subjects_ = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
         # fmri_subjects_ = ['H', 'I', 'K', 'L']
-        training_variations = list()
-        for subject in fmri_subjects_:
-            training_variations.append(('hp_fmri_{}'.format(subject),))
+        training_variations = [tuple('hp_fmri_{}'.format(s) for s in fmri_subjects_)]
         settings = Settings(
             corpus_keys=(CorpusKeys.harry_potter,),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=3,
+                num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=1,
                 num_final_epochs_train_prediction_heads_only=0),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg))
@@ -1112,12 +1112,13 @@ def named_variations(name):
             PreprocessSqueeze(),
             PreprocessKMeans(num_clusters=12, transform_fn=rank_space),
             ('diff', PreprocessRandomPair(
-                num_samples_per_group=20000,
+                num_samples_per_group=5000,
                 metadata_example_group_by='fmri_runs',
                 data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0, strict=True)]
+        settings.preprocess_fork_fn = preprocess_fork_no_cluster_to_disk
         settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[5]))
+            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[10]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(

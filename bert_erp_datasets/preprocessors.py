@@ -32,7 +32,8 @@ __all__ = [
     'PreprocessSoSFilter',
     'PreprocessSqueeze',
     'PreprocessKMeans',
-    'PreprocessRandomPair']
+    'PreprocessRandomPair',
+    'preprocess_fork_no_cluster_to_disk']
 
 
 def _fit_boxcox(item):
@@ -726,10 +727,10 @@ class PreprocessRandomPair:
                             if id1 < 0 or id2 < 0:
                                 new_data_ids.append(-1)
                             else:
-                                if (id1, id2) in old_to_new:
-                                    new_data_ids.append(old_to_new[(id1, id2)])
+                                if (id1, id2) in old_to_new[response_k]:
+                                    new_data_ids.append(old_to_new[response_k][(id1, id2)])
                                 else:
-                                    old_to_new[(id1, id2)] = len(combined[response_k])
+                                    old_to_new[response_k][(id1, id2)] = len(combined[response_k])
                                     new_data_ids.append(len(combined[response_k]))
                                     if self.combine_fn is None:
                                         combined[response_k].append(data[id2] - data[id1])
@@ -751,3 +752,58 @@ class PreprocessRandomPair:
             (k, KindData(loaded_data_tuple.data[k].kind, np.array(combined[k]))) for k in loaded_data_tuple.data))
         metadata = type(metadata)((k, metadata[k][metadata_indices]) for k in metadata)
         return loaded_data_tuple, metadata
+
+
+class PreprocessToDisk:
+
+    def __init__(self, delete=True):
+        self.output_model_path = None
+        self.data_key = None
+        self.delete = delete
+
+    def set_model_path(self, output_model_path, data_key):
+        self.output_model_path = output_model_path
+        self.data_key = data_key
+
+    def __call__(self, loaded_data_tuple, metadata):
+        if not os.path.exists(self.output_model_path):
+            os.makedirs(self.output_model_path)
+        unique_ids = list()
+        lengths = list()
+        data_ids = list()
+        for ex in chain(
+                loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test):
+            unique_ids.append(ex.unique_id)
+            lengths.append(len(ex.data_ids))
+            data_ids.extend(ex.data_ids)
+        np.savez(
+            os.path.join(self.output_model_path, '{}.npz'.format(self.data_key)),
+            unique_ids=np.array(unique_ids),
+            lengths=np.array(lengths),
+            data_ids=np.array(data_ids),
+            data=loaded_data_tuple.data)
+        if self.delete:
+            return replace(loaded_data_tuple, data=None)
+        return loaded_data_tuple
+
+
+def preprocess_fork_no_cluster_to_disk(name, kind, preprocessor):
+    if preprocessor is None or isinstance(preprocessor, str):
+        return None, None
+    if callable(preprocessor):
+        if isinstance(preprocessor, PreprocessKMeans):
+            return name + '_no_cluster_to_disk', PreprocessToDisk()
+        else:
+            return None, None
+    else:
+        new_preprocess = list()
+        has_kmeans = False
+        for step in preprocessor:
+            if isinstance(step, PreprocessKMeans):
+                has_kmeans = True
+            else:
+                new_preprocess.append(step)
+        if not has_kmeans:
+            return None, None
+        new_preprocess.append(PreprocessToDisk())
+        return name + '_no_cluster_to_disk', new_preprocess

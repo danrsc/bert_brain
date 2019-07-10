@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from itertools import chain
 from dataclasses import dataclass, replace
 from typing import Optional, Sequence, Mapping, Callable, Tuple
 
@@ -55,10 +56,15 @@ def _reconcile_view_examples(
 
 
 def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, response_key: str):
-    _reconcile_view_examples(prepared_data.train, view.train, response_key)
-    _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
-    _reconcile_view_examples(prepared_data.test, view.test, response_key)
-    prepared_data.data[response_key] = replace(prepared_data.data[response_key], data=view.data)
+    if view.data is None:
+        for ex in chain(prepared_data.train, prepared_data.validation, prepared_data.test):
+            del ex.data_ids[response_key]
+        del prepared_data.data[response_key]
+    else:
+        _reconcile_view_examples(prepared_data.train, view.train, response_key)
+        _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
+        _reconcile_view_examples(prepared_data.test, view.test, response_key)
+        prepared_data.data[response_key] = replace(prepared_data.data[response_key], data=view.data)
 
 
 def _copy_examples(examples):
@@ -82,11 +88,13 @@ class DataPreparer(object):
                         Optional[Sequence[InputFeatures]],
                         Optional[Sequence[InputFeatures]],
                         Optional[Sequence[InputFeatures]]]]],
+            preprocess_fork_fn,
             output_model_path: str):
         self._seed = seed
         self._random_state = dict()
         self._prepared_cache = dict()
         self._preprocess_dict = dict(preprocess_dict) if preprocess_dict is not None else None
+        self._preprocess_fork_fn = preprocess_fork_fn
         self._split_function_dict = dict(split_function_dict) if split_function_dict is not None else None
         self._output_model_path = output_model_path
 
@@ -153,6 +161,23 @@ class DataPreparer(object):
                 phase_change_steps = dict()
                 phase_steps = OrderedDict()
 
+                if self._preprocess_fork_fn is not None:
+                    current_response_keys = list(result[k].data)
+                    for response_k in current_response_keys:
+                        preprocessor = _get_preprocessor(
+                            self._preprocess_dict, k, response_k, result[k].data[response_k].kind)
+                        forked_name, forked_preprocessor = self._preprocess_fork_fn(
+                            response_k, result[k].data[response_k].kind, preprocessor)
+                        if forked_name is not None:
+                            if forked_name in result[k].data:
+                                raise ValueError('Duplicate name: {}'.format(forked_name))
+                            result[k].data[forked_name] = KindData(
+                                result[k].data[response_k].kind, np.copy(result[k].data[response_k].data))
+                        if forked_preprocessor is not None:
+                            self._preprocess_dict[forked_name] = forked_preprocessor
+                        for ex in chain(result[k].train, result[k].validation, result[k].test):
+                            ex.data_ids[forked_name] = np.copy(ex.data_ids[response_k])
+
                 for response_k in result[k].data:
                     response_phases = None
                     phase_steps[response_k] = None
@@ -202,7 +227,8 @@ class DataPreparer(object):
                         raise ValueError('Phase change step is not specified: {}'.format(phase))
 
                 for index_phase in range(len(phases) + 1):
-                    for response_k in result[k].data:
+                    current_response_keys = list(result[k].data)
+                    for response_k in current_response_keys:
                         for step in phase_steps[response_k][index_phase]:
                             if hasattr(step, 'set_model_path'):
                                 step.set_model_path(self._output_model_path, response_k)

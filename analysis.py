@@ -103,12 +103,36 @@ class Aggregator:
             return self._field_values[name]
         return fn(self._field_values[name])
 
-    def counts(self, name=None):
+    def counts(self, name):
         return self._counts[name]
 
 
+def read_no_cluster_data(path):
+    loaded = np.load(path)
+    unique_ids = loaded['unique_ids']
+    lengths = loaded['lengths']
+    data_ids = loaded['data_ids']
+    splits = np.cumsum(lengths)[:-1]
+    data_ids = np.split(data_ids, splits)
+    return unique_ids, data_ids, loaded['data']
+
+
+def expand_predictions(prediction, cluster_ids):
+    is_prediction_1d = len(prediction.shape) == 1
+    if is_prediction_1d:
+        prediction = np.expand_dims(prediction, 0)
+    expanded = np.zeros((prediction.shape[0], np.prod(cluster_ids.shape)), prediction.dtype)
+    for idx, c in enumerate(np.unique(cluster_ids)):
+        indicator = cluster_ids == c
+        expanded[:, indicator] = prediction[:, idx]
+    if is_prediction_1d:
+        return np.reshape(expanded, cluster_ids.shape)
+    else:
+        return np.reshape(expanded, (prediction.shape[0],) + cluster_ids.shape)
+
+
 def _read_variation_parallel_helper(item):
-    (result_path, variation_set_name, variation_hash, index_run, aux_loss,
+    (result_path, model_path, variation_set_name, variation_hash, index_run, aux_loss,
      compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) = item
     training_variations, _, _, _, _ = named_variations(variation_set_name)
     training_variation = None
@@ -119,12 +143,12 @@ def _read_variation_parallel_helper(item):
     if training_variation is None:
         raise RuntimeError('Bad variation hash')
     output_dir = os.path.join(result_path, variation_set_name, variation_hash)
+    model_dir = os.path.join(model_path, variation_set_name, variation_hash, 'run_{}'.format(index_run))
     validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
     if not os.path.exists(validation_npz_path):
         return index_run, None
     output_results_by_name = read_predictions(validation_npz_path)
-    run_aggregated = dict()
-    losses = dict()
+    run_results = dict()
     for name in output_results_by_name:
         if isinstance(training_variation, TrainingVariation):
             in_training_variation = name in training_variation.loss_tasks
@@ -132,17 +156,41 @@ def _read_variation_parallel_helper(item):
             in_training_variation = name in training_variation
         if not in_training_variation and name not in aux_loss:
             continue
+        no_cluster_path = os.path.join(model_dir, '{}_no_cluster_to_disk.npz'.format(name))
+        cluster_id_path = os.path.join(model_dir, 'kmeans_clusters_{}.npy'.format(name))
+        cluster_ids = None
+        no_cluster_unique_ids = None
+        no_cluster_data_ids = None
+        no_cluster_data = None
+        if os.path.exists(cluster_id_path) and os.path.exists(no_cluster_path):
+            cluster_ids = np.load(cluster_id_path)
+            no_cluster_unique_ids, no_cluster_data_ids, no_cluster_data = read_no_cluster_data(no_cluster_path)
         output_results = output_results_by_name[name]
+        run_aggregated = Aggregator()
+        loss = None
         for output_result in output_results:
-            if name not in run_aggregated:
-                run_aggregated[name] = Aggregator()
-            if name not in losses:
-                losses[name] = output_result.critic_type
+            if loss is None:
+                loss = output_result.critic_type
             else:
-                assert (losses[name] == output_result.critic_type)
-            run_aggregated[name].update(output_result, is_sequence=output_result.sequence_type != 'single')
-    run_results = dict()
-    for name in run_aggregated:
+                assert (loss == output_result.critic_type)
+            if cluster_ids is not None:
+                output_result.prediction = expand_predictions(output_result.prediction, cluster_ids)
+                output_result.mask = expand_predictions(output_result.mask, cluster_ids)
+                index_unique_id = np.where(output_result.unique_id == no_cluster_unique_ids)[0]
+                assert(len(index_unique_id) == 1)
+                index_unique_id = index_unique_id[0]
+                data_ids = no_cluster_data_ids[index_unique_id]
+                data_ids = data_ids[data_ids >= 0]
+                seen = set()
+                unique_data_ids = list()
+                for d in data_ids:
+                    if d not in seen:
+                        unique_data_ids.append(d)
+                        seen.add(d)
+                assert(len(unique_data_ids) == output_result.target.shape[0])
+                output_result.target = np.array(list([no_cluster_data[d] for d in unique_data_ids]))
+            run_aggregated.update(output_result, is_sequence=output_result.sequence_type != 'single')
+
         loss_handler_kwargs = dict(loss_handler_kwargs)
         if isinstance(k_vs_k_feature_axes, dict):
             if name in k_vs_k_feature_axes:
@@ -151,8 +199,8 @@ def _read_variation_parallel_helper(item):
                 loss_handler_kwargs['k_vs_k_feature_axes'] = -1
         else:
             loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
-        handler = make_prediction_handler(losses[name], loss_handler_kwargs)
-        result_dict = handler(run_aggregated[name])
+        handler = make_prediction_handler(loss, loss_handler_kwargs)
+        result_dict = handler(run_aggregated)
         if compute_scalar:
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -164,7 +212,7 @@ def _read_variation_parallel_helper(item):
 def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
                            compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
 
-    task_arguments = [(paths.result_path, variation_set_name, task_hash(training_variation), i,
+    task_arguments = [(paths.result_path, paths.model_path, variation_set_name, task_hash(training_variation), i,
                        aux_loss, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(num_runs)]
 
     with ThreadPoolExecutor() as ex:

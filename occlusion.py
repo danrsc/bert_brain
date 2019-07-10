@@ -56,14 +56,17 @@ def _run_occlusion_for_variation(model_path, data, tokenizer, settings: Settings
 
     all_results = OrderedDict()
 
+    os.path.join(model_path, 'run_{}'.format(index_run))
+
     model = BertMultiPredictionHead.load(
-        os.path.join(model_path, 'run_{}'.format(index_run)),
+        model_path,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index))
     model.to(device)
     model.eval()
 
     seed = set_random_seeds(settings.seed, index_run, n_gpu)
-    data_preparer = DataPreparer(seed, settings.preprocessors, settings.get_split_functions(index_run))
+    data_preparer = DataPreparer(
+        seed, settings.preprocessors, settings.get_split_functions(index_run), settings.preprocess_fork_fn, model_path)
     _, validation_data, _ = make_datasets(
         data_preparer.prepare(data), data_id_in_batch_keys=settings.data_id_in_batch_keys)
 

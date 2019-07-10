@@ -4,7 +4,7 @@ from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, U
 import numpy as np
 from bert_erp_datasets import CorpusKeys, PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, PreparedData, \
-    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out
+    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
@@ -167,6 +167,17 @@ class TrainingVariation:
             self.name = '{}{}'.format(tuple(self.loss_tasks), suffix)
 
 
+_PreprocessorTypeUnion = Union[
+    Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
+    Tuple[
+        str,
+        Callable[
+            [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
+            Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
+    str]
+PreprocessorTypeUnion = Union[_PreprocessorTypeUnion, Sequence[_PreprocessorTypeUnion]]
+
+
 @dataclass
 class Settings:
     # which data to load
@@ -192,26 +203,10 @@ class Settings:
 
     # Mapping from [response_key, kind, or corpus_key] to a preprocessor. Lookups fall back in that
     # order. This determines how the data will be processed. If not specified, no preprocessing is applied
-    preprocessors: MutableMapping[
-            str,
-            Union[
-                Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
-                Tuple[
-                    str,
-                    Callable[
-                        [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
-                        Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
-                str,
-                Sequence[
-                    Union[
-                        Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
-                        Tuple[
-                            str,
-                            Callable[
-                                [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
-                                Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
-                        str]]]] = \
-        field(default_factory=_default_preprocessors)
+    preprocessors: MutableMapping[str, PreprocessorTypeUnion] = field(default_factory=_default_preprocessors)
+
+    preprocess_fork_fn: Callable[
+        [str, KindData, PreprocessorTypeUnion], Tuple[Optional[str], Optional[PreprocessorTypeUnion]]] = None
 
     bert_model: str = 'bert-base-uncased'
     optimization_settings: OptimizationSettings = OptimizationSettings()
