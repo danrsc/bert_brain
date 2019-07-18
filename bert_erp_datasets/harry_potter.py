@@ -37,6 +37,10 @@ class _HarryPotterWordFMRI:
 
 class HarryPotterCorpus(CorpusBase):
 
+    @classmethod
+    def _path_attributes(cls):
+        return dict(path='harry_potter_path')
+
     # we need to use these so we can have run information even when we
     # don't read in fmri data; i.e. as a way to do train-test splits the
     # same for MEG as for fMRI. We will assert that the run lengths we
@@ -45,7 +49,7 @@ class HarryPotterCorpus(CorpusBase):
 
     def __init__(
             self,
-            path: str,
+            path: Optional[str] = None,
             meg_subjects: Optional[Sequence[str]] = None,
             meg_kind: str = 'pca',
             separate_meg_axes: Optional[Union[str, Sequence[str]]] = None,

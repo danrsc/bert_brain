@@ -44,6 +44,8 @@ class InputFeatures:
     head_token_ids: Sequence[int]
     index_word_in_example: Sequence[int]  # useful for grouping tokens together in the model
     index_token_in_sentence: Sequence[int]  # useful for positional embedding
+    multipart_id: int
+    span_ids: Optional[Sequence[int]]
     data_ids: Union[Mapping[str, Sequence[int]], Sequence[int]]
 
 
@@ -62,9 +64,7 @@ class _ResponseKind:
     ucl_self_paced: str
     ns_reaction_times: str
     ns_froi: str
-    colorless: str
-    linzen_agree: str
-    stanford_sentiment: str
+    generic: str
 
 
 ResponseKind = _ResponseKind(**dict((f.name, f.name) for f in dataclasses.fields(_ResponseKind)))

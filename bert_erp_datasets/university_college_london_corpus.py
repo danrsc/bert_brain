@@ -14,8 +14,14 @@ __all__ = ['UclCorpus']
 
 class UclCorpus(CorpusBase):
 
+    @classmethod
+    def _path_attributes(cls):
+        return dict(
+            frank_2013_eye_path='frank_2013_eye_path',
+            frank_2015_erp_path='frank_2015_erp_path')
+
     def __init__(
-            self, frank_2013_eye_path, frank_2015_erp_path,
+            self, frank_2013_eye_path=None, frank_2015_erp_path=None,
             subtract_erp_baseline=False, include_erp=True, include_eye=True, self_paced_inclusion='all'):
         self.frank_2013_eye_path = frank_2013_eye_path
         self.frank_2015_erp_path = frank_2015_erp_path

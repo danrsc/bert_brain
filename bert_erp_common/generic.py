@@ -4,7 +4,7 @@ import re
 
 
 __all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'SwitchRemember', 'camel_to_snake',
-           'MultiReplace']
+           'MultiReplace', 'split_with_indices']
 
 
 def zip_equal(*it):
@@ -89,6 +89,10 @@ def camel_to_snake(s):
     # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+
+def split_with_indices(s):
+    return [(match.start(), match.group()) for match in re.finditer(r'\S+', s)]
 
 
 class MultiReplace:

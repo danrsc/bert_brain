@@ -40,6 +40,36 @@ def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=Fa
     return maxes
 
 
+def k_data_ids(k, data_ids, return_indices=False, check_unique=False):
+
+    if len(data_ids.size()) != 2:
+        raise ValueError('data_ids must be 2D')
+
+    indicator_valid = data_ids >= 0
+    count_valid = torch.sum(indicator_valid, dim=1)
+    if torch.max(count_valid) != k or torch.min(count_valid) != k:
+        print(count_valid)
+        raise ValueError('Incorrect number of data_ids. Expected {}'.format(k))
+
+    data_ids = torch.masked_select(data_ids, indicator_valid)
+    data_ids = torch.reshape(data_ids, (data_ids.size()[0], k))
+
+    if check_unique:
+        mins, _ = torch.min(data_ids, dim=1)
+        maxes, _ = torch.max(data_ids, dim=1)
+        if torch.sum(maxes != mins) > 0:
+            raise ValueError('More than one data_id exists for some examples')
+
+    if return_indices:
+        index_array = torch.arange(data_ids.size()[1], device=data_ids.device).view(
+            (1, data_ids.size()[1])).repeat((data_ids.size()[0], 1))
+        indices = torch.masked_select(index_array, indicator_valid)
+        indices = torch.reshape(indices, (indicator_valid.size()[0], k))
+        return data_ids, indices
+
+    return data_ids
+
+
 class GroupPool(torch.nn.Module):
 
     def forward(self, x, groupby):

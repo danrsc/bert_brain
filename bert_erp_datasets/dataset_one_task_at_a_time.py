@@ -8,7 +8,11 @@ from torch.utils.data import TensorDataset
 from bert_erp_common import SwitchRemember
 from .input_features import FieldSpec
 
-__all__ = ['PreparedDataDatasetOneTaskAtATime', 'BatchOneTaskRandomSampler', 'BatchOneTaskSequentialSampler']
+__all__ = [
+    'PreparedDataDatasetOneTaskAtATime',
+    'BatchOneTaskRandomSampler',
+    'BatchOneTaskSequentialSampler',
+    'BatchOneTaskUniformTaskSampler']
 
 
 def _pad(to_pad, sequence_length, value=0):
@@ -91,6 +95,7 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
             token_field='tokens',
             id_field='unique_id',
             data_index_field='data_ids',
+            multipart_example_field='multipart_id',
             data_id_in_batch_keys=None,
             filter_when_not_in_loss_keys=None):
 
@@ -114,6 +119,7 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
             self._data_id_in_batch_keys = set(data_id_in_batch_keys)
 
         self._max_sequence_length = max_sequence_length
+        self._multipart_indices = dict()
 
         for data_set_id, data_key in enumerate(prepared_data):
 
@@ -232,6 +238,12 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                 self._data_id_to_tokens[(data_set_id, example_values[id_field])] = example_values[token_field]
 
             self._num_examples[data_key] = len(examples)
+            if multipart_example_field in self._example_tensors[data_key]:
+                _, multipart_inverse = np.unique(
+                    self._example_tensors[data_key][multipart_example_field], return_inverse=True)
+                self._multipart_indices[data_key] = list()
+                for group in np.unique(multipart_inverse):
+                    self._multipart_indices[data_key].append(np.where(multipart_inverse == group)[0])
 
         for data_key in self._example_tensors:
             for key in self._example_tensors[data_key]:
@@ -289,9 +301,9 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
     def _data_keys_and_index(self, index):
         for data_key in self._example_tensors:
             for response_data_key in self._response_data_indices[data_key]:
-                if index < len(self._response_data_indices[data_key][response_data_key]):
+                if index < self._num_examples[data_key]:
                     return data_key, response_data_key, index
-                index -= len(self._example_tensors[data_key][response_data_key])
+                index -= self._num_examples[data_key]
         raise IndexError('Index out of bounds: {}'.format(index))
 
     def __getitem__(self, item):
@@ -328,14 +340,25 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         return torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
 
     def __len__(self):
-        return sum(self.task_lengths())
+        task_indices = self.task_indices()
+        return sum(sum(len(task_item_list) for task_item_list in task_indices[task]) for task in task_indices)
 
-    def task_lengths(self):
-        lengths = list()
+    def task_indices(self):
+        indices = OrderedDict()
+        offset = 0
         for data_key in self._example_tensors:
-            for response_data_key in self._response_data_indices[data_key]:
-                lengths.append(len(self._response_data_indices[data_key][response_data_key]))
-        return lengths
+            indices[data_key] = list()
+            if data_key in self._multipart_indices:
+                task_indices = [np.array(i) for i in self._multipart_indices[data_key]]
+                count = sum(len(i) for i in task_indices)
+            else:
+                task_indices = np.split(np.arange(self._num_examples[data_key]), self._num_examples[data_key])
+                count = self._num_examples[data_key]
+            for _ in self._response_data_indices[data_key]:
+                for index_arr in task_indices:
+                    indices[data_key].append(index_arr + offset)
+                offset += count
+        return indices
 
     def data_set_key_for_id(self, data_set_id):
         if isinstance(data_set_id, torch.Tensor):
@@ -376,74 +399,96 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
 
 class BatchOneTaskRandomSampler(torch.utils.data.Sampler):
 
-    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, drop_last):
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size):
         super().__init__(data_source)
-        self.task_lengths = np.array(data_source.task_lengths())
+        self.task_indices = data_source.task_indices()
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, "
                              "but got batch_size={}".format(batch_size))
-        if not isinstance(drop_last, bool):
-            raise ValueError("drop_last should be a boolean value, but got "
-                             "drop_last={}".format(drop_last))
         self.batch_size = batch_size
-        self.drop_last = drop_last
 
     def __iter__(self):
-        offset = 0
         batches = list()
-        for task_length in self.task_lengths:
-            task_sample = np.random.permutation(task_length) + offset
-            task_sample = np.array_split(task_sample, int(np.ceil(len(task_sample) / self.batch_size)))
-            if len(task_sample[-1]) < self.batch_size and self.drop_last:
-                task_sample = task_sample[:-1]
-            batches.extend(task_sample)
-            offset += task_length
+        for task in self.task_indices:
+            task_sample = np.random.permutation(len(self.task_indices[task]))
+            batch = list()
+            for i in task_sample:
+                if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                    if len(batch) > 0:
+                        batches.append(np.concatenate(batch))
+                    batch = list()
+                # if a single multipart item > batch_count, we just make a batch that is larger than batch size
+                # so no check here
+                batch.append(self.task_indices[task][i])
+            if len(batch) > 0:
+                batches.append(np.concatenate(batch))
         batches = np.random.permutation(batches)
         for batch in batches:
             yield batch
 
     def __len__(self):
-        result = 0
-        for task_length in self.task_lengths:
-            if self.drop_last:
-                result += task_length // self.batch_size
-            else:
-                result += int(np.ceil(task_length / self.batch_size))
-        return result
+        return sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
 
 
-class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
+class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
 
-    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, drop_last):
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, batches_per_epoch):
         super().__init__(data_source)
-        self.task_lengths = np.array(data_source.task_lengths())
+        self.task_indices = data_source.task_indices()
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, "
                              "but got batch_size={}".format(batch_size))
-        if not isinstance(drop_last, bool):
-            raise ValueError("drop_last should be a boolean value, but got "
-                             "drop_last={}".format(drop_last))
+        if not isinstance(batches_per_epoch, int) or isinstance(batches_per_epoch, bool) or \
+                batches_per_epoch <= 0:
+            raise ValueError("batches_per_epoch should be a positive integer value, "
+                             "but got batch_per_epoch={}".format(batches_per_epoch))
         self.batch_size = batch_size
-        self.drop_last = drop_last
+        self.batches_per_epoch = batches_per_epoch
 
     def __iter__(self):
-        offset = 0
-        for task_length in self.task_lengths:
-            task_sample = np.arange(task_length) + offset
-            task_sample = np.array_split(task_sample, int(np.ceil(len(task_sample) / self.batch_size)))
-            if len(task_sample[-1]) < self.batch_size and self.drop_last:
-                task_sample = task_sample[:-1]
-            for batch in task_sample:
-                yield batch
-            offset += task_length
+        tasks = [task for task in self.task_indices]
+        for _ in range(self.batches_per_epoch):
+            task = np.random.choice(tasks)
+            task_sample = np.random.permutation(len(self.task_indices[task]))
+            batch = list()
+            for i in task_sample:
+                if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                    if len(batch) == 0:
+                        batch.append(self.task_indices[task][i])
+                    break
+                batch.append(self.task_indices[task][i])
+            yield np.concatenate(batch)
 
     def __len__(self):
-        result = 0
-        for task_length in self.task_lengths:
-            if self.drop_last:
-                result += task_length // self.batch_size
-            else:
-                result += int(np.ceil(task_length / self.batch_size))
-        return result
+        return self.batches_per_epoch
+
+
+class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
+
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size):
+        super().__init__(data_source)
+        self.task_indices = data_source.task_indices()
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
+                batch_size <= 0:
+            raise ValueError("batch_size should be a positive integer value, "
+                             "but got batch_size={}".format(batch_size))
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        for task in self.task_indices:
+            task_sample = np.random.permutation(len(self.task_indices[task]))
+            batch = list()
+            for i in task_sample:
+                if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                    yield np.concatenate(batch)
+                    batch = list()
+                # if a single multipart item > batch_count, we just make a batch that is larger than batch size
+                # so no check here
+                batch.append(self.task_indices[task][i])
+            if len(batch) > 0:
+                yield np.concatenate(batch)
+
+    def __len__(self):
+        return sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)

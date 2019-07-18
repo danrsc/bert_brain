@@ -275,9 +275,13 @@ def _read_codings(directory_path):
 
 class NaturalStoriesCorpus(CorpusBase):
 
+    @classmethod
+    def _path_attributes(cls):
+        return dict(path='natural_stories_path')
+
     def __init__(
             self,
-            path: str,
+            path: Optional[str] = None,
             include_reaction_times: bool = True,
             group_reaction_time_sentences_like_froi: bool = False,
             froi_subjects: Optional[Sequence[str]] = None,

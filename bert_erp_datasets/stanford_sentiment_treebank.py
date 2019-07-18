@@ -11,7 +11,11 @@ __all__ = ['StanfordSentimentTreebank']
 
 class StanfordSentimentTreebank(CorpusBase):
 
-    def __init__(self, path):
+    @classmethod
+    def _path_attributes(cls):
+        return dict(path='stanford_sentiment_treebank_path')
+
+    def __init__(self, path=None):
         self.path = path
 
     @staticmethod
@@ -55,7 +59,7 @@ class StanfordSentimentTreebank(CorpusBase):
 
         return RawData(
             train_examples,
-            {'sentiment': KindData(ResponseKind.stanford_sentiment, labels)},
+            {'sentiment': KindData(ResponseKind.generic, labels)},
             validation_input_examples=validation_examples,
             is_pre_split=True,
             field_specs={'sentiment': FieldSpec(is_sequence=False)})

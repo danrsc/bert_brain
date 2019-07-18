@@ -111,7 +111,11 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
 
 class ColorlessGreenCorpus(CorpusBase):
 
-    def __init__(self, path):
+    @classmethod
+    def _path_attributes(cls):
+        return dict(path='english_web_universal_dependencies_v_2_3_path')
+
+    def __init__(self, path=None):
         self.path = path
 
     def _load(self, example_manager: CorpusExampleUnifier):
@@ -127,7 +131,7 @@ class ColorlessGreenCorpus(CorpusBase):
             arr.setflags(write=False)
             return arr
 
-        classes = {'colorless': KindData(ResponseKind.colorless, _readonly(np.array(classes, dtype=np.float64)))}
+        classes = {'colorless': KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float64)))}
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,
@@ -136,7 +140,11 @@ class ColorlessGreenCorpus(CorpusBase):
 
 class LinzenAgreementCorpus(CorpusBase):
 
-    def __init__(self, path):
+    @classmethod
+    def _path_attributes(cls):
+        return dict(path='linzen_agreement_path')
+
+    def __init__(self, path=None):
         self.path = path
 
     def _load(self, example_manager: CorpusExampleUnifier):
@@ -147,7 +155,7 @@ class LinzenAgreementCorpus(CorpusBase):
             arr.setflags(write=False)
             return arr
 
-        classes = {'linzen_agree': KindData(ResponseKind.linzen_agree, _readonly(np.array(classes, dtype=np.float)))}
+        classes = {'linzen_agree': KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float)))}
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,

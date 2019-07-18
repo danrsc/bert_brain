@@ -188,7 +188,7 @@ class DataPreparer(object):
                         if callable(preprocessor) \
                                 or (not isinstance(preprocessor, str)
                                     and len(preprocessor) == 2
-                                    and callable(preprocessor[1])):
+                                    and isinstance(preprocessor[0], str)):
                             preprocessor = [preprocessor]
                         for step in preprocessor:
                             name = None
@@ -221,6 +221,9 @@ class DataPreparer(object):
                                 if p != r:
                                     raise ValueError(
                                         'Unequal phases across response types: {}, {}'.format(phases, response_phases))
+
+                if phases is None:
+                    phases = []
 
                 for phase in phases:
                     if phase_change_steps[phase] is None:

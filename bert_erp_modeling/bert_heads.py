@@ -15,7 +15,7 @@ from pytorch_pretrained_bert.modeling import BertConfig, \
     BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME, PRETRAINED_MODEL_ARCHIVE_MAP, TF_WEIGHTS_NAME, \
     cached_path, load_tf_weights_in_bert, gelu, BertLayerNorm
 
-from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id
+from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id, k_data_ids
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,8 @@ class KeyedGroupPooledLinear(torch.nn.Module):
         all_data_ids = [batch[(k, 'data_ids')] for k in self.prediction_key_to_shape]
         for idx in range(1, len(all_data_ids)):
             if not torch.equal(all_data_ids[0], all_data_ids[idx]):
-                raise ValueError('Inconsistent data_ids cannot be used within the same instance of FMRIHead')
+                raise ValueError('Inconsistent data_ids cannot be used within the same instance of '
+                                 'KeyedGroupPooledLinear')
         data_ids = all_data_ids[0]
         pooled, groups, example_ids = self.group_pool(sequence_output[self.index_layer], data_ids)
         result = self.linear(None, pooled, batch)
@@ -209,6 +210,45 @@ class KeyedCombinedLinear(KeyedBase):
             p = p.view(p.size()[:2] + self.prediction_key_to_shape[k])
             result[k] = p
 
+        return result
+
+
+class KeyedSingleTargetFromKDataIds(KeyedBase):
+
+    def __init__(
+            self, k, in_sequence_channels, prediction_key_to_shape, index_layer=-1, include_pooled=False):
+        super().__init__(prediction_key_to_shape)
+        self.k = k
+        self.linear = torch.nn.Linear(in_sequence_channels * ((1 if include_pooled else 0) + k), sum(self.splits))
+        self.index_layer = index_layer
+        self.include_pooled = include_pooled
+
+    def forward(self, sequence_output, pooled_output, batch):
+        all_data_ids = [batch[(k, 'data_ids')] for k in self.prediction_key_to_shape]
+        for idx in range(1, len(all_data_ids)):
+            if not torch.equal(all_data_ids[0], all_data_ids[idx]):
+                raise ValueError('Inconsistent data_ids cannot be used within the same instance of '
+                                 'KeyedSingleTargetFromKDataIds')
+        data_ids = all_data_ids[0]
+        data_ids, indices = k_data_ids(self.k, data_ids, return_indices=True, check_unique=True)
+        data_ids = data_ids[:, 0]
+        if len(sequence_output.size()) > indices.size():
+            indices = torch.reshape(
+                indices, indices.size() + (1,) * (len(sequence_output.size() - len(indices.size()))))
+
+        gathered_outputs = torch.gather(sequence_output[self.index_layer], dim=1, index=indices)
+        if self.include_pooled:
+            gathered_outputs = torch.cat(
+                [torch.unsqueeze(sequence_output.naked_pooled(self.index_layer), dim=1), gathered_outputs], dim=1)
+        predictions = self.linear(gathered_outputs)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        assert (len(self.prediction_key_to_shape) == len(predictions))
+        result = OrderedDict()
+        for k, p in zip(self.prediction_key_to_shape, predictions):
+            p = p.view(p.size()[:1] + self.prediction_key_to_shape[k])
+            result[k] = p
+            result[(k, 'data_ids')] = data_ids
+            result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)
         return result
 
 

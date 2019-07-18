@@ -2,9 +2,10 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple
 
 import numpy as np
-from bert_erp_datasets import CorpusKeys, PreprocessStandardize, PreprocessLog, \
+from bert_erp_datasets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, PreparedData, \
-    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData
+    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData, CorpusKeys, CorpusBase, \
+    UclCorpus
 from bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
@@ -53,17 +54,11 @@ class CriticSettings:
     critic_kwargs: Optional[Mapping] = None
 
 
-def _default_corpus_kwargs():
-    return {
-        CorpusKeys.ucl: dict(include_erp=True, include_eye=True, self_paced_inclusion='eye'),
-        CorpusKeys.harry_potter: dict(fmri_subjects='I')}
-
-
 def _default_split_functions():
 
     return {
-        CorpusKeys.harry_potter: HarryPotterMakeLeaveOutFmriRun(),
-        CorpusKeys.natural_stories: natural_stories_make_leave_stories_out
+        CorpusKeys.HarryPotterCorpus: HarryPotterMakeLeaveOutFmriRun(),
+        CorpusKeys.NaturalStoriesCorpus: natural_stories_make_leave_stories_out
     }
 
 
@@ -129,14 +124,14 @@ def _default_prediction_heads():
 def _default_critics():
 
     return {
-        CorpusKeys.ucl: CriticSettings(critic_type=CriticKeys.mse),
+        CorpusKeys.UclCorpus: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.ns_froi: CriticSettings(critic_type=CriticKeys.single_mse),
-        CorpusKeys.natural_stories: CriticSettings(critic_type=CriticKeys.mse),
+        CorpusKeys.NaturalStoriesCorpus: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
-        CorpusKeys.harry_potter: CriticSettings(critic_type=CriticKeys.mse),
-        CorpusKeys.colorless_green: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.linzen_agreement: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.stanford_sentiment_treebank: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        CorpusKeys.HarryPotterCorpus: CriticSettings(critic_type=CriticKeys.mse),
+        CorpusKeys.ColorlessGreenCorpus: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        CorpusKeys.LinzenAgreementCorpus: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        CorpusKeys.StanfordSentimentTreebank: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
     }
 
 
@@ -181,10 +176,7 @@ PreprocessorTypeUnion = Union[_PreprocessorTypeUnion, Sequence[_PreprocessorType
 @dataclass
 class Settings:
     # which data to load
-    corpus_keys: Optional[Sequence[str]] = (CorpusKeys.ucl,)
-
-    # mapping from a corpus key to any keyword arguments to the Corpus type
-    corpus_key_kwargs: Optional[Mapping[str, Mapping[str, Any]]] = field(default_factory=_default_corpus_kwargs)
+    corpora: Optional[Sequence[CorpusBase]] = (UclCorpus(),)
 
     # maps from a corpus key to a function which takes the index of the current variation and returns another
     # function which will do the splitting. The returned function should take a RawData instance and a RandomState
