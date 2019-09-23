@@ -11,8 +11,8 @@ from pytorch_pretrained_bert import BertAdam
 from torch.utils.data import SequentialSampler, DistributedSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
 
-from .bert_erp_datasets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
-from .bert_erp_modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
+from .data_sets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
+from .modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
 from .settings import Settings, PredictionHeadSettings
 from .result_output import write_predictions, write_loss_curve
 

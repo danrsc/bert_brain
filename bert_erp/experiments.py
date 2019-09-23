@@ -6,10 +6,10 @@ import numpy as np
 import torch
 from scipy import signal
 
-from .bert_erp_common import SwitchRemember
-from .bert_erp_datasets import ResponseKind, CorpusTypes, PreprocessSoSFilter, PreprocessDetrend, PreprocessStandardize, \
+from .common import SwitchRemember
+from .data_sets import ResponseKind, CorpusTypes, PreprocessSoSFilter, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, preprocess_fork_no_cluster_to_disk
-from .bert_erp_modeling import KeyedLinear, CriticKeys, KeyedCombinedLinear
+from .modeling import KeyedLinear, CriticKeys, KeyedCombinedLinear
 from .settings import TrainingVariation, LoadFrom, Settings, OptimizationSettings, PredictionHeadSettings, \
     CriticSettings
 

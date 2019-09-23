@@ -544,7 +544,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
     def from_pretrained(cls, pretrained_model_name_or_path, state_dict=None, cache_dir=None,
                         from_tf=False, map_location='default_map_location', *inputs, **kwargs):
         """
-        Copied from pytorch_pretrained_bert bert_erp_modeling.py so we can pass a map_location argument
+        Copied from pytorch_pretrained_bert modeling.py so we can pass a map_location argument
         Instantiate a BertPreTrainedModel from a pre-trained model file or a pytorch state dict.
         Download and cache the pre-trained model file if needed.
 

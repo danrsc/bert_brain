@@ -2,11 +2,11 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple
 
 import numpy as np
-from .bert_erp_datasets import PreprocessStandardize, PreprocessLog, \
+from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, PreparedData, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData, CorpusKeys, CorpusBase, \
     UclCorpus
-from .bert_erp_modeling import CriticKeys, FMRIConvConvWithDilationHead
+from .modeling import CriticKeys, FMRIConvConvWithDilationHead
 
 
 __all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'LoadFrom',
