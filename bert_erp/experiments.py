@@ -14,7 +14,7 @@ from .settings import TrainingVariation, LoadFrom, Settings, OptimizationSetting
     CriticSettings
 
 
-__all__ = ['task_hash', 'set_random_seeds', 'iterate_powerset', 'named_variations']
+__all__ = ['task_hash', 'set_random_seeds', 'iterate_powerset', 'named_variations', 'match_variation']
 
 
 def _internal_hash_update(hash_, loss_tasks):
@@ -1106,3 +1106,31 @@ def named_variations(name):
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
 
     return training_variations, settings, num_runs, min_memory, auxiliary_loss_tasks
+
+
+def match_variation(variation_set_name, training_variation):
+    """
+    Given a variation_set_name (the --name argument in run_variations.py) and a training_variation which can be
+    a string, a TrainingVariation instance, or a tuple, finds the matching canonical training variation and returns
+    it.
+    Notes:
+        We need to simplify the training variation specification so this function is not necessary
+    Args:
+        variation_set_name: The variation set to look in, e.g. 'hp_fmri'
+        training_variation: The variation to match, e.g. ('hp_fmri_I',)
+
+    Returns:
+        The canonical form of the training variation.
+    """
+    training_variations, _, _, _, _ = named_variations(variation_set_name)
+    if isinstance(training_variation, str):
+        training_variation_name = training_variation
+    elif isinstance(training_variation, TrainingVariation):
+        training_variation_name = training_variation.name
+    else:
+        training_variation_name = str(tuple(training_variation))
+    for t in training_variations:
+        t_name = t.name if isinstance(t, TrainingVariation) else str(tuple(t))
+        if training_variation_name == t_name:
+            return t
+    raise ValueError('Unable to match training_variation: {}'.format(training_variation))

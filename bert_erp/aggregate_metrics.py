@@ -6,33 +6,34 @@ from collections import OrderedDict
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
-from typing import Tuple, Optional
+from typing import Optional
 
 import numpy as np
 from scipy.special import logsumexp
 
-from bert_erp import named_variations, task_hash, read_predictions, TrainingVariation, CriticMapping, read_loss_curve
-
+from .experiments import named_variations, task_hash, match_variation
+from .settings import TrainingVariation
+from .modeling import CriticMapping
+from .result_output import read_predictions
 
 __all__ = [
     'Aggregator',
     'read_variation_results',
-    'sentence_predictions',
     'nan_pearson',
     'regression_handler',
     'class_handler',
     'bincount_axis',
     'make_prediction_handler',
-    'average_unique_steps_within_loss_curves',
-    'average_unique_epochs_within_loss_curves',
-    'LossCurve',
     'ResultQuery',
     'query_results',
-    'match_variation']
+    'get_field_predictions']
 
 
 class Aggregator:
     def __init__(self):
+        """
+        Helper class to aggregate metrics over runs etc.
+        """
         self._field_values = None
         self._counts = None
 
@@ -229,34 +230,6 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
             aggregated[name].update(run_results[name], is_sequence=False)
 
     return aggregated, count_runs
-
-
-def sentence_predictions(paths, variation_set_name, training_variation, aux_loss, num_runs):
-    output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation))
-    result = dict()
-    has_warned = False
-    for index_run in range(num_runs):
-        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
-        if not os.path.exists(validation_npz_path):
-            if not has_warned:
-                print('warning: results are incomplete. Some runs not found')
-            has_warned = True
-            continue
-        output_results = np.load(validation_npz_path, allow_pickle=True)
-        for output_result in output_results:
-            name = output_result.name
-            if name not in training_variation and name not in aux_loss:
-                continue
-            data_key, unique_id = output_result.data_key, output_result.unique_id
-            if data_key not in result:
-                result[data_key] = dict()
-            if unique_id not in result[data_key]:
-                result[data_key][unique_id] = dict()
-            if name not in result[data_key][unique_id]:
-                result[data_key][unique_id][name] = list()
-            result[data_key][unique_id][name].append(output_result)
-
-    return result
 
 
 def nan_pearson(x, y, axis=0, keepdims=False):
@@ -714,65 +687,6 @@ def _find_restricted_distractor_indices(indices_true, pair_examples):
     return indices_distractor
 
 
-def average_unique_steps_within_loss_curves(curves):
-    for curve in curves:
-        unique_steps = np.unique(curve.steps)
-        step_values = list()
-        step_epochs = list()
-        for step in unique_steps:
-            step_values.append(np.nanmean(curve.values[curve.steps == step]))
-            step_epochs.append(curve.epochs[curve.steps == step][0])
-        curve.steps = unique_steps
-        curve.epochs = np.array(step_epochs)
-        curve.values = np.array(step_values)
-
-
-def average_unique_epochs_within_loss_curves(curves):
-    for curve in curves:
-        unique_epochs = np.unique(curve.epochs)
-        epoch_values = list()
-        for epoch in unique_epochs:
-            epoch_values.append(np.nanmean(curve.values[curve.epochs == epoch]))
-        curve.steps = unique_epochs
-        curve.epochs = unique_epochs
-        curve.values = np.array(epoch_values)
-
-
-@dataclasses.dataclass
-class LossCurve:
-    training_variation: Tuple[str, ...]
-    train_eval_kind: str
-    index_run: int
-    key: str
-    epochs: np.ndarray
-    steps: np.ndarray
-    values: np.ndarray
-
-
-def loss_curves_for_variation(paths, variation_set_name):
-    training_variations, _, num_runs, _, _ = named_variations(variation_set_name)
-
-    def read_curve(kind, training_variation_, index_run_):
-        file_name = 'train_curve.npz' if kind == 'train' else 'validation_curve.npz'
-        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation_))
-        curve_path = os.path.join(output_dir, 'run_{}'.format(index_run_), file_name)
-        result_ = list()
-        if os.path.exists(curve_path):
-            curve = read_loss_curve(curve_path)
-            for key in curve:
-                result_.append(
-                    LossCurve(training_variation_, kind, index_run_, key, curve[key][0], curve[key][1], curve[key][2]))
-        return result_
-
-    result = list()
-    for training_variation in training_variations:
-        for index_run in range(num_runs):
-            result.extend(read_curve('train', training_variation, index_run))
-            result.extend(read_curve('validation', training_variation, index_run))
-
-    return result
-
-
 @dataclasses.dataclass
 class ResultQuery:
     variation_set_name: str
@@ -860,8 +774,8 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
     cache = dict()
     result = list()
     with ProcessPoolExecutor() as ex:
-        query_results = ex.map(_run_query, query_items)
-    for query_key, query_result in query_results:
+        q_results = ex.map(_run_query, query_items)
+    for query_key, query_result in q_results:
         cache[query_key] = query_result
 
     for result_query in result_queries:
@@ -923,29 +837,29 @@ def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kw
     return result
 
 
-def match_variation(variation_set_name, training_variation):
-    """
-    Given a variation_set_name (the --name argument in run_variations.py) and a training_variation which can be
-    a string, a TrainingVariation instance, or a tuple, finds the matching canonical training variation and returns
-    it.
-    Notes:
-        We need to simplify the training variation specification so this function is not necessary
-    Args:
-        variation_set_name: The variation set to look in, e.g. 'hp_fmri'
-        training_variation: The variation to match, e.g. ('hp_fmri_I',)
+def get_field_predictions(
+        paths_obj, variation_set_name, training_variation, field_name, index_run=None, pre_matched=False):
+    num_runs = None
+    if index_run is None:
+        _, _, num_runs, _, _ = named_variations(variation_set_name)
+    if not pre_matched:
+        training_variation = match_variation(variation_set_name, training_variation)
+    output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(training_variation))
+    aggregator = None
+    run_iterable = (index_run,) if index_run is not None else range(num_runs)
+    for index_run in run_iterable:
+        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
+        if not os.path.exists(validation_npz_path):
+            raise ValueError('Path does not exist: {}'.format(validation_npz_path))
+        output_results = read_predictions(validation_npz_path)
+        field_results = output_results[field_name]
+        aggregator = Aggregator()
+        for result in field_results:
+            aggregator.update(result, is_sequence=result.sequence_type != 'single')
 
-    Returns:
-        The canonical form of the training variation.
-    """
-    training_variations, _, _, _, _ = named_variations(variation_set_name)
-    if isinstance(training_variation, str):
-        training_variation_name = training_variation
-    elif isinstance(training_variation, TrainingVariation):
-        training_variation_name = training_variation.name
-    else:
-        training_variation_name = str(tuple(training_variation))
-    for t in training_variations:
-        t_name = t.name if isinstance(t, TrainingVariation) else str(tuple(t))
-        if training_variation_name == t_name:
-            return t
-    raise ValueError('Unable to match training_variation: {}'.format(training_variation))
+    target = np.array(aggregator.values('target'))
+    predictions = np.array(aggregator.values('prediction'))
+    mask = np.array(aggregator.values('mask'))
+    ids = np.array(aggregator.values('unique_id'))
+    masked_target = np.where(mask, target, np.nan)
+    return predictions, masked_target, ids

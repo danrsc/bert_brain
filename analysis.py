@@ -3,8 +3,8 @@ from collections import OrderedDict
 
 import numpy as np
 
-from bert_erp import TrainingVariation
-from bert_erp_analysis import TextGrid, TextWrapStyle, write_text_grid_to_console, read_variation_results
+from bert_erp import TrainingVariation, read_variation_results
+from bert_erp_presentation import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
 output_order = (
