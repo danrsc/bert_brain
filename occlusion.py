@@ -12,16 +12,11 @@ import numpy as np
 import torch
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 
-from bert_erp_common import cuda_most_free_device
-from bert_erp_datasets import DataPreparer
-from bert_erp_settings import Settings
+from bert_erp import cuda_most_free_device, DataPreparer, Settings, BertMultiPredictionHead, \
+    task_hash, set_random_seeds, named_variations, collate_fn, setup_prediction_heads_and_losses, make_datasets
 from bert_erp_paths import Paths
-from bert_erp_modeling import BertMultiPredictionHead
 
-from train_eval import setup_prediction_heads_and_losses, make_datasets, collate_fn
-from run_variations import named_variations, task_hash, set_random_seeds
-from analysis import make_prediction_handler
-
+from bert_erp_analysis.result_output_high_level import make_prediction_handler
 
 replace_root_logger_handler()
 logger = logging.getLogger(__name__)
