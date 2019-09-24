@@ -122,6 +122,7 @@ class MrpcProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -155,6 +156,7 @@ class MnliProcessor(DataProcessor):
         """See base class."""
         return ["contradiction", "entailment", "neutral"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -197,6 +199,7 @@ class ColaProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -226,6 +229,7 @@ class Sst2Processor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -257,6 +261,7 @@ class StsbProcessor(DataProcessor):
         """See base class."""
         return [None]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -289,6 +294,7 @@ class QqpProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -325,6 +331,7 @@ class QnliProcessor(DataProcessor):
         """See base class."""
         return ["entailment", "not_entailment"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -357,6 +364,7 @@ class RteProcessor(DataProcessor):
         """See base class."""
         return ["entailment", "not_entailment"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -389,6 +397,7 @@ class WnliProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -408,7 +417,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
                                  tokenizer, output_mode):
     """Loads a data file into a list of `InputBatch`s."""
 
-    label_map = {label : i for i, label in enumerate(label_list)}
+    label_map = {label: i for i, label in enumerate(label_list)}
 
     features = []
     for (ex_index, example) in enumerate(examples):
@@ -479,7 +488,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
 
         if ex_index < 5:
             logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
+            logger.info("guid: %s" % example.guid)
             logger.info("tokens: %s" % " ".join(
                     [str(x) for x in tokens]))
             logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
@@ -595,8 +604,10 @@ def from_fine_tuned(model_path, map_location='default_map_location', *inputs, **
 
     def load(module, prefix=''):
         local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+        # noinspection PyProtectedMember
         module._load_from_state_dict(
             state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
+        # noinspection PyProtectedMember
         for name, child in module._modules.items():
             if child is not None:
                 load(child, prefix + name + '.')
@@ -640,6 +651,7 @@ def _run_glue_for_variation(
     if not os.path.exists(run_result_path):
         os.makedirs(run_result_path)
 
+    # noinspection PyTypeChecker
     model = from_fine_tuned(
         run_model_path,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
@@ -650,6 +662,7 @@ def _run_glue_for_variation(
     model.to(device)
     if settings.optimization_settings.local_rank != -1:
         try:
+            # noinspection PyPep8Naming
             from apex.parallel import DistributedDataParallel as DDP
         except ImportError:
             raise ImportError("Please install apex from "
@@ -660,6 +673,8 @@ def _run_glue_for_variation(
         model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
+    num_train_optimization_steps = None
+    optimizer = None
     if train_features is not None:
 
         num_train_optimization_steps = (
@@ -675,7 +690,7 @@ def _run_glue_for_variation(
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
             {'params':
-                 [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
         if settings.optimization_settings.fp16:
@@ -715,6 +730,7 @@ def _run_glue_for_variation(
         all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
 
+        all_label_ids = None
         if output_mode == "classification":
             all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
         elif output_mode == "regression":
@@ -729,6 +745,7 @@ def _run_glue_for_variation(
             train_data, sampler=train_sampler, batch_size=settings.optimization_settings.train_batch_size)
 
         model.train()
+        loss = None
         for _ in trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0

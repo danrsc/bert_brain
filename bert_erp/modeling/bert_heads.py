@@ -15,8 +15,8 @@ from pytorch_pretrained_bert.modeling import BertConfig, \
     BertPreTrainedModel, BertModel, CONFIG_NAME, WEIGHTS_NAME, PRETRAINED_MODEL_ARCHIVE_MAP, TF_WEIGHTS_NAME, \
     cached_path, load_tf_weights_in_bert, gelu, BertLayerNorm
 
-from bert_erp_common import NamedSpanEncoder
-from bert_erp_modeling.utility_modules import GroupPool, at_most_one_data_id, k_data_ids
+from ..common import NamedSpanEncoder
+from .utility_modules import GroupPool, at_most_one_data_id, k_data_ids
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +54,12 @@ class KeyedBase(torch.nn.Module):
                 if name in state_dict:
                     state = state_dict[name]
                     updated_state = tensor.clone()
-                    for idx in range(len(current_splits)):
-                        if ranges[idx] is not None:
-                            end = current_splits[idx + 1] if idx + 1 < len(current_splits) else total
+                    for idx_split in range(len(current_splits)):
+                        if ranges[idx_split] is not None:
+                            end = current_splits[idx_split + 1] if idx_split + 1 < len(current_splits) else total
                             if len(state.size()) < 3:
-                                updated_state[current_splits[idx]:end] = state[ranges[idx][0]:ranges[idx][1]]
+                                updated_state[current_splits[idx_split]:end] = \
+                                    state[ranges[idx_split][0]:ranges[idx_split][1]]
                             else:
                                 raise ValueError('Unexpected state size: {}'.format(len(state.size())))
                     state_dict[name] = updated_state
@@ -178,6 +179,7 @@ class KeyedGroupPooledLinear(torch.nn.Module):
                                  'KeyedGroupPooledLinear')
         data_ids = all_data_ids[0]
         pooled, groups, example_ids = self.group_pool(sequence_output[self.index_layer], data_ids)
+        # noinspection PyCallingNonCallable
         result = self.linear(None, pooled, batch)
         keys = [k for k in result]
         for k in keys:
@@ -322,6 +324,7 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
                 attention_input = sequence_output[self.index_layer]
             attention_logits = self.attention_logits(attention_input)
             # this is how the huggingface code does a masked attention
+            # noinspection PyTypeChecker
             span_mask = (1.0 - span_indicator) * -10000.0
             attention_probabilities = torch.nn.functional.softmax(attention_logits + span_mask, dim=-1)
             # -> (batch, channels)
@@ -647,8 +650,10 @@ class BertMultiPredictionHead(BertPreTrainedModel):
 
         def load(module, prefix=''):
             local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+            # noinspection PyProtectedMember
             module._load_from_state_dict(
                 state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
+            # noinspection PyProtectedMember
             for name, child in module._modules.items():
                 if child is not None:
                     load(child, prefix + name + '.')
@@ -674,10 +679,12 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
             attention_mask=batch['mask'] if 'mask' in batch else None,
             output_all_encoded_layers=True)
+        # noinspection PyCallingNonCallable
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)
 
     def to(self, *args, **kwargs):
 
+        # noinspection PyProtectedMember
         device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
 
         if dtype is not None:
@@ -725,6 +732,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
                     forced_cpu.append(t)
                     return t
 
+                # noinspection PyProtectedMember
                 module._apply(set_forced_cpu_tensor)
 
         set_forced_cpu(self)

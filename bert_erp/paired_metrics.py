@@ -203,8 +203,10 @@ def get_k_vs_k_paired(
         for _ in range(num_samples):
             indices_true = np.random.choice(len(target_a), k)
             indices_distractor = np.random.choice(len(target_a), k)
-            sample_accuracy_a[index_sample] = _k_vs_k_accuracy(predictions_a, target_a, indices_true, indices_distractor)
-            sample_accuracy_b[index_sample] = _k_vs_k_accuracy(predictions_b, target_b, indices_true, indices_distractor)
+            sample_accuracy_a[index_sample] = _k_vs_k_accuracy(
+                predictions_a, target_a, indices_true, indices_distractor)
+            sample_accuracy_b[index_sample] = _k_vs_k_accuracy(
+                predictions_b, target_b, indices_true, indices_distractor)
             index_sample += 1
         if mean_within_run:
             accuracy_a[index_run] = np.mean(sample_accuracy_a, axis=0)
@@ -440,6 +442,7 @@ def wilcoxon_axis(x, y=None, zero_method="wilcox", correction=False):
         r_plus += r_zero / 2.
         r_minus += r_zero / 2.
 
+    # noinspection PyPep8Naming
     T = np.minimum(r_plus, r_minus)
     mn = count*(count + 1.) * 0.25
     se = count*(count + 1.) * (2. * count + 1.)
@@ -473,16 +476,18 @@ def wilcoxon_axis(x, y=None, zero_method="wilcox", correction=False):
 
 
 class ResultPValues:
-    def __init__(self, label, subject, a_values, b_values=None):
+    def __init__(self, label, subject, a_values, b_values=None, ttest_1_sample_pop_mean=0.5):
         self.label = label
         self.subject = subject
         self.a_mean = np.mean(a_values, axis=0)
         self.a_std = np.std(a_values, axis=0)
-        _, self.a_ttest_1samp_p_values = ttest_1samp(a_values, 0.5 * np.ones(a_values.shape[1:], a_values.dtype))
+        _, self.a_ttest_1samp_p_values = ttest_1samp(
+            a_values, ttest_1_sample_pop_mean * np.ones(a_values.shape[1:], a_values.dtype))
         if b_values is not None:
             self.b_mean = np.mean(b_values, axis=0)
             self.b_std = np.std(b_values, axis=0)
             self.ab_sorted_diff_mean, self.ab_sorted_diff_std = sorted_cumulative_mean_diff(a_values, b_values)
-            _, self.b_ttest_1samp_p_values = ttest_1samp(b_values, 0.5 * np.ones(b_values.shape[1:], b_values.dtype))
+            _, self.b_ttest_1samp_p_values = ttest_1samp(
+                b_values, ttest_1_sample_pop_mean * np.ones(b_values.shape[1:], b_values.dtype))
             _, self.ttest_rel_p_values = ttest_rel(a_values, b_values)
             _, self.wilcoxon_p_values = wilcoxon_axis(a_values, b_values)

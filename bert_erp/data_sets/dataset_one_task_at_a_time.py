@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import TensorDataset
 
-from bert_erp_common import SwitchRemember
+from ..common import SwitchRemember
 from .input_features import FieldSpec
 
 __all__ = [

@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import TensorDataset
 from torch.utils.data.dataloader import default_collate
 
-from bert_erp_common import SwitchRemember
+from ..common import SwitchRemember
 from .input_features import RawData, FieldSpec
 from .data_preparer import PreparedData
 

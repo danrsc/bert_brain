@@ -260,6 +260,7 @@ def load_from_cache(cache_path, run_info, kwargs, force_cache_miss):
         ex = InputFeatures(**all_examples[idx])
         ex.tokens = tuple(s.item() for s in ex.tokens)  # convert array back to list of tokens
         ex.head_tokens = tuple(s.item() for s in ex.head_tokens)
+        # noinspection PyTypeChecker
         all_examples[idx] = ex
 
     example_splits = [

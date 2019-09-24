@@ -423,15 +423,15 @@ class CudaPoolExecutor(object):
                     else:
                         iterable = as_completed(futures, end_time - time.monotonic())
                     for future in iterable:
-                        retry_item = futures[future]
+                        retry_item_ = futures[future]
                         del futures[future]
                         try:
                             yield future.result()
-                            retry_item = None
+                            retry_item_ = None
                         except BaseException as ex:
-                            if retry_item is None or not retry_item.should_retry_fn(ex):
+                            if retry_item_ is None or not retry_item_.should_retry_fn(ex):
                                 raise
-                            next_fs[self._process_pool_executor.submit(retry_item.fn, *retry_item.args)] = retry_item
+                            next_fs[self._process_pool_executor.submit(retry_item_.fn, *retry_item_.args)] = retry_item_
                     futures = next_fs
             finally:
                 for future in futures:

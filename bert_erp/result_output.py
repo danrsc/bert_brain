@@ -145,6 +145,7 @@ def read_predictions(output_path):
             predictions = np.split(predictions, target_splits)
             target = np.split(target, target_splits)
             if masks is not None:
+                # noinspection PyTypeChecker
                 masks = np.split(masks, target_splits)
         data_keys = [k.item() for k in data_keys]
         unique_ids = [u.item() for u in unique_ids]

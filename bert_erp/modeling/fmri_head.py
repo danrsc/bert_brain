@@ -3,7 +3,7 @@ from collections import OrderedDict
 import numpy as np
 import torch
 
-from bert_erp_modeling.utility_modules import Conv1DCausal
+from .utility_modules import Conv1DCausal
 
 
 __all__ = ['FMRIConvConvWithDilationHead']
@@ -88,8 +88,9 @@ class FMRIConvConvWithDilationHead(torch.nn.Module):
             # now get the indices for the kernel, tiliing the indices on axis=1 and then subtracting the dilation
             # offsets
             indices_keep = indices_keep.repeat((1, self.out_kernel_size - 1))
-            offsets = torch.arange(start=-(self.out_kernel_size - 1), end=1, step=1, device=indices_keep.device) \
-                      * self.out_dilation
+            offsets = \
+                torch.arange(start=-(self.out_kernel_size - 1), end=1, step=1, device=indices_keep.device) \
+                * self.out_dilation
             indices_keep = indices_keep + offsets.view((offsets.size()[0], 1))
 
             # flatten the kernel indices to 1D

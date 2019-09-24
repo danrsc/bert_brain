@@ -49,7 +49,6 @@ class InputFeatures:
     span_ids: Optional[Sequence[int]] = None
 
 
-
 @dataclass
 class KindData:
     kind: str

@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 
-__all__ = ['GroupPool', 'Conv1DCausal', 'at_most_one_data_id']
+__all__ = ['GroupPool', 'Conv1DCausal', 'at_most_one_data_id', 'k_data_ids']
 
 
 def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=False):
@@ -72,6 +72,7 @@ def k_data_ids(k, data_ids, return_indices=False, check_unique=False):
 
 class GroupPool(torch.nn.Module):
 
+    # noinspection PyMethodMayBeStatic
     def forward(self, x, groupby):
 
         # first attach an example_id to the groups to ensure that we don't pool across examples in the batch

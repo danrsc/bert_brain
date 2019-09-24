@@ -181,6 +181,7 @@ class DataPreparer(object):
                     self._preprocess_dict, k, response_k, result[k].data[response_k].kind)
                 if preprocessor is not None:
                     phase_steps[response_k] = [list()]
+                    # noinspection PyTypeChecker
                     if callable(preprocessor) \
                             or (not isinstance(preprocessor, str)
                                 and len(preprocessor) == 2

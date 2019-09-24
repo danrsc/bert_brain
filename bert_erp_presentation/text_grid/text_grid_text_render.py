@@ -309,6 +309,7 @@ class _TextGridTextRender:
             if i not in column_info_current:
                 return i
 
+        # noinspection PyTypeChecker
         candidates = [_WidthInfo.diff(
             _WidthInfo.combine(column_info_target[i]), _WidthInfo.combine(column_info_current[i]))
             for i in column_info_target]

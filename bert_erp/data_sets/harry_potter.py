@@ -13,7 +13,7 @@ from scipy.ndimage.filters import gaussian_filter
 import nibabel
 import cortex
 
-from bert_erp_common import MultiReplace
+from ..common import MultiReplace
 from .corpus_base import CorpusBase, CorpusExampleUnifier
 from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample, PairFMRIExample
 from .input_features import RawData, KindData, ResponseKind
@@ -360,9 +360,12 @@ class HarryPotterCorpus(CorpusBase):
 
         if self.meg_subjects is not None:
             indicator_subjects = np.array([s in self.meg_subjects for s in subjects])
+            # noinspection PyTypeChecker
             subjects = subjects[indicator_subjects]
+            # noinspection PyTypeChecker
             data = data[indicator_subjects]
 
+        times = None
         if len(data.shape) == 4:
             if data.shape[-1] == 500:
                 data = np.reshape(data, data.shape[:-1] + (data.shape[-1] // 100, 100))
@@ -371,10 +374,6 @@ class HarryPotterCorpus(CorpusBase):
                 times = np.arange(data.shape[-1]) * 100
             elif data.shape[-1] == 20:
                 times = np.arange(data.shape[-1]) * 25
-            else:
-                times = None
-        else:
-            times = None
 
         if len(data.shape) == 4:
             # -> (words, subjects, rois, 100ms_slices)

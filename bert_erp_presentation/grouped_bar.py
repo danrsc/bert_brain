@@ -235,6 +235,7 @@ class BarGroup:
         indices_keep = self.find(train_keys)
         inverted = [None] * len(self)
         for new_index, old_index in enumerate(indices_keep):
+            # noinspection PyTypeChecker
             inverted[old_index] = new_index
         self.labels = [self.labels[i] for i in indices_keep]
         self.values = [self.values[i] for i in indices_keep]
@@ -404,6 +405,7 @@ def bar_group_best_for_eval(
 
     result_indices = list()
 
+    # noinspection PyTypeChecker
     best_key = train_keys[index_best]
     shortest = len(best_key)
     for index_alt, alt_key in enumerate(train_keys):

@@ -201,6 +201,7 @@ class CorpusBase:
         # special case for cache_path
         if self._cache_path is None:
             arg_hash = type(self)._hash_arguments({'argument_hash': self._argument_hash, 'run_info': run_info})
+            # noinspection PyAttributeOutsideInit
             self._cache_path = os.path.join(
                 path_obj.cache_path, type(self).__name__, '{}.npz'.format(arg_hash))
 

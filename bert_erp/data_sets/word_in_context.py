@@ -3,7 +3,7 @@ import json
 
 import numpy as np
 
-from bert_erp_common import split_with_indices, NamedSpanEncoder
+from ..common import split_with_indices, NamedSpanEncoder
 from .input_features import RawData, KindData, ResponseKind
 from .corpus_base import CorpusBase, CorpusExampleUnifier
 

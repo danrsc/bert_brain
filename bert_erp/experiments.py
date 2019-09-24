@@ -66,6 +66,7 @@ def named_variations(name):
     ns_froi_tasks = ('ns_lh_pt', 'ns_lh_at', 'ns_lh_ifg', 'ns_lh_ifgpo', 'ns_lh_mfg', 'ns_lh_ag',
                      'ns_rh_pt', 'ns_rh_at', 'ns_rh_ifg', 'ns_rh_ifgpo', 'ns_rh_mfg', 'ns_rh_ag')
 
+    # noinspection PyPep8Naming
     load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',), map_run=lambda r: r % 4)
 
     name = SwitchRemember(name)
@@ -870,6 +871,7 @@ def named_variations(name):
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HKL_from_I_fine_tune':
+        # noinspection PyPep8Naming
         load_from_I = LoadFrom('hp_fmri_20', ('hp_fmri_I',))
         training_variations = [
             TrainingVariation(('hp_fmri_H',), load_from=load_from_I),

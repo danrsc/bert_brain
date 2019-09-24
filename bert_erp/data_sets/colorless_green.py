@@ -4,8 +4,8 @@ from typing import Tuple
 
 import numpy as np
 
-from bert_erp_common import zip_equal
-from syntactic_dependency import preprocess_english_morphology, collect_paradigms, extract_dependency_patterns, \
+from ..common import zip_equal
+from .syntactic_dependency import preprocess_english_morphology, collect_paradigms, extract_dependency_patterns, \
     generate_morph_pattern_test, DependencyTree, universal_dependency_reader, make_token_to_paradigms, \
     make_ltm_to_word, GeneratedExample
 

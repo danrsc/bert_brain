@@ -13,10 +13,9 @@ import torch
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 
 from bert_erp import cuda_most_free_device, DataPreparer, Settings, BertMultiPredictionHead, \
-    task_hash, set_random_seeds, named_variations, collate_fn, setup_prediction_heads_and_losses, make_datasets
+    task_hash, set_random_seeds, named_variations, collate_fn, setup_prediction_heads_and_losses, make_datasets, \
+    CorpusLoader, make_prediction_handler, TrainingVariation
 from bert_erp_paths import Paths
-
-from bert_erp_analysis.result_output_high_level import make_prediction_handler
 
 replace_root_logger_handler()
 logger = logging.getLogger(__name__)
@@ -44,26 +43,36 @@ def _num_tokens(tokens):
     return len(tokens)
 
 
-def _run_occlusion_for_variation(model_path, data, tokenizer, settings: Settings, index_run: int, device, n_gpu):
+def _run_occlusion_for_variation(
+        paths, corpus_loader, tokenizer, settings: Settings, index_run: int, device, n_gpu):
 
     occlusion_token = '[UNK]'
     occluded_token_id = tokenizer.convert_tokens_to_ids([occlusion_token])[0]
 
     all_results = OrderedDict()
 
-    os.path.join(model_path, 'run_{}'.format(index_run))
+    os.path.join(paths.model_path, 'run_{}'.format(index_run))
 
     model = BertMultiPredictionHead.load(
-        model_path,
+        paths.model_path,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index))
     model.to(device)
     model.eval()
 
     seed = set_random_seeds(settings.seed, index_run, n_gpu)
+
+    data = corpus_loader.load(index_run, settings.corpora, paths_obj=paths)
+
+    # noinspection PyTypeChecker
     data_preparer = DataPreparer(
-        seed, settings.preprocessors, settings.get_split_functions(index_run), settings.preprocess_fork_fn, model_path)
+        seed, settings.preprocessors,
+        settings.get_split_functions(index_run), settings.preprocess_fork_fn, paths.model_path)
+
     _, validation_data, _ = make_datasets(
-        data_preparer.prepare(data), data_id_in_batch_keys=settings.data_id_in_batch_keys)
+        data_preparer.prepare(data),
+        settings.loss_tasks,
+        data_id_in_batch_keys=settings.data_id_in_batch_keys,
+        filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
 
     batch_iterator = TorchDataLoader(
         validation_data,
@@ -141,18 +150,19 @@ def _run_occlusion_for_variation(model_path, data, tokenizer, settings: Settings
 def run_occlusion(variation_set_name, index_run=None):
 
     def io_setup():
-        temp_paths = Paths()
-        corpus_loader_ = temp_paths.make_corpus_loader(corpus_key_kwarg_dict=settings.corpus_key_kwargs)
         hash_ = task_hash(training_variation)
-        model_path_ = os.path.join(temp_paths.model_path, variation_set_name, hash_)
-        result_path_ = os.path.join(temp_paths.result_path, variation_set_name, hash_)
+        paths_ = Paths()
+        paths_.model_path_ = os.path.join(paths_.model_path, variation_set_name, hash_)
+        paths_.result_path_ = os.path.join(paths_.result_path, variation_set_name, hash_)
 
-        if not os.path.exists(model_path_):
-            os.makedirs(model_path_)
-        if not os.path.exists(result_path_):
-            os.makedirs(result_path_)
+        corpus_loader_ = CorpusLoader(paths_.cache_path)
 
-        return corpus_loader_, result_path_, model_path_
+        if not os.path.exists(paths_.model_path_):
+            os.makedirs(paths_.model_path_)
+        if not os.path.exists(paths_.result_path_):
+            os.makedirs(paths_.result_path_)
+
+        return corpus_loader_, paths_
 
     training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(variation_set_name)
 
@@ -177,11 +187,16 @@ def run_occlusion(variation_set_name, index_run=None):
 
         print('Running on variation: {}'.format(training_variation))
 
-        corpus_loader, result_path, model_path = io_setup()
-        loss_tasks = set(training_variation)
+        corpus_loader, paths = io_setup()
+
+        if isinstance(loss_tasks, TrainingVariation):
+            loss_tasks = set(loss_tasks.loss_tasks)
+        else:
+            loss_tasks = set(loss_tasks)
+
         loss_tasks.update(aux_loss_tasks)
         settings = dataclasses.replace(settings, loss_tasks=loss_tasks)
-        data = corpus_loader.load(settings.corpus_keys)
+
         tokenizer = corpus_loader.make_bert_tokenizer()
 
         run_iterator = trange(num_runs, desc='Runs')
@@ -189,9 +204,10 @@ def run_occlusion(variation_set_name, index_run=None):
             run_iterator = trange(index_run, index_run + 1, desc='Runs')
 
         for index_run in run_iterator:
-            run_results = _run_occlusion_for_variation(model_path, data, tokenizer, settings, index_run, device, n_gpu)
+            run_results = _run_occlusion_for_variation(
+                paths, corpus_loader, tokenizer, settings, index_run, device, n_gpu)
             write_occlusion_predictions(
-                os.path.join(result_path, 'run_{}'.format(index_run), 'output_validation_occlusion.npz'),
+                os.path.join(paths.result_path, 'run_{}'.format(index_run), 'output_validation_occlusion.npz'),
                 run_results)
 
     print('Done')
@@ -228,8 +244,11 @@ def write_occlusion_predictions(output_path, all_results):
                 assert(sequence_type == detailed_result.sequence_type)
                 assert((critic_kwargs is None) == (detailed_result.critic_kwargs is None))
                 if critic_kwargs is not None:
+                    # noinspection PyTypeChecker
                     assert(len(critic_kwargs) == len(detailed_result.critic_kwargs))
+                    # noinspection PyTypeChecker
                     assert(all(k in detailed_result.critic_kwargs for k in critic_kwargs))
+                    # noinspection PyTypeChecker
                     assert(all(critic_kwargs[k] == detailed_result.critic_kwargs[k] for k in critic_kwargs))
                 assert(critic_type == detailed_result.critic_type)
 
@@ -324,6 +343,7 @@ def read_occlusion_predictions(output_path):
         if target_splits is not None:
             target = np.split(target, target_splits)
             if masks is not None:
+                # noinspection PyTypeChecker
                 masks = np.split(masks, target_splits)
         predictions = np.split(predictions, prediction_splits)
         for index_prediction in range(len(predictions)):

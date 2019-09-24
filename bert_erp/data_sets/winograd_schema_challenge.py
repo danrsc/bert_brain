@@ -3,7 +3,7 @@ import json
 
 import numpy as np
 
-from bert_erp_common import NamedSpanEncoder
+from ..common import NamedSpanEncoder
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
 from .corpus_base import CorpusBase, CorpusExampleUnifier
 

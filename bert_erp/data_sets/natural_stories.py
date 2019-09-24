@@ -735,6 +735,7 @@ def natural_stories_leave_stories_out(raw_data, index_variation_run, random_stat
     else:
         validation_stories = set(validation_stories)
 
+    # noinspection PyTypeChecker
     validation_story_names = [item_to_story[s] for s in sorted(validation_stories)]
     logger.info('Validation stories: {}'.format(validation_story_names))
 

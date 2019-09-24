@@ -486,6 +486,7 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
     else:
         is_hard_label = len(predictions.shape) > len(target.shape) or target.shape[-1] == 1
         log_sum = logsumexp(predictions, axis=-1)
+        # noinspection PyUnresolvedReferences
         log_sum = np.reshape(log_sum, log_sum.shape + (1,))
         log_softmax = predictions - log_sum
         predicted_class = np.argmax(predictions, axis=-1)

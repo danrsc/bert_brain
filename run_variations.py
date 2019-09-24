@@ -122,6 +122,7 @@ def run_variation(
 
         load_from_path = None
         if load_from is not None:
+            # noinspection PyCallingNonCallable
             load_from_index_run = index_run if load_from.map_run is None else load_from.map_run(index_run)
             load_from_path = os.path.join(
                 Paths().model_path,
