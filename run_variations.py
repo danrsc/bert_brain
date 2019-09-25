@@ -25,9 +25,9 @@ from tqdm_logging import replace_root_logger_handler
 
 import torch
 
-from bert_erp import cuda_most_free_device, cuda_auto_empty_cache_context, DataPreparer, CorpusLoader, \
+from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, DataPreparer, CorpusLoader, \
     Settings, TrainingVariation, task_hash, set_random_seeds, named_variations, train, make_datasets
-from bert_erp_paths import Paths
+from bert_brain_paths import Paths
 
 
 __all__ = ['run_variation']

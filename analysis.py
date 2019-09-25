@@ -3,7 +3,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from bert_erp import TrainingVariation, read_variation_results
+from bert_brain import TrainingVariation, read_variation_results
 from ocular import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 

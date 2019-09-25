@@ -38,9 +38,9 @@ from pytorch_pretrained_bert.modeling import BertForSequenceClassification, Bert
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
-from bert_erp import cuda_most_free_device, task_hash, set_random_seeds, named_variations, Settings, TrainingVariation
+from bert_brain import cuda_most_free_device, task_hash, set_random_seeds, named_variations, Settings, TrainingVariation
 from tqdm_logging import replace_root_logger_handler
-from bert_erp_paths import Paths
+from bert_brain_paths import Paths
 
 
 replace_root_logger_handler()
