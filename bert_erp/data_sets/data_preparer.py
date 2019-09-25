@@ -69,7 +69,7 @@ def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, respons
 
 def _copy_examples(examples):
     if examples is None:
-        return examples
+        return []
     # data_ids may be modified, so we copy them
     return [replace(
         ex, data_ids=type(ex.data_ids)((k, np.copy(ex.data_ids[k])) for k in ex.data_ids)) for ex in examples]
@@ -102,6 +102,10 @@ class DataPreparer(object):
         metadata = OrderedDict()
 
         for k in raw_data_dict:
+
+            if k not in self._random_state:
+                self._random_state[k] = np.random.RandomState(self._seed)
+
             metadata[k] = raw_data_dict[k].metadata
             if raw_data_dict[k].is_pre_split:
                 result[k] = PreparedData(
@@ -112,9 +116,6 @@ class DataPreparer(object):
                     field_specs=raw_data_dict[k].field_specs)
             elif (self._split_function_dict is not None
                     and k in self._split_function_dict and self._split_function_dict[k] is not None):
-                if k not in self._random_state:
-                    self._random_state[k] = np.random.RandomState(self._seed)
-
                 train_input_examples, validation_input_examples, test_input_examples = self._split_function_dict[k](
                     raw_data=raw_data_dict[k], random_state=self._random_state[k])
 
@@ -125,9 +126,6 @@ class DataPreparer(object):
                     OrderedDict(raw_data_dict[k].response_data),
                     field_specs=raw_data_dict[k].field_specs)
             else:
-                if k not in self._random_state:
-                    self._random_state[k] = np.random.RandomState(self._seed)
-
                 train_input_examples, validation_input_examples, test_input_examples = split_data(
                     raw_data_dict[k].input_examples,
                     raw_data_dict[k].test_proportion,

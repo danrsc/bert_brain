@@ -177,14 +177,14 @@ class CorpusBase:
         bound_arguments.apply_defaults()
         obj._bound_arguments = bound_arguments.arguments
         obj._argument_hash = cls._hash_arguments(obj._bound_arguments)
-        obj._cache_path = None
+        obj._cache_base_path = None
         return obj
 
     @property
     def argument_hash(self):
         return self._argument_hash
 
-    def set_paths_from_path_object(self, run_info, path_obj):
+    def set_paths_from_path_object(self, path_obj):
         #   A corpus declares a mapping from the paths object to its own path attributes
         #   by defining this function. E.g.:
         #       def _path_attributes(cls):
@@ -199,11 +199,13 @@ class CorpusBase:
                 paths_value = getattr(path_obj, path_attribute_mapping[path_attribute])
                 setattr(self, path_attribute, paths_value)
         # special case for cache_path
-        if self._cache_path is None:
-            arg_hash = type(self)._hash_arguments({'argument_hash': self._argument_hash, 'run_info': run_info})
+        if self._cache_base_path is None:
             # noinspection PyAttributeOutsideInit
-            self._cache_path = os.path.join(
-                path_obj.cache_path, type(self).__name__, '{}.npz'.format(arg_hash))
+            self._cache_base_path = os.path.join(path_obj.cache_path, type(self).__name__)
+
+    def cache_path(self, run_info):
+        arg_hash = type(self)._hash_arguments({'argument_hash': self._argument_hash, 'run_info': run_info})
+        return os.path.join(self._cache_base_path, '{}.npz'.format(arg_hash))
 
     def check_paths(self):
         path_attribute_mapping = type(self)._path_attributes()
@@ -263,18 +265,18 @@ class CorpusBase:
         run_info = self._run_info(index_run)
 
         if paths_obj is not None:
-            self.set_paths_from_path_object(run_info, paths_obj)
+            self.set_paths_from_path_object(paths_obj)
         else:
             self.check_paths()
 
-        result = load_from_cache(self._cache_path, run_info, self._bound_arguments, force_cache_miss)
+        result = load_from_cache(self.cache_path(run_info), run_info, self._bound_arguments, force_cache_miss)
         if result is not None:
             return result
 
         example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer)
         result = self._load(run_info, example_manager)
         CorpusBase._populate_default_field_specs(result)
-        save_to_cache(self._cache_path, result, run_info, self._bound_arguments)
+        save_to_cache(self.cache_path(run_info), result, run_info, self._bound_arguments)
         return result
 
     def _run_info(self, index_run):

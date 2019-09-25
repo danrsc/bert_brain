@@ -259,36 +259,22 @@ class HarryPotterCorpus(CorpusBase):
         meg_path = os.path.join(self.path, file_names[self.meg_kind])
         loaded = np.load(meg_path, allow_pickle=True)
 
-        meg_path_2 = os.path.join(self.path, 'harry_potter_meg_sensor_25ms_leila.npz')
-        loaded_2 = np.load(meg_path_2, allow_pickle=True)
-        stimuli_2 = loaded_2['stimuli']
-
         blocks = loaded['blocks']
         stimuli = loaded['stimuli']
-        held_out_block = np.unique(blocks)[run_info]
+        assert (stimuli[2364] == '..."')
+        stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
 
-        for i, (s1, s2) in enumerate(zip(stimuli, stimuli_2)):
-            if s1 != s2:
-                print(stimuli[i - 10:i+10], stimuli_2[i-10:i+10])
-                raise ValueError('mismatch at {}'.format(i))
+        held_out_block = np.unique(blocks)[run_info]
+        not_fixation = np.logical_not(stimuli == '+')
+        new_indices = np.full(len(not_fixation), -1, dtype=np.int64)
+        new_indices[not_fixation] = np.arange(np.count_nonzero(not_fixation))
+        stimuli = stimuli[not_fixation]
+        blocks = blocks[not_fixation]
 
         data = OrderedDict()
         for subject in self.meg_subjects:
-            data['hp_meg_{}'.format(subject)] = loaded['data_{}_hold_out_{}'.format(subject, held_out_block)]
-
-        assert(stimuli[2364] == '..."')
-        stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
-
-        indicator_plus = stimuli == '+'
-
-        new_indices = np.full(len(data), -1, dtype=np.int64)
-
-        not_plus = np.logical_not(indicator_plus)
-        data = OrderedDict((k, data[k][not_plus]) for k in data)
-        stimuli = stimuli[not_plus]
-        blocks = blocks[not_plus]
-
-        new_indices[not_plus] = np.arange(len(data))
+            data['hp_meg_{}'.format(subject)] = \
+                loaded['data_{}_hold_out_{}'.format(subject, held_out_block)][not_fixation]
 
         block_metadata = np.full(len(example_manager), -1, dtype=np.int64)
 

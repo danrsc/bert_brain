@@ -757,9 +757,16 @@ class PreprocessRandomPair:
                             if ex1[key] != ex2[key]:
                                 raise ValueError('Cannot pair examples with different multipart ids')
                             pair[key] = ex1[key]
+                        elif ex1[key] is None or ex2[key] is None:
+                            if ex1[key] is not None or ex2[key] is not None:
+                                raise ValueError('Cannot pair examples where one is None '
+                                                 'and the other is not on key: {}'.format(key))
+                            pair[key] = None
                         elif isinstance(ex1[key], tuple):
                             pair[key] = ex1[key] + ex2[key][1:]
                         else:
+                            if not isinstance(ex1[key], np.ndarray):
+                                print(key, type(ex1[key]))
                             assert(isinstance(ex1[key], np.ndarray))
                             pair[key] = np.concatenate([ex1[key], ex2[key][1:]])
 
