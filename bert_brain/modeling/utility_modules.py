@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 
-__all__ = ['GroupPool', 'Conv1DCausal', 'at_most_one_data_id', 'k_data_ids']
+__all__ = ['GroupPool', 'GroupConcat', 'Conv1DCausal', 'at_most_one_data_id', 'k_data_ids']
 
 
 def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=False):
@@ -68,6 +68,65 @@ def k_data_ids(k, data_ids, return_indices=False, check_unique=False):
         return data_ids, indices
 
     return data_ids
+
+
+class GroupConcat(torch.nn.Module):
+
+    def __init__(self, num_per_group):
+        super().__init__()
+        self.num_per_group = num_per_group
+
+    # noinspection PyMethodMayBeStatic
+    def forward(self, x, groupby):
+
+        # first attach an example_id to the groups to ensure that we don't concat across examples in the batch
+
+        # array of shape (batch, sequence, 1) which identifies example
+        example_ids = torch.arange(
+            groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
+
+        # indices to ensure stable sort, and to give us indices_sort
+        indices = torch.arange(groupby.size()[0] * groupby.size()[1], device=x.device).view(groupby.size() + (1,))
+
+        # -> (batch, sequence, 3): attach example_id to each group and add indices to guarantee stable sort
+        groupby = torch.cat((example_ids, groupby.view(groupby.size() + (1,)), indices), dim=2)
+
+        # -> (batch * sequence, 3)
+        groupby = groupby.view((groupby.size()[0] * groupby.size()[1], groupby.size()[2]))
+
+        # filter out the bogus groupby
+        groupby = groupby[groupby[:, 1] >= 0]
+
+        # this allows us to sort the 3 dimensions together
+        groups = torch.unique(groupby, sorted=True, dim=0)
+
+        _, counts = torch.unique_consecutive(groups[:, :2], return_counts=True, dim=0)
+
+        # check that the input is what we expected
+        if torch.min(counts) != self.num_per_group or torch.max(counts) != self.num_per_group:
+            raise ValueError('Expected exactly {} per unique groupby. min count: {}, max count: {}'.format(
+                self.num_per_group, torch.min(counts), torch.max(counts)))
+
+        # get the true groups and example_ids
+        example_ids = groups[:, 0]
+        indices_sort = groups[:, 2]
+        groups = groups[:, 1]
+
+        # -> (batch * sequence, n, m, ..., k)
+        x = x.view((x.size()[0] * x.size()[1],) + x.size()[2:])
+
+        # sort x so that grouped items are together
+        x = x[indices_sort]
+
+        x = x.view((x.size()[0] // self.num_per_group, self.num_per_group) + x.size()[1:])
+        groups = groups.view((groups.size()[0] // self.num_per_group, self.num_per_group))
+        example_ids = example_ids.view((example_ids.size()[0] // self.num_per_group, self.num_per_group))
+
+        # all of these are the same on axis=1, so take the first
+        groups = groups[:, 0]
+        example_ids = example_ids[:, 0]
+
+        return x, groups, example_ids
 
 
 class GroupPool(torch.nn.Module):

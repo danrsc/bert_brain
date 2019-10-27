@@ -301,71 +301,73 @@ def write_occlusion_predictions(output_path, all_results):
 
 
 def read_occlusion_predictions(output_path):
-    npz = np.load(output_path, allow_pickle=True)
+    with np.load(output_path, allow_pickle=True) as npz:
 
-    keys = [k.item() for k in npz['keys']]
+        keys = [k.item() for k in npz['keys']]
 
-    result = OrderedDict()
-    for key in keys:
-        predictions = npz['predictions_{}'.format(key)]
-        target = npz['target_{}'.format(key)]
-        masks = npz['masks_{}'.format(key)]
-        lengths = npz['lengths_{}'.format(key)]
-        num_occlusions = npz['num_occlusions_{}'.format(key)]
-        assert(len(lengths) == len(num_occlusions))
-        target_lengths = npz['target_lengths_{}'.format(key)]
-        data_keys = npz['data_keys_{}'.format(key)]
-        unique_ids = npz['unique_ids_{}'.format(key)]
-        tokens = npz['tokens_{}'.format(key)]
-        critic_type = npz['critic_{}'.format(key)].item()
-        sequence_type = npz['sequence_type_{}'.format(key)].item()
-        critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
-        critic_kwargs = dict()
-        for npz_key in npz.keys():
-            if npz_key.startswith(critic_kwarg_prefix):
-                critic_kwargs[npz_key[len(critic_kwarg_prefix):]] = npz[npz_key].item()
-        if len(critic_kwargs) == 0:
-            critic_kwargs = None
+        result = OrderedDict()
+        for key in keys:
+            predictions = npz['predictions_{}'.format(key)]
+            target = npz['target_{}'.format(key)]
+            masks = npz['masks_{}'.format(key)]
+            lengths = npz['lengths_{}'.format(key)]
+            num_occlusions = npz['num_occlusions_{}'.format(key)]
+            assert(len(lengths) == len(num_occlusions))
+            target_lengths = npz['target_lengths_{}'.format(key)]
+            data_keys = npz['data_keys_{}'.format(key)]
+            unique_ids = npz['unique_ids_{}'.format(key)]
+            tokens = npz['tokens_{}'.format(key)]
+            critic_type = npz['critic_{}'.format(key)].item()
+            sequence_type = npz['sequence_type_{}'.format(key)].item()
+            critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
+            critic_kwargs = dict()
+            for npz_key in npz.keys():
+                if npz_key.startswith(critic_kwarg_prefix):
+                    critic_kwargs[npz_key[len(critic_kwarg_prefix):]] = npz[npz_key].item()
+            if len(critic_kwargs) == 0:
+                critic_kwargs = None
 
-        splits = np.cumsum(lengths)[:-1]
-        if sequence_type == 'sequence':
-            target_splits = splits
-            target_length_info = lengths
-            prediction_splits = np.cumsum([length * occ for length, occ in zip(lengths, num_occlusions)])[:-1]
-        elif sequence_type == 'grouped':
-            target_splits = np.cumsum(target_lengths)[:-1]
-            target_length_info = target_lengths
-            prediction_splits = np.cumsum([length * occ for length, occ in zip(target_lengths, num_occlusions)])[:-1]
-        else:
-            target_splits = None
-            target_length_info = None
-            prediction_splits = np.cumsum(num_occlusions)[:-1]
-        if target_splits is not None:
-            target = np.split(target, target_splits)
-            if masks is not None:
-                # noinspection PyTypeChecker
-                masks = np.split(masks, target_splits)
-        predictions = np.split(predictions, prediction_splits)
-        for index_prediction in range(len(predictions)):
+            splits = np.cumsum(lengths)[:-1]
+            if sequence_type == 'sequence':
+                target_splits = splits
+                target_length_info = lengths
+                prediction_splits = np.cumsum([length * occ for length, occ in zip(lengths, num_occlusions)])[:-1]
+            elif sequence_type == 'grouped':
+                target_splits = np.cumsum(target_lengths)[:-1]
+                target_length_info = target_lengths
+                prediction_splits = np.cumsum(
+                    [length * occ for length, occ in zip(target_lengths, num_occlusions)])[:-1]
+            else:
+                target_splits = None
+                target_length_info = None
+                prediction_splits = np.cumsum(num_occlusions)[:-1]
+            if target_splits is not None:
+                target = np.split(target, target_splits)
+                if masks is not None:
+                    # noinspection PyTypeChecker
+                    masks = np.split(masks, target_splits)
+            predictions = np.split(predictions, prediction_splits)
+            for index_prediction in range(len(predictions)):
 
-            reshape_shape = (num_occlusions[index_prediction],)
-            if target_length_info is not None:
-                reshape_shape = reshape_shape + (target_length_info[index_prediction],)
-            reshape_shape = reshape_shape + predictions[index_prediction].shape[1:]
-            predictions[index_prediction] = np.reshape(predictions[index_prediction], reshape_shape)
+                reshape_shape = (num_occlusions[index_prediction],)
+                if target_length_info is not None:
+                    reshape_shape = reshape_shape + (target_length_info[index_prediction],)
+                reshape_shape = reshape_shape + predictions[index_prediction].shape[1:]
+                predictions[index_prediction] = np.reshape(predictions[index_prediction], reshape_shape)
 
-        data_keys = [k.item() for k in data_keys]
-        unique_ids = [u.item() for u in unique_ids]
-        tokens = np.split(tokens, splits)
-        tokens = [[t.item() for t in s] for s in tokens]
+            data_keys = [k.item() for k in data_keys]
+            unique_ids = [u.item() for u in unique_ids]
+            tokens = np.split(tokens, splits)
+            tokens = [[t.item() for t in s] for s in tokens]
 
-        results = list()
-        for idx in range(len(tokens)):
-            results.append(OcclusionResult(
-                key, critic_type, critic_kwargs,
-                unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx], sequence_type))
+            results = list()
+            for idx in range(len(tokens)):
+                results.append(OcclusionResult(
+                    key, critic_type, critic_kwargs,
+                    unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx],
+                    sequence_type))
 
-        result[key] = results
+            result[key] = results
 
     return result
 

@@ -16,13 +16,13 @@ from pytorch_pretrained_bert.modeling import BertConfig, \
     cached_path, load_tf_weights_in_bert, gelu, BertLayerNorm
 
 from ..common import NamedSpanEncoder
-from .utility_modules import GroupPool, at_most_one_data_id, k_data_ids
+from .utility_modules import GroupPool, GroupConcat, at_most_one_data_id, k_data_ids
 
 logger = logging.getLogger(__name__)
 
 
 __all__ = ['BertMultiPredictionHead', 'KeyedLinear', 'KeyedGroupPooledLinear', 'MultiPredictionHead',
-           'BertOutputSupplement', 'KeyedCombinedLinear']
+           'BertOutputSupplement', 'KeyedCombinedLinear', 'KeyedGroupConcatLinear']
 
 
 class KeyedBase(torch.nn.Module):
@@ -156,6 +156,62 @@ class KeyedLinear(KeyedBase):
                     result[(k, 'data_ids')] = data_ids[indicator_valid]
                     result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
 
+        return result
+
+
+class KeyedGroupConcatLinear(KeyedBase):
+
+    def __init__(
+            self,
+            num_per_data_id,
+            in_sequence_channels,
+            in_pooled_channels,
+            prediction_key_to_shape,
+            hidden_sizes=None,
+            hidden_activation=gelu,
+            include_pooled=False,
+            index_layer=-1):
+        super().__init__(prediction_key_to_shape)
+        self.group_concat = GroupConcat(num_per_data_id)
+        self.index_layer = index_layer
+        self.hidden = None
+        self.include_pooled = include_pooled
+        in_channels = in_sequence_channels * num_per_data_id
+        if include_pooled:
+            in_channels += in_pooled_channels
+        if hidden_sizes is not None:
+            if np.isscalar(hidden_sizes):
+                hidden_sizes = [hidden_sizes]
+            hidden_modules = list()
+            for index_hidden in range(len(hidden_sizes)):
+                current_in = in_channels if index_hidden == 0 else hidden_sizes[index_hidden - 1]
+                hidden_modules.append(_HiddenLayer(current_in, hidden_sizes[index_hidden], hidden_activation))
+            self.hidden = torch.nn.Sequential(*hidden_modules)
+            in_channels = hidden_sizes[-1]
+        self.linear = nn.Linear(in_channels, sum(self.splits))
+
+    def forward(self, sequence_output, pooled_output, batch):
+        all_data_ids = [batch[(k, 'data_ids')] for k in self.prediction_key_to_shape]
+        for idx in range(1, len(all_data_ids)):
+            if not torch.equal(all_data_ids[0], all_data_ids[idx]):
+                raise ValueError('Inconsistent data_ids cannot be used within the same instance of '
+                                 'KeyedGroupConcatLinear')
+        data_ids = all_data_ids[0]
+        x, data_ids, example_ids = self.group_concat(sequence_output[self.index_layer], data_ids)
+        x = x.view(x.size()[0], x.size()[1] * x.size()[2])
+        if self.include_pooled:
+            x = torch.cat([sequence_output.naked_pooled(self.index_layer)[example_ids], x], dim=1)
+        if self.hidden is not None:
+            x = self.hidden(x)
+        predictions = self.linear(x)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        result = OrderedDict()
+        assert (len(self.prediction_key_to_shape) == len(predictions))
+        for k, p in zip(self.prediction_key_to_shape, predictions):
+            p = p.view(p.size()[:1] + self.prediction_key_to_shape[k])
+            result[k] = p
+            result[(k, 'data_ids')] = data_ids
+            result[(k, 'example_ids')] = example_ids
         return result
 
 

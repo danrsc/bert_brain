@@ -34,6 +34,12 @@ class _HarryPotterWordFMRI:
     story_features: Mapping
 
 
+@dataclass(frozen=True)
+class _MEGKindProperties:
+    file_name: str
+    is_preprocessed: bool = False
+
+
 class HarryPotterCorpus(CorpusBase):
 
     @classmethod
@@ -72,14 +78,18 @@ class HarryPotterCorpus(CorpusBase):
                 mean_label is similar to pca_label, but using the mean within an ROI label
                 pca_sensor uses a PCA on the sensor space to produce 10 latent components and time is averaged over
                 the whole word
-            separate_meg_axes: None, or one or more of ('subject', 'roi', 'time'). If not provided (the default), then
-                the MEG data is a dictionary with a single key ('hp_meg') that maps to an array of shape
-                (word, subject, roi, 100ms slice) [Note that this shape may be modified by preprocessing]. If 'subject'
-                is provided, then the dictionary is keyed by 'hp_meg.<subject-id>', e.g. 'hp_meg.A", and the shape of
-                each value is (word, roi, 100ms slice). Similarly each separate axis that is provided causes the data
-                array to be further split and each resulting data array can be found under a more complex key. The
-                keys are generated in the order <subject-id>.<roi>.<time> all of which are optional. When time is in
-                the key, it is a multiple of 100 giving the ms start time of the window.
+            separate_meg_axes: None, True, or one or more of ('subject', 'roi', 'time'). If not provided (the default),
+                then when MEG data has not been preprocessed, a dictionary with a single key ('hp_meg') that maps to
+                an array of shape (word, subject, roi, 100ms slice) [Note that this shape may be modified by
+                preprocessing] is returned. 'subject', 'roi', and 'time' only apply to non-preprocessed data.
+                If 'subject' is provided, then the dictionary is keyed by 'hp_meg.<subject-id>', e.g. 'hp_meg.A",
+                and the shape of each value is (word, roi, 100ms slice). Similarly each separate axis that is
+                provided causes the data array to be further split and each resulting data array can be found under a
+                more complex key. The keys are generated in the order <subject-id>.<roi>.<time> all of which are
+                optional. When time is in the key, it is a multiple of 100 giving the ms start time of the window. If
+                the meg_kind is a preprocessed_kind, then only True is supported for this argument. If True, the
+                data is split such that each component gets a separate key. For example, 'hp_meg_A.0', 'hp_meg_A.1', ...
+                which is a scalar value for each word.
             group_meg_sentences_like_fmri: If False, examples for MEG are one sentence each. If True, then examples
                 are created as they would be for fMRI, i.e. including sentences as required by the
                 fmri_window_size_features parameter
@@ -151,7 +161,7 @@ class HarryPotterCorpus(CorpusBase):
 
     def story_features_per_fmri_example(self, paths_obj):
         if paths_obj is not None:
-            self.set_paths_from_path_object(run_info=0, path_obj=paths_obj)
+            self.set_paths_from_path_object(path_obj=paths_obj)
         else:
             self.check_paths()
         fmri_examples = self._compute_examples_for_fmri()
@@ -163,6 +173,48 @@ class HarryPotterCorpus(CorpusBase):
                 unique_ids[key] = len(unique_ids)
             words[unique_ids[key]] = example.words
         return words
+
+    @staticmethod
+    def _meg_kind_properties(meg_kind):
+        kind_properties = {
+            'pca_label': _MEGKindProperties('harry_potter_meg_100ms_pca.npz'),
+            'mean_label': _MEGKindProperties('harry_potter_meg_100ms_mean_flip.npz'),
+            'pca_sensor': _MEGKindProperties('harry_potter_meg_sensor_pca_35_word_mean.npz'),
+            'pca_sensor_full': _MEGKindProperties('harry_potter_meg_sensor_pca_35_word_full.npz'),
+            'ica_sensor_full': _MEGKindProperties('harry_potter_meg_sensor_ica_35_word_full.npz'),
+            'leila': _MEGKindProperties('harry_potter_meg_sensor_25ms_leila.npz'),
+            'rank_clustered_kmeans_L2_A': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_kmeans_L2_A.npz', is_preprocessed=True),
+            'rank_clustered_kmeans': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_kmeans_L2.npz', is_preprocessed=True),
+            'rank_clustered_L2': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_L2.npz', is_preprocessed=True),
+            'rank_clustered_median': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_median.npz', is_preprocessed=True),
+            'rank_clustered_mean': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_mean.npz', is_preprocessed=True),
+            'rank_clustered_rms': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_rms.npz', is_preprocessed=True),
+            'rank_clustered_counts': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_counts.npz', is_preprocessed=True),
+            'rank_clustered_mean_time_slice_ms_100_A': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_mean_time_slice_ms_100_A.npz', is_preprocessed=True),
+            'rank_clustered_mean_whole_A': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_mean_whole_A.npz', is_preprocessed=True),
+            'rank_clustered_sum_time_slice_ms_100_A': _MEGKindProperties(
+                'harry_potter_meg_rank_clustered_sum_time_slice_ms_100_A.npz', is_preprocessed=True),
+            'direct_rank_clustered_sum_25_ms': _MEGKindProperties(
+                'harry_potter_meg_direct_rank_clustered_sum_25.npz', is_preprocessed=True),
+        }
+
+        if meg_kind not in kind_properties:
+            raise ValueError('Unknown meg_kind: {}'.format(meg_kind))
+
+        return kind_properties[meg_kind]
+
+    @property
+    def meg_path(self):
+        return os.path.join(self.path, HarryPotterCorpus._meg_kind_properties(self.meg_kind).file_name)
 
     def _run_info(self, index_run):
         if self.meg_kind in ('rank_clustered',):
@@ -249,32 +301,48 @@ class HarryPotterCorpus(CorpusBase):
 
     def _read_preprocessed_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
         # see make_harry_potter.ipynb for how these are constructed
-        file_names = {
-            'rank_clustered': 'harry_potter_meg_rank_clustered_A.npz'
-        }
 
-        if self.meg_kind not in file_names:
-            raise ValueError('Unknown meg_kind: {}'.format(self.meg_kind))
+        with np.load(self.meg_path, allow_pickle=True) as loaded:
+            blocks = loaded['blocks']
+            stimuli = loaded['stimuli']
+            assert (stimuli[2364] == '..."')
+            stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
 
-        meg_path = os.path.join(self.path, file_names[self.meg_kind])
-        loaded = np.load(meg_path, allow_pickle=True)
+            held_out_block = np.unique(blocks)[run_info]
+            not_fixation = np.logical_not(stimuli == '+')
+            new_indices = np.full(len(not_fixation), -1, dtype=np.int64)
+            new_indices[not_fixation] = np.arange(np.count_nonzero(not_fixation))
+            stimuli = stimuli[not_fixation]
+            blocks = blocks[not_fixation]
 
-        blocks = loaded['blocks']
-        stimuli = loaded['stimuli']
-        assert (stimuli[2364] == '..."')
-        stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
+            subjects = loaded['subjects']
 
-        held_out_block = np.unique(blocks)[run_info]
-        not_fixation = np.logical_not(stimuli == '+')
-        new_indices = np.full(len(not_fixation), -1, dtype=np.int64)
-        new_indices[not_fixation] = np.arange(np.count_nonzero(not_fixation))
-        stimuli = stimuli[not_fixation]
-        blocks = blocks[not_fixation]
+            if self.meg_subjects is not None:
+                indicator_subjects = np.array([s in self.meg_subjects for s in subjects])
+                # noinspection PyTypeChecker
+                subjects = subjects[indicator_subjects]
 
-        data = OrderedDict()
-        for subject in self.meg_subjects:
-            data['hp_meg_{}'.format(subject)] = \
-                loaded['data_{}_hold_out_{}'.format(subject, held_out_block)][not_fixation]
+            data = OrderedDict()
+            for subject in subjects:
+                data['hp_meg_{}'.format(subject)] = \
+                    loaded['data_{}_hold_out_{}'.format(subject, held_out_block)][not_fixation]
+
+            if 'data_multi_subject_hold_out_{}'.format(held_out_block) in loaded \
+                    and (self.meg_subjects is None or 'multi_subject' in self.meg_subjects):
+                data['hp_meg_multi_subject'] = \
+                    loaded['data_multi_subject_hold_out_{}'.format(held_out_block)][not_fixation]
+
+        if self.separate_meg_axes is not None:
+            if not isinstance(self.separate_meg_axes, bool):
+                raise ValueError('Only boolean values are supported for \'separate_meg_axes\' '
+                                 'when the meg_kind is preprocessed')
+            if self.separate_meg_axes:
+                separated_data = OrderedDict()
+                for k in data:
+                    assert(len(data[k].shape) == 2)
+                    for index_task, item in enumerate(np.split(data[k], data[k].shape[1], axis=1)):
+                        separated_data['{}.{}'.format(k, index_task)] = item
+                data = separated_data
 
         block_metadata = np.full(len(example_manager), -1, dtype=np.int64)
 
@@ -301,7 +369,7 @@ class HarryPotterCorpus(CorpusBase):
 
     def _read_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
 
-        if self.meg_kind == 'rank_clustered':
+        if HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed:
             return self._read_preprocessed_meg(run_info, example_manager, examples)
 
         # separate_task_axes should be a tuple of strings in 'roi', 'subject', 'time'
@@ -314,35 +382,20 @@ class HarryPotterCorpus(CorpusBase):
             if axis not in ['roi', 'subject', 'time']:
                 raise ValueError('Unknown separate_task_axis: {}'.format(axis))
 
-        # see make_harry_potter.ipynb for how these are constructed
-        file_names = {
-            'pca_label': 'harry_potter_meg_100ms_pca.npz',
-            'mean_label': 'harry_potter_meg_100ms_mean_flip.npz',
-            'pca_sensor': 'harry_potter_meg_sensor_pca_35_word_mean.npz',
-            'pca_sensor_full': 'harry_potter_meg_sensor_pca_35_word_full.npz',
-            'ica_sensor_full': 'harry_potter_meg_sensor_ica_35_word_full.npz',
-            'leila': 'harry_potter_meg_sensor_25ms_leila.npz'
-        }
+        with np.load(self.meg_path, allow_pickle=True) as loaded:
 
-        if self.meg_kind not in file_names:
-            raise ValueError('Unknown meg_kind: {}'.format(self.meg_kind))
+            stimuli = loaded['stimuli']
 
-        meg_path = os.path.join(self.path, file_names[self.meg_kind])
+            assert(stimuli[2364] == '..."')
+            stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
 
-        loaded = np.load(meg_path, allow_pickle=True)
-
-        stimuli = loaded['stimuli']
-
-        assert(stimuli[2364] == '..."')
-        stimuli[2364] = '...."'  # this was an elipsis followed by a ., but the period got dropped somehow
-
-        # blocks should be int, but is stored as float
-        blocks = loaded['blocks'] if 'blocks' in loaded else None
-        blocks = np.round(blocks).astype(np.int64) if blocks is not None else None
-        # (subjects, words, rois, 100ms_slices)
-        data = loaded['data']
-        rois = loaded['rois'] if 'rois' in loaded else None
-        subjects = loaded['subjects']
+            # blocks should be int, but is stored as float
+            blocks = loaded['blocks'] if 'blocks' in loaded else None
+            blocks = np.round(blocks).astype(np.int64) if blocks is not None else None
+            # (subjects, words, rois, 100ms_slices)
+            data = loaded['data']
+            rois = loaded['rois'] if 'rois' in loaded else None
+            subjects = loaded['subjects']
 
         if self.meg_subjects is not None:
             indicator_subjects = np.array([s in self.meg_subjects for s in subjects])

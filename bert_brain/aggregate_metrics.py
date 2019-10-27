@@ -26,7 +26,8 @@ __all__ = [
     'make_prediction_handler',
     'ResultQuery',
     'query_results',
-    'get_field_predictions']
+    'get_field_predictions',
+    'k_vs_k']
 
 
 class Aggregator:
@@ -102,13 +103,13 @@ class Aggregator:
 
 
 def read_no_cluster_data(path):
-    loaded = np.load(path)
-    unique_ids = loaded['unique_ids']
-    lengths = loaded['lengths']
-    data_ids = loaded['data_ids']
-    splits = np.cumsum(lengths)[:-1]
-    data_ids = np.split(data_ids, splits)
-    return unique_ids, data_ids, loaded['data']
+    with np.load(path) as loaded:
+        unique_ids = loaded['unique_ids']
+        lengths = loaded['lengths']
+        data_ids = loaded['data_ids']
+        splits = np.cumsum(lengths)[:-1]
+        data_ids = np.split(data_ids, splits)
+        return unique_ids, data_ids, loaded['data']
 
 
 def expand_predictions(prediction, cluster_ids):
@@ -457,11 +458,13 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
             recall = np.where(np.sum(true_positive, axis=0) + np.sum(false_negative, axis=0) == 0, 1., recall)
             nan_prediction = np.sum(predictions_positive, axis=0) + np.sum(predictions_negative, axis=0) == 0
             recall = np.where(nan_prediction, 0., recall)
-        accuracy = (np.sum(true_positive, axis=0) + np.sum(true_negative, axis=0)) / np.sum(indicator_valid, axis=0)
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=RuntimeWarning)
-            pos_acc = np.sum(target_positive, axis=0) / np.sum(indicator_valid, axis=0)
-            neg_acc = np.sum(target_negative, axis=0) / np.sum(indicator_valid, axis=0)
+            valid_counts = np.sum(indicator_valid, axis=0)
+            accuracy = np.divide(
+                np.sum(true_positive, axis=0) + np.sum(true_negative, axis=0), valid_counts, where=valid_counts > 0)
+            pos_acc = np.divide(np.sum(target_positive, axis=0), valid_counts, where=valid_counts > 0)
+            neg_acc = np.divide(np.sum(target_negative, axis=0), valid_counts, where=valid_counts > 0)
         positive_better = np.sum(np.greater_equal(pos_acc, neg_acc)) > np.sum(np.less(pos_acc, neg_acc))
         mode_accuracy = pos_acc if positive_better else neg_acc
         with warnings.catch_warnings():
@@ -473,7 +476,7 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         else:
             f1 = np.where(precision + recall == 0, 0, f1)
 
-        poma = accuracy / mode_accuracy
+        poma = np.divide(accuracy, mode_accuracy, where=mode_accuracy != 0)
 
         return dict(
             xent=cross_entropy,

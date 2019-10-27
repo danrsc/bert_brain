@@ -110,55 +110,55 @@ def write_predictions(output_path, all_results, data_set, settings):
 
 
 def read_predictions(output_path):
-    npz = np.load(output_path, allow_pickle=True)
+    with np.load(output_path, allow_pickle=True) as npz:
+        keys = [k.item() for k in npz['keys']]
 
-    keys = [k.item() for k in npz['keys']]
+        result = OrderedDict()
+        for key in keys:
+            predictions = npz['predictions_{}'.format(key)]
+            target = npz['target_{}'.format(key)]
+            masks = npz['masks_{}'.format(key)]
+            lengths = npz['lengths_{}'.format(key)]
+            target_lengths = npz['target_lengths_{}'.format(key)]
+            data_keys = npz['data_keys_{}'.format(key)]
+            unique_ids = npz['unique_ids_{}'.format(key)]
+            tokens = npz['tokens_{}'.format(key)]
+            critic_type = npz['critic_{}'.format(key)].item()
+            sequence_type = npz['sequence_type_{}'.format(key)].item()
+            critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
+            critic_kwargs = dict()
+            for npz_key in npz.keys():
+                if npz_key.startswith(critic_kwarg_prefix):
+                    critic_kwargs[npz_key[len(critic_kwarg_prefix):]] = npz[npz_key].item()
+            if len(critic_kwargs) == 0:
+                critic_kwargs = None
 
-    result = OrderedDict()
-    for key in keys:
-        predictions = npz['predictions_{}'.format(key)]
-        target = npz['target_{}'.format(key)]
-        masks = npz['masks_{}'.format(key)]
-        lengths = npz['lengths_{}'.format(key)]
-        target_lengths = npz['target_lengths_{}'.format(key)]
-        data_keys = npz['data_keys_{}'.format(key)]
-        unique_ids = npz['unique_ids_{}'.format(key)]
-        tokens = npz['tokens_{}'.format(key)]
-        critic_type = npz['critic_{}'.format(key)].item()
-        sequence_type = npz['sequence_type_{}'.format(key)].item()
-        critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
-        critic_kwargs = dict()
-        for npz_key in npz.keys():
-            if npz_key.startswith(critic_kwarg_prefix):
-                critic_kwargs[npz_key[len(critic_kwarg_prefix):]] = npz[npz_key].item()
-        if len(critic_kwargs) == 0:
-            critic_kwargs = None
+            splits = np.cumsum(lengths)[:-1]
+            if sequence_type == 'sequence':
+                target_splits = splits
+            elif sequence_type == 'grouped':
+                target_splits = np.cumsum(target_lengths)[:-1]
+            else:
+                target_splits = None
+            if target_splits is not None:
+                predictions = np.split(predictions, target_splits)
+                target = np.split(target, target_splits)
+                if masks is not None:
+                    # noinspection PyTypeChecker
+                    masks = np.split(masks, target_splits)
+            data_keys = [k.item() for k in data_keys]
+            unique_ids = [u.item() for u in unique_ids]
+            tokens = np.split(tokens, splits)
+            tokens = [[t.item() for t in s] for s in tokens]
 
-        splits = np.cumsum(lengths)[:-1]
-        if sequence_type == 'sequence':
-            target_splits = splits
-        elif sequence_type == 'grouped':
-            target_splits = np.cumsum(target_lengths)[:-1]
-        else:
-            target_splits = None
-        if target_splits is not None:
-            predictions = np.split(predictions, target_splits)
-            target = np.split(target, target_splits)
-            if masks is not None:
-                # noinspection PyTypeChecker
-                masks = np.split(masks, target_splits)
-        data_keys = [k.item() for k in data_keys]
-        unique_ids = [u.item() for u in unique_ids]
-        tokens = np.split(tokens, splits)
-        tokens = [[t.item() for t in s] for s in tokens]
+            results = list()
+            for idx in range(len(tokens)):
+                results.append(OutputResult(
+                    key, critic_type, critic_kwargs,
+                    unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx],
+                    sequence_type))
 
-        results = list()
-        for idx in range(len(tokens)):
-            results.append(OutputResult(
-                key, critic_type, critic_kwargs,
-                unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx], sequence_type))
-
-        result[key] = results
+            result[key] = results
 
     return result
 

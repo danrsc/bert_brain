@@ -24,3 +24,4 @@ def sentence_predictions(paths, variation_set_name, training_variation, key):
             if output_result.unique_id not in result:
                 result[output_result.unique_id] = list()
             result[output_result.unique_id].append(output_result)
+    return result

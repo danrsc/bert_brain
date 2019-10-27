@@ -16,6 +16,7 @@ __all__ = [
     'one_sample_permutation_test',
     'two_sample_permutation_test',
     'get_k_vs_k_paired',
+    'get_mse_paired',
     'wilcoxon_axis',
     'ResultPValues']
 
@@ -214,6 +215,42 @@ def get_k_vs_k_paired(
     return accuracy_a, accuracy_b
 
 
+def get_mse_paired(
+        paths_obj,
+        variation_set_name_a, training_variation_a, variation_set_name_b, training_variation_b, field_name):
+    _, _, num_runs_a, _, _ = named_variations(variation_set_name_a)
+    _, _, num_runs_b, _, _ = named_variations(variation_set_name_b)
+    assert (num_runs_a == num_runs_b)
+    training_variation_a = match_variation(variation_set_name_a, training_variation_a)
+    training_variation_b = match_variation(variation_set_name_b, training_variation_b)
+
+    def read_results(variation_name, training_variation, idx_run):
+        p, t, ids = get_field_predictions(
+            paths_obj, variation_name, training_variation, field_name, idx_run, pre_matched=True)
+        sort_order = np.argsort(ids)
+        return p[sort_order], t[sort_order], ids[sort_order]
+
+    mse_a = list()
+    mse_b = list()
+    pove_a = list()
+    pove_b = list()
+    for index_run in range(num_runs_a):
+        predictions_a, target_a, ids_a = read_results(variation_set_name_a, training_variation_a, index_run)
+        predictions_b, target_b, ids_b = read_results(variation_set_name_b, training_variation_b, index_run)
+        if not np.array_equal(ids_a, ids_b):
+            raise ValueError('Mismatched ids')
+        err_a = np.square(predictions_a - target_a)
+        err_b = np.square(predictions_b - target_b)
+        mse_a.append(np.nanmean(err_a, axis=0))
+        mse_b.append(np.nanmean(err_b, axis=0))
+        var_a = np.nanvar(target_a, axis=0)
+        var_b = np.nanvar(target_b, axis=0)
+        pove_a.append(np.where(var_a > 0, np.divide(1 - mse_a[-1], var_a, where=var_a > 0), np.nan))
+        pove_b.append(np.where(var_b > 0, np.divide(1 - mse_b[-1], var_b, where=var_b > 0), np.nan))
+
+    return np.array(mse_a), np.array(pove_a), np.array(mse_b), np.array(pove_b)
+
+
 def sample_differences(
         sample_a_values,
         sample_b_values,
@@ -249,13 +286,14 @@ def sample_differences(
 
 
 def sorted_cumulative_mean_diff(a, b):
-    indices_sorted = np.argsort(-np.maximum(a, b), axis=-1)
+    indices_sorted = np.argsort(
+        -np.maximum(np.where(np.isnan(a), -np.inf, a), np.where(np.isnan(b), -np.inf, b)), axis=-1)
     diff_values = a - b
     diff_values = np.take_along_axis(diff_values, indices_sorted, axis=-1)
-    diff_values = np.cumsum(diff_values, axis=-1)
-    counts = np.expand_dims(np.arange(diff_values.shape[-1]) + 1, axis=0)
+    counts = np.cumsum(np.where(np.isnan(diff_values), 0, 1), axis=-1)
+    diff_values = np.nancumsum(diff_values, axis=-1)
     diff_values = diff_values / counts
-    return np.mean(diff_values, axis=0), np.std(diff_values, axis=0)
+    return np.nanmean(diff_values, axis=0), np.nanstd(diff_values, axis=0)
 
 
 def one_sample_permutation_test(
@@ -479,15 +517,24 @@ class ResultPValues:
     def __init__(self, label, subject, a_values, b_values=None, ttest_1_sample_pop_mean=0.5):
         self.label = label
         self.subject = subject
-        self.a_mean = np.mean(a_values, axis=0)
-        self.a_std = np.std(a_values, axis=0)
-        _, self.a_ttest_1samp_p_values = ttest_1samp(
-            a_values, ttest_1_sample_pop_mean * np.ones(a_values.shape[1:], a_values.dtype))
+        self.a_mean = np.nanmean(a_values, axis=0)
+        self.a_std = np.nanstd(a_values, axis=0)
+        self.a_ttest_1samp_p_values = None
+        self.b_ttest_1samp_p_values = None
+        self.ttest_rel_p_values = None
+        self.wilcoxon_p_values = None
+
+        enough_a = np.max(np.count_nonzero(np.logical_not(np.isnan(a_values)), axis=0)) >= 10
+        if enough_a:
+            _, self.a_ttest_1samp_p_values = ttest_1samp(
+                a_values, ttest_1_sample_pop_mean * np.ones(a_values.shape[1:], a_values.dtype))
         if b_values is not None:
-            self.b_mean = np.mean(b_values, axis=0)
-            self.b_std = np.std(b_values, axis=0)
+            self.b_mean = np.nanmean(b_values, axis=0)
+            self.b_std = np.nanstd(b_values, axis=0)
             self.ab_sorted_diff_mean, self.ab_sorted_diff_std = sorted_cumulative_mean_diff(a_values, b_values)
-            _, self.b_ttest_1samp_p_values = ttest_1samp(
-                b_values, ttest_1_sample_pop_mean * np.ones(b_values.shape[1:], b_values.dtype))
-            _, self.ttest_rel_p_values = ttest_rel(a_values, b_values)
-            _, self.wilcoxon_p_values = wilcoxon_axis(a_values, b_values)
+            if np.max(np.count_nonzero(np.logical_not(np.isnan(b_values)), axis=0)) >= 10:
+                _, self.b_ttest_1samp_p_values = ttest_1samp(
+                    b_values, ttest_1_sample_pop_mean * np.ones(b_values.shape[1:], b_values.dtype))
+                if enough_a:
+                    _, self.ttest_rel_p_values = ttest_rel(a_values, b_values)
+                    _, self.wilcoxon_p_values = wilcoxon_axis(a_values, b_values)

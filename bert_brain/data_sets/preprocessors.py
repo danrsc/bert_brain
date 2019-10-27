@@ -19,6 +19,7 @@ __all__ = [
     'PreprocessDiscretize',
     'PreprocessBaseline',
     'PreprocessFeatureStandardize',
+    'PreprocessFeatureNormalize',
     'PreprocessSequenceStandardize',
     'PreprocessDiff',
     'PreprocessStandardize',
@@ -85,7 +86,7 @@ def _parallel_column_map(fit_fn, apply_fn, data, indicator_fit=None):
     shape = data.shape
     data = np.reshape(data, (data.shape[0], -1))
     with ProcessPoolExecutor() as ex:
-        fit_result = ex.map(fit_fn, [(data[i, :], indicator_fit) for i in data.shape[1]])
+        fit_result = list(ex.map(fit_fn, [(data[:, i], indicator_fit) for i in range(data.shape[1])]))
     assert(len(fit_result) == data.shape[1])
     data = apply_fn(data, fit_result)
     return np.reshape(data, shape)
@@ -112,6 +113,34 @@ class PreprocessLog:
         return replace(loaded_data_tuple, data=np.where(isnan, np.nan, data))
 
 
+def _lin_regress(item):
+    from scipy.stats import linregress
+    y, indicator_train = item
+    x = np.arange(len(y))
+
+    if indicator_train is not None:
+        x = x[indicator_train]
+        y = y[indicator_train]
+
+    indicator_valid = np.logical_not(np.isnan(y))
+    x = x[indicator_valid]
+    y = y[indicator_valid]
+
+    if len(x) == 0:
+        return 0, 0
+
+    m, b, _, _, _ = linregress(x, y)
+    return m, b
+
+
+def _remove_lin_regress(data, p):
+    p = np.concatenate(list(np.expand_dims(p_col, 1) for p_col in p), axis=1)
+    #      (1, num_columns)            (num_rows, 1)
+    lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(data)), (-1, 1)) + np.reshape(p[1], (1, -1))
+    lines = np.reshape(lines, data.shape)
+    return data - lines
+
+
 class PreprocessDetrend:
 
     def __init__(
@@ -125,32 +154,7 @@ class PreprocessDetrend:
 
     @staticmethod
     def _detrend(arr, indicator_train):
-        x = np.arange(len(arr))
-        to_fit = arr
-
-        if indicator_train is not None:
-            x = x[indicator_train]
-            to_fit = to_fit[indicator_train]
-
-        if len(to_fit) == 0:
-            return arr
-
-        to_fit = np.reshape(np.ma.masked_invalid(to_fit), (to_fit.shape[0], -1))
-
-        # some columns might not have any data
-        indicator_can_fit = np.logical_not(np.all(to_fit.mask, axis=0))
-        to_fit = to_fit[:, indicator_can_fit]
-
-        p = np.ma.polyfit(x, to_fit, deg=1)
-
-        filled_p = np.zeros((p.shape[0], len(indicator_can_fit)), p.dtype)
-        filled_p[:, indicator_can_fit] = p
-        p = filled_p
-
-        #      (1, num_columns)            (num_rows, 1)
-        lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(arr)), (-1, 1)) + np.reshape(p[1], (1, -1))
-        lines = np.reshape(lines, arr.shape)
-        return arr - lines
+        return _parallel_column_map(_lin_regress, _remove_lin_regress, arr, indicator_train)
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         train_examples = loaded_data_tuple.train
@@ -355,6 +359,18 @@ class PreprocessFeatureStandardize:
         return replace(loaded_data_tuple, data=np.reshape(d, loaded_data_tuple.data.shape))
 
 
+class PreprocessFeatureNormalize:
+
+    def __init__(self):
+        pass
+
+    def __call__(self, loaded_data_tuple, metadata, random_state):
+        d = np.reshape(loaded_data_tuple.data, (loaded_data_tuple.data.shape[0], -1))
+        n = np.nansum(np.abs(d), axis=1, keepdims=True)
+        d = np.divide(d, n, where=n != 0)
+        return replace(loaded_data_tuple, data=np.reshape(d, loaded_data_tuple.data.shape))
+
+
 class PreprocessSequenceStandardize:
 
     def __init__(self, stop_mode):
@@ -529,32 +545,46 @@ class PreprocessStandardize:
 
 class PreprocessMakeBinary:
 
-    def __init__(self, threshold, dtype=np.int32, on_equal='random'):
+    def __init__(self, threshold, dtype=None, policy_equal='random', policy_nan='propagate'):
         self.threshold = threshold
-        self.dtype = dtype
-        self.on_equal = on_equal
+        if dtype is None:
+            if policy_nan == 'propagate':
+                self.dtype = np.float32
+            else:
+                self.dtype = np.int32
+        else:
+            self.dtype = dtype
+        self.policy_equal = policy_equal
+        self.policy_nan = policy_nan
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         data = loaded_data_tuple.data
         indicator_nan = np.isnan(data)
-        safe_compare = np.where(indicator_nan, self.threshold - 1, data)
-        if self.on_equal == 'greater':
-            indicator = safe_compare >= self.threshold
-        elif self.on_equal == 'less':
-            indicator = safe_compare > self.threshold
-        elif self.on_equal == 'random':
-            indicator = np.logical_or(
-                safe_compare > self.threshold,
-                np.logical_and(safe_compare == self.threshold, random_state.randint(0, 2, safe_compare.shape) == 1))
-        else:
-            raise ValueError('Unrecognized value for on_equal: {}'.format(self.on_equal))
-        indicator = np.logical_and(np.logical_not(indicator_nan), indicator)
-        if self.dtype == np.bool_ or self.dtype == bool:
-            data = indicator
-        else:
-            data = np.where(indicator, np.ones(data.shape, self.dtype), np.zeros(data.shape, self.dtype))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', category=RuntimeWarning)
+            if self.policy_equal == 'greater':
+                indicator = data >= self.threshold
+            elif self.policy_equal == 'less':
+                indicator = data > self.threshold
+            elif self.policy_equal == 'random':
+                indicator = np.logical_or(
+                    data > self.threshold,
+                    np.logical_and(data == self.threshold, random_state.randint(0, 2, data.shape) == 1))
+            else:
+                raise ValueError('Unrecognized policy_equal: {}'.format(self.policy_equal))
 
-        return replace(loaded_data_tuple, data=data)
+        if self.policy_nan == 'greater':
+            indicator = np.where(indicator_nan, True, indicator)
+        elif self.policy_nan == 'less':
+            indicator = np.where(indicator_nan, False, indicator)
+        elif self.policy_nan == 'random':
+            indicator = np.where(indicator_nan, random_state.randint(0, 2, data.shape) == 1, indicator)
+        elif self.policy_nan == 'propagate':
+            indicator = np.where(indicator_nan, np.nan, indicator.astype(np.float32))
+        else:
+            raise ValueError('Unrecognized policy_nan: {}'.format(self.policy_nan))
+
+        return replace(loaded_data_tuple, data=indicator.astype(self.dtype))
 
 
 class PreprocessNanMean:
@@ -670,14 +700,23 @@ class PreprocessSoSFilter:
 
 class PreprocessRandomPair:
 
-    def __init__(self, num_samples_per_group, metadata_example_group_by, data_id_pair_fn_map, combine_fn=None):
+    def __init__(
+            self,
+            num_samples_per_group,
+            metadata_example_group_by,
+            data_id_pair_fn_map,
+            combine_fn=None,
+            emit_both=False,
+            stop_mode=None):
         self.num_samples_per_group = num_samples_per_group
         self.metadata_example_group_by = metadata_example_group_by
         self.data_id_pair_fn_per_response_data = data_id_pair_fn_map
         self.combine_fn = combine_fn
+        self.emit_both = emit_both
+        self.stop_mode = stop_mode
 
     @staticmethod
-    def pair_from_end(data_ids1, data_ids2):
+    def pair_from_end(data_ids1, data_ids2, is_stop1, is_stop2, random_state, emit_both, stop_mode):
         skip = len(data_ids2) - (len(data_ids1) - 1)
         skip1, skip2 = 0, 0
         if skip < 0:  # seq 2 is shorter, skip some of seq 1
@@ -686,14 +725,117 @@ class PreprocessRandomPair:
         else:
             start = len(data_ids1) + skip
             skip2 = skip
-        return [(data_ids1[i - start + 1 + skip1], data_ids2[i - start + skip2])
-                if start <= i else None for i in range(len(data_ids1) + len(data_ids2))]
+        paired = list()
+        for i in range(len(data_ids1) + len(data_ids2)):
+            i1 = i - start + 1 + skip1
+            i2 = i - start + skip2
+            if i >= start:
+                meets_stop_requirement = True
+                if stop_mode is not None:
+                    if stop_mode == 'content':
+                        if is_stop1[i1] or is_stop2[i2]:
+                            meets_stop_requirement = False
+                    elif stop_mode == 'stop':
+                        if not is_stop1[i1] or not is_stop2[i2]:
+                            meets_stop_requirement = False
+                    elif stop_mode == 'matched':
+                        if is_stop1[i1] != is_stop2[i2]:
+                            meets_stop_requirement = False
+                    else:
+                        raise ValueError('Unknown value for stop_mode: {}'.format(stop_mode))
+                if meets_stop_requirement:
+                    paired.append((data_ids1[i1], data_ids2[i2]))
+                    if emit_both:
+                        paired[i1] = paired[i]
+                else:
+                    paired.append(None)
+            else:
+                paired.append(None)
+        return paired
 
     @staticmethod
-    def pair_from_start(data_ids1, data_ids2):
+    def pair_from_start(data_ids1, data_ids2, is_stop1, is_stop2, random_state, emit_both, stop_mode):
         end = len(data_ids1) + min(len(data_ids1) - 1, len(data_ids2))
-        return [(data_ids1[i - len(data_ids1) + 1], data_ids2[i - len(data_ids1)])
-                if len(data_ids1) <= i < end else None for i in range(len(data_ids1) + len(data_ids2))]
+        paired = list()
+        for i in range(len(data_ids1) + len(data_ids2)):
+            i1 = i - len(data_ids1) + 1
+            i2 = i - len(data_ids1)
+            if len(data_ids1) <= i < end:
+                meets_stop_requirement = True
+                if stop_mode is not None:
+                    if stop_mode == 'content':
+                        if is_stop1[i1] or is_stop2[i2]:
+                            meets_stop_requirement = False
+                    elif stop_mode == 'stop':
+                        if not is_stop1[i1] or not is_stop2[i2]:
+                            meets_stop_requirement = False
+                    elif stop_mode == 'matched':
+                        if is_stop1[i1] != is_stop2[i2]:
+                            meets_stop_requirement = False
+                    else:
+                        raise ValueError('Unknown value for stop_mode: {}'.format(stop_mode))
+                if meets_stop_requirement:
+                    paired.append((data_ids1[i1], data_ids2[i2]))
+                    if emit_both:
+                        paired[i1] = paired[i]
+                else:
+                    paired.append(None)
+            else:
+                paired.append(None)
+        return paired
+
+    @staticmethod
+    def pair_random(data_ids1, data_ids2, is_stop1, is_stop2, random_state, emit_both, stop_mode):
+        idx1 = np.arange(len(data_ids1) - 1) + 1  # skip [CLS]
+        idx2 = np.arange(len(data_ids2))
+
+        indicator_valid1 = data_ids1[1:] >= 0
+        indicator_valid2 = data_ids2 >= 0
+        if stop_mode is not None:
+            if stop_mode == 'content':
+                indicator_valid1 = np.logical_and(indicator_valid1, np.logical_not(is_stop1[1:]))
+                indicator_valid2 = np.logical_and(indicator_valid2, np.logical_not(is_stop2))
+            elif stop_mode == 'stop':
+                indicator_valid1 = np.logical_and(indicator_valid1, is_stop1[1:])
+                indicator_valid2 = np.logical_and(indicator_valid2, is_stop2)
+            elif stop_mode == 'matched':
+                pass
+            else:
+                raise ValueError('Unknown value for stop_mode: {}'.format(stop_mode))
+
+        idx1 = random_state.permutation(idx1[indicator_valid1])
+        idx2 = idx2[indicator_valid2]
+
+        if stop_mode == 'matched':
+            indicator_content1 = is_stop1[idx1]
+            indicator_content2 = is_stop2[idx2]
+            idx1_content = idx1[indicator_content1]
+            idx1_stop = idx1[np.logical_not(indicator_content1)]
+            idx2_content = idx2[indicator_content2]
+            idx2_stop = idx2[np.logical_not(indicator_content2)]
+            idx1_content = idx1_content[:min(len(idx1_content), len(idx2_content))]
+            idx2_content = idx2_content[:len(idx1_content)]
+            idx1_stop = idx1_stop[:min(len(idx1_stop), len(idx2_stop))]
+            idx2_stop = idx2_stop[:len(idx1_stop)]
+            idx1 = np.concatenate(idx1_content, idx1_stop)
+            idx2 = np.concatenate(idx2_content, idx2_stop)
+        else:
+            idx1 = idx1[:min(len(idx1), len(idx2))]
+            idx2 = idx2[:len(idx1)]
+
+        idx_i = 0
+        paired = list()
+        for i in range(len(data_ids1) + len(data_ids2)):
+            i2 = i - len(data_ids1)
+            if idx_i < len(idx2) and i2 == idx2[idx_i]:
+                i1 = idx1[idx_i]
+                paired.append((data_ids1[i1], data_ids2[i2]))
+                if emit_both:
+                    paired[i1] = paired[i]
+                idx_i += 1
+            else:
+                paired.append(None)
+        return paired
 
     def _get_data_id_pair_fn(self, response_key, kind):
         if callable(self.data_id_pair_fn_per_response_data):
@@ -783,7 +925,12 @@ class PreprocessRandomPair:
                 for ex1_len, pair in zip(len1, paired):
                     data_id_pairs = data_id_pair_fn(
                         pair.data_ids[response_k][:ex1_len],
-                        pair.data_ids[response_k][ex1_len:])
+                        pair.data_ids[response_k][ex1_len:],
+                        pair.is_stop[:ex1_len],
+                        pair.is_stop[ex1_len:],
+                        random_state,
+                        self.emit_both,
+                        self.stop_mode)
                     assert(len(data_id_pairs) == len(pair.data_ids[response_k]))
                     new_data_ids = list()
                     for data_id_pair in data_id_pairs:

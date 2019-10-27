@@ -126,7 +126,6 @@ def evaluate(
                     if data_key in settings.loss_tasks or kind in settings.loss_tasks:
                         total_loss += current
                         total_count += data_valid_count
-                eval_results.add_result(data_key, epoch, global_step, current)
 
     for h in loss_handlers:
         if hasattr(h, 'after_eval_batches'):
@@ -137,6 +136,7 @@ def evaluate(
             losses_to_write[k] = np.nan
         else:
             losses_to_write[k] /= losses_to_write_counts[k]
+        eval_results.add_result(k, epoch, global_step, losses_to_write[k])
 
     if total_count > 0:
         if len(losses_to_write) < 4:
