@@ -347,16 +347,21 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         indices = OrderedDict()
         offset = 0
         for data_key in self._example_tensors:
-            indices[data_key] = list()
             if data_key in self._multipart_indices:
                 task_indices = [np.array(i) for i in self._multipart_indices[data_key]]
                 count = sum(len(i) for i in task_indices)
+                # if this doesn't hold, we need to change the logic in _data_keys_and_index
+                assert(count == self._num_examples[data_key])
             else:
-                task_indices = np.split(np.arange(self._num_examples[data_key]), self._num_examples[data_key])
+                if self._num_examples[data_key] == 0:
+                    task_indices = []
+                else:
+                    task_indices = np.split(np.arange(self._num_examples[data_key]), self._num_examples[data_key])
                 count = self._num_examples[data_key]
-            for _ in self._response_data_indices[data_key]:
+            for response_key in self._response_data_indices[data_key]:
+                indices[response_key] = list()
                 for index_arr in task_indices:
-                    indices[data_key].append(index_arr + offset)
+                    indices[response_key].append(index_arr + offset)
                 offset += count
         return indices
 
@@ -478,7 +483,7 @@ class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
 
     def __iter__(self):
         for task in self.task_indices:
-            task_sample = np.random.permutation(len(self.task_indices[task]))
+            task_sample = np.arange(len(self.task_indices[task]))
             batch = list()
             for i in task_sample:
                 if len(batch) + len(self.task_indices[task][i]) > self.batch_size:

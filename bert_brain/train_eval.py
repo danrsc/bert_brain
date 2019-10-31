@@ -8,10 +8,12 @@ import logging
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertAdam
-from torch.utils.data import SequentialSampler, DistributedSampler, DataLoader as TorchDataLoader, RandomSampler
+from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
 
-from .data_sets import collate_fn, max_example_sequence_length, PreparedDataDataset, PreparedData
+from .data_sets import collate_fn, max_example_sequence_length, PreparedDataDataset, \
+    PreparedDataDatasetOneTaskAtATime, PreparedData, BatchOneTaskSequentialSampler, \
+    BatchOneTaskUniformTaskSampler, BatchOneTaskRandomSampler
 from .modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
 from .settings import Settings, PredictionHeadSettings
 from .result_output import write_predictions, write_loss_curve
@@ -65,13 +67,23 @@ def evaluate(
         eval_data_set,
         return_detailed=False):
 
+    eval_sampler = None
+    batch_sampler = None
     if settings.optimization_settings.local_rank == -1:
-        eval_sampler = SequentialSampler(eval_data_set)
+        if isinstance(eval_data_set, PreparedDataDatasetOneTaskAtATime):
+            batch_sampler = BatchOneTaskSequentialSampler(
+                eval_data_set, settings.optimization_settings.predict_batch_size)
+        else:
+            eval_sampler = SequentialSampler(eval_data_set)
     else:
-        eval_sampler = DistributedSampler(eval_data_set)
-    eval_data_loader = TorchDataLoader(
-        eval_data_set,
-        sampler=eval_sampler, batch_size=settings.optimization_settings.predict_batch_size, collate_fn=collate_fn)
+        raise ValueError('Not supported')
+
+    if batch_sampler is None:
+        eval_data_loader = TorchDataLoader(
+            eval_data_set,
+            sampler=eval_sampler, batch_size=settings.optimization_settings.predict_batch_size, collate_fn=collate_fn)
+    else:
+        eval_data_loader = TorchDataLoader(eval_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
 
     model.eval()
     all_results = OrderedDict()
@@ -167,18 +179,26 @@ def make_datasets(
         loss_tasks,
         which: Optional[Union[str, Sequence[str]]] = None,
         data_id_in_batch_keys: Optional[Sequence[str]] = None,
-        filter_when_not_in_loss_keys: Optional[Sequence[str]] = None):
+        filter_when_not_in_loss_keys: Optional[Sequence[str]] = None,
+        is_one_task_at_a_time: bool = False):
     if which is None:
         which = ['train', 'validation', 'test']
     max_sequence_length = max_example_sequence_length(data)
     is_single = isinstance(which, str)
     if is_single:
         which = [which]
-    result = [
-        PreparedDataDataset(
-            max_sequence_length, data, loss_tasks, which=w,
-            data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
-        for w in which]
+    if is_one_task_at_a_time:
+        result = [
+            PreparedDataDatasetOneTaskAtATime(
+                max_sequence_length, data, loss_tasks, which=w,
+                data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
+            for w in which]
+    else:
+        result = [
+            PreparedDataDataset(
+                max_sequence_length, data, loss_tasks, which=w,
+                data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
+            for w in which]
     if is_single:
         result = result[0]
     return result
@@ -244,10 +264,11 @@ def setup_prediction_heads_and_losses(settings, data_set):
 
     prediction_heads = [prediction_heads[k] for k in prediction_heads]
 
-    loss_weights = _loss_weights(loss_example_counts)
-    for loss_handler in loss_handlers:
-        if loss_handler.field in loss_weights:
-            loss_handler.weight = loss_weights[loss_handler.field]
+    if settings.weight_losses_by_inverse_example_counts:
+        loss_weights = _loss_weights(loss_example_counts)
+        for loss_handler in loss_handlers:
+            if loss_handler.field in loss_weights:
+                loss_handler.weight = loss_weights[loss_handler.field]
 
     token_supplemental_key_to_shape = OrderedDict()
     pooled_supplemental_key_to_shape = OrderedDict()
@@ -348,13 +369,29 @@ def train(
     logger.info("  Batch size = %d", settings.optimization_settings.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
 
+    train_sampler = None
+    batch_sampler = None
     if settings.optimization_settings.local_rank == -1:
-        train_sampler = RandomSampler(train_data_set)
+        if isinstance(settings.batch_kind, (tuple, list)):
+            if settings.batch_kind[0] != 'single_task_uniform':
+                raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
+            batch_sampler = BatchOneTaskUniformTaskSampler(
+                train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1])
+        elif settings.batch_kind == 'single_task_random':
+            batch_sampler = BatchOneTaskRandomSampler(train_data_set, settings.optimization_settings.train_batch_size)
+        elif settings.batch_kind == 'mixed_task_random':
+            train_sampler = RandomSampler(train_data_set)
+        else:
+            raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
     else:
-        train_sampler = DistributedSampler(train_data_set)
-    train_data_loader = TorchDataLoader(
-        train_data_set,
-        sampler=train_sampler, batch_size=settings.optimization_settings.train_batch_size, collate_fn=collate_fn)
+        raise ValueError('Not supported')
+
+    if batch_sampler is None:
+        train_data_loader = TorchDataLoader(
+            train_data_set,
+            sampler=train_sampler, batch_size=settings.optimization_settings.train_batch_size, collate_fn=collate_fn)
+    else:
+        train_data_loader = TorchDataLoader(train_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
 
     if settings.show_epoch_progress:
         epoch_range = trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch")

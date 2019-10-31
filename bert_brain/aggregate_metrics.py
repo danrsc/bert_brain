@@ -494,19 +494,24 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         log_softmax = predictions - log_sum
         predicted_class = np.argmax(predictions, axis=-1)
         if is_hard_label:
-            log_softmax = np.reshape(log_softmax, (-1, log_softmax.shape[-1]))
-            indices = np.reshape(target, -1)
-            cross_entropy = np.zeros(indices.shape, log_softmax.dtype)
-            for result_index, (index, current) in enumerate(zip(indices, log_softmax)):
-                if index < 0:
-                    cross_entropy[result_index] = np.nan
-                else:
-                    cross_entropy[result_index] = log_softmax[index]
-            cross_entropy = np.reshape(cross_entropy, target.shape)
+            cross_entropy = np.where(
+                np.isnan(target),
+                np.squeeze(
+                    np.take_along_axis(
+                        log_softmax,
+                        np.expand_dims(np.where(np.isnan(target), 0, target).astype(np.intp), -1), axis=-1),
+                    axis=-1),
+                np.nan)
             cross_entropy = np.nanmean(cross_entropy, axis=0)
-            accuracy = np.sum(np.equal(predicted_class, target), axis=0) / np.sum(np.greater_equal(target, 0), axis=0)
-            modes = np.argmax(bincount_axis(target, axis=0), axis=0)
-            mode_accuracy = np.sum(np.equal(modes, target), axis=0) / np.sum(np.greater_equal(target, 0), axis=0)
+            accuracy = (np.sum(np.equal(predicted_class, target), axis=0)
+                        / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
+            bin_counts = bincount_axis(
+                np.where(np.isnan(target), np.nanmax(target) + 1, target).astype(np.intp), axis=0)
+            if len(bin_counts) == np.nanmax(target + 1):
+                bin_counts = bin_counts[:-1]  # trim off the nan bin
+            modes = np.argmax(bin_counts, axis=0)
+            mode_accuracy = (np.sum(np.equal(modes, target), axis=0)
+                             / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
         else:
             # soft class labels
             cross_entropy = np.nanmean(np.sum(-log_softmax * target, axis=-1), axis=0)

@@ -16,7 +16,8 @@ __all__ = [
     'PreprocessBoxcox',
     'PreprocessLog',
     'PreprocessDetrend',
-    'PreprocessDiscretize',
+    'PreprocessHistogramBinEdgesDigitize',
+    'PreprocessQuantileDigitize',
     'PreprocessBaseline',
     'PreprocessFeatureStandardize',
     'PreprocessFeatureNormalize',
@@ -265,7 +266,7 @@ class PreprocessMiniBatchKMeans:
         return replace(loaded_data_tuple, data=cluster_means)
 
 
-class PreprocessDiscretize:
+class PreprocessHistogramBinEdgesDigitize:
 
     # noinspection PyShadowingBuiltins
     def __init__(self, bins=10, range=None, use_one_hot=True):
@@ -285,6 +286,95 @@ class PreprocessDiscretize:
             for idx, bin in enumerate(np.reshape(data, -1)):
                 one_hot[idx, bin] = 1
             data = np.reshape(one_hot, data.shape + (one_hot.shape[-1],))
+        return replace(loaded_data_tuple, data=data)
+
+
+def _quantile_digitize_column(item):
+    data, quantiles, indicator_train, nan_policy = item
+    # print(data.shape)
+    bin_edges = np.nanquantile(data if indicator_train is None else data[indicator_train], quantiles, axis=0)
+    result = np.digitize(data, bin_edges)
+    # print(result.shape)
+    if nan_policy == 'propagate':
+        return np.where(np.isnan(data), np.nan, result)
+    elif nan_policy == 'assign_first':
+        return np.where(np.isnan(data), 0, result)
+    elif nan_policy == 'assign_last':
+        return result  # this is what digitize already does
+    else:
+        raise ValueError('Unknown nan_policy: {}'.format(nan_policy))
+
+
+class PreprocessQuantileDigitize:
+
+    # noinspection PyShadowingBuiltins
+    def __init__(
+            self,
+            quantiles=10,
+            use_one_hot=True,
+            stop_mode: Optional[str] = None,
+            metadata_example_group_by: Optional[str] = None,
+            train_on_all: Optional[bool] = False,
+            nan_policy: str = 'propagate'):
+        self.quantiles = quantiles
+        self.use_one_hot = use_one_hot
+        self.stop_mode = stop_mode
+        self.metadata_example_group_by = metadata_example_group_by
+        self.train_on_all = train_on_all
+        self.nan_policy = nan_policy
+
+    def _quantile_digitize(self, data, indicator_train, quantiles):
+        shape = data.shape
+        data = np.reshape(data, (data.shape[0], -1))
+        with ProcessPoolExecutor() as ex:
+            result = list(
+                np.expand_dims(c, 1) for c in ex.map(
+                    _quantile_digitize_column,
+                    [(data[:, i], quantiles, indicator_train, self.nan_policy) for i in range(data.shape[1])]))
+        assert (len(result) == data.shape[1])
+        return np.reshape(np.concatenate(result, axis=1), shape)
+
+    # noinspection PyShadowingBuiltins
+    def __call__(self, loaded_data_tuple, metadata, random_state):
+        if np.ndim(self.quantiles) == 0:
+            # if an int, then quantiles gives the number of evenly spaced quantiles
+            quantiles = np.linspace(0, 1, self.quantiles, endpoint=False)[1:]
+        else:
+            quantiles = self.quantiles
+
+        train_examples = loaded_data_tuple.train
+        if self.train_on_all:
+            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+        indicator_train = _indicator_from_examples(
+            len(loaded_data_tuple.data), train_examples, self.stop_mode)
+
+        if self.metadata_example_group_by is not None:
+            if metadata is None or self.metadata_example_group_by not in metadata:
+                raise ValueError('metadata_example_group_by {} not found in metadata'.format(
+                    self.metadata_example_group_by))
+            data = np.copy(loaded_data_tuple.data)
+            grouped_examples = _unsorted_group_by(
+                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
+            indicator_not_in_group = np.full(len(data), True)
+            for group, group_examples in grouped_examples:
+                indicator_group = _indicator_from_examples(len(data), group_examples)
+                group_data = data[indicator_group]
+                group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
+                group_data = self._quantile_digitize(group_data, group_indicator_train, quantiles)
+                data[indicator_group] = group_data
+                indicator_not_in_group[indicator_group] = False
+            data[indicator_not_in_group] = np.nan
+        else:
+            data = self._quantile_digitize(loaded_data_tuple.data, indicator_train, quantiles)
+
+        if self.use_one_hot:
+            one_hot = np.zeros(data.shape + (len(quantiles) + 1,), np.float64)
+            indices = data if self.nan_policy != 'propagate' else np.where(np.isnan(data), 0, data).astype(np.intp)
+            np.put_along_axis(one_hot, np.expand_dims(indices, -1), 1, -1)
+            if self.nan_policy == 'propagate':
+                one_hot = np.where(np.expand_dims(np.isnan(data), -1), np.nan, one_hot)
+            data = one_hot
         return replace(loaded_data_tuple, data=data)
 
 

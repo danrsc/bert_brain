@@ -52,7 +52,8 @@ class NoValidInputs(Exception):
 
 def logical_not(t):
     # use xor with 1 to give a logical not
-    return t ^ 1
+    # return t ^ 1
+    return ~t  # newer version of torch supports not operator
 
 
 def masked_squared_error(mask, predictions, target):
@@ -142,12 +143,12 @@ def masked_cross_entropy(mask, predictions, target):
     valid_count = mask.sum().item()
     if valid_count == 0:
         raise NoValidInputs()
-    predictions = predictions.view(np.prod(predictions.size()[:-1]), predictions.size()[-1])
+    predictions = predictions.reshape(np.prod(predictions.size()[:-1]), predictions.size()[-1])
     target = target.view(-1)
     flat_mask = mask.view(-1)
-    valid_indices = torch.nonzero(flat_mask)
+    valid_indices = torch.squeeze(torch.nonzero(flat_mask), dim=1)
     predictions = predictions[valid_indices]
-    target = target[valid_indices]
+    target = target[valid_indices].type(torch.long)
     loss = torch.nn.functional.cross_entropy(predictions, target, reduction='none')
     result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
     result.masked_scatter_(mask, loss)
@@ -205,15 +206,15 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
             if len(is_begin_word_pieces.size()) < len(target.size()):
                 is_begin_word_pieces = is_begin_word_pieces.view(
                     is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
-            return is_keep & logical_not(torch.isnan(target)) & is_begin_word_pieces
+            return is_keep.type(torch.bool) & logical_not(torch.isnan(target)) & is_begin_word_pieces.type(torch.bool)
         else:
-            return is_keep & logical_not(torch.isnan(target))
+            return is_keep.type(torch.bool) & logical_not(torch.isnan(target))
     else:
         if is_begin_word_pieces is not None:
             if len(is_begin_word_pieces.size()) < len(target.size()):
                 is_begin_word_pieces = is_begin_word_pieces.view(
                     is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
-            return logical_not(torch.isnan(target)) & is_begin_word_pieces
+            return logical_not(torch.isnan(target)) & is_begin_word_pieces.type(torch.bool)
         else:
             return logical_not(torch.isnan(target))
 

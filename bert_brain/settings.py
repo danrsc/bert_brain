@@ -229,6 +229,14 @@ class Settings:
     # unless those fields are in the loss
     filter_when_not_in_loss_keys: Optional[Sequence[str]] = None
 
+    # one of:
+    # mixed_task_random: Batches contain multiple tasks, all items are visited in an epoch in random order
+    # single_task_random: Batches contain a single task, all items are visited in an epoch in random order
+    # (single_task_uniform, num_batches_per_epoch):
+    #   Batches contain a single task, tasks are uniformly sampled, then items are sampled within
+    #   a task to create a batch. num_batches_per_epoch controls epoch length, items may not all be visited in an epoch
+    batch_kind: [Union[str, Tuple[str, int]]] = 'mixed_task_random'
+
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
     critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)
 
@@ -237,6 +245,10 @@ class Settings:
     # only those fields will be reported in train_loss / eval_loss. Other critic output is available as metrics for
     # reporting, but is otherwise ignored by training.
     loss_tasks: Union[set, TrainingVariation] = field(default_factory=set)
+
+    # If true, tasks are re-weighted by the inverse of the number of available examples so that the expected
+    # effect of different data sets is balanced
+    weight_losses_by_inverse_example_counts: bool = True
 
     # fields which are not in the response_data part of the RawData structure, but which should nevertheless be used
     # as output targets of the model. If a field is already in loss_tasks then it does not need to also be specified
@@ -285,3 +297,10 @@ class Settings:
         if isinstance(critic, str):
             return CriticSettings(critic)
         return critic
+
+    @property
+    def is_one_task_at_a_time(self):
+        if isinstance(self.batch_kind, (tuple, list)):
+            return self.batch_kind[0].startswith('single_task_')
+        else:
+            return self.batch_kind.startswith('single_task_')

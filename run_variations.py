@@ -118,7 +118,8 @@ def run_variation(
             data_preparer.prepare(data),
             loss_tasks,
             data_id_in_batch_keys=settings.data_id_in_batch_keys,
-            filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
+            filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
+            is_one_task_at_a_time=settings.is_one_task_at_a_time)
 
         load_from_path = None
         if load_from is not None:
