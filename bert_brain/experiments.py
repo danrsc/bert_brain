@@ -1,6 +1,7 @@
 import hashlib
 import itertools
 import random
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -10,9 +11,8 @@ from .common import SwitchRemember
 from .data_sets import ResponseKind, CorpusTypes, PreprocessSoSFilter, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, preprocess_fork_no_cluster_to_disk, \
     PreprocessFeatureNormalize, PreprocessQuantileDigitize
-from .modeling import KeyedLinear, CriticKeys, KeyedCombinedLinear, KeyedGroupConcatLinear
-from .settings import TrainingVariation, LoadFrom, Settings, OptimizationSettings, PredictionHeadSettings, \
-    CriticSettings
+from .modeling import KeyedLinear, KeyedCombinedLinear, CriticKeys, group_concat_linear
+from .settings import TrainingVariation, LoadFrom, Settings, OptimizationSettings, CriticSettings
 
 
 __all__ = ['task_hash', 'set_random_seeds', 'iterate_powerset', 'named_variations', 'match_variation']
@@ -98,8 +98,10 @@ def named_variations(name):
                     froi_sentence_mode='ignore'),
                 CorpusTypes.UclCorpus()),
             optimization_settings=OptimizationSettings(num_train_epochs=50))
-        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
-            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.ns_froi] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.ns_froi))
         num_runs = 10
         min_memory = 4 * 1024 ** 3
     elif name == 'ns_froi':
@@ -114,8 +116,10 @@ def named_variations(name):
                     froi_minimum_story_count=2,
                     include_reaction_times=False),),
             optimization_settings=OptimizationSettings(num_train_epochs=3))
-        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
-            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.ns_froi] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.ns_froi))
         num_runs = 7  # there are 7 stories that have been recorded in froi
         min_memory = 4 * 1024 ** 3
     elif name == 'ns_hp':
@@ -138,10 +142,15 @@ def named_variations(name):
                     fmri_minimum_duration_required=9.6,
                     meg_subjects=[])),
             optimization_settings=OptimizationSettings(num_train_epochs=30, num_epochs_train_prediction_heads_only=10))
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
-        settings.prediction_heads[ResponseKind.ns_froi] = PredictionHeadSettings(
-            ResponseKind.ns_froi, KeyedLinear, dict(is_sequence='naked_pooled'))
+
+        head = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=[ResponseKind.ns_froi, ResponseKind.hp_fmri]))
+
+        settings.head_graph_parts[ResponseKind.ns_froi] = head
+        settings.head_graph_parts[ResponseKind.hp_fmri] = head
+
         # settings.split_functions[CorpusKeys.harry_potter] = HarryPotterMakeLeaveOutFmriRun(make_test=True)
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessSoSFilter(signal.butter(10, 0.1, 'hp', fs=0.5, output='sos')),
@@ -179,6 +188,10 @@ def named_variations(name):
         settings = Settings(
             corpora=(CorpusTypes.HarryPotterCorpus()),
             optimization_settings=OptimizationSettings(num_train_epochs=10))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20':
@@ -198,8 +211,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_meg':
@@ -235,10 +250,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
@@ -287,10 +302,13 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(
+            sequence_linear=KeyedLinear(
+                ('bert', 'sequence'), is_sequence=True, targets=ResponseKind.hp_meg, force_cpu=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
@@ -339,10 +357,13 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(
+            sequence_linear=KeyedLinear(
+                ('bert', 'sequence'), is_sequence=True, targets=ResponseKind.hp_meg, force_cpu=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
@@ -393,10 +414,13 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', force_cpu=True))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, force_cpu=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(
+            sequence_linear=KeyedLinear(
+                ('bert', 'sequence'), is_sequence=True, targets=ResponseKind.hp_meg, force_cpu=True))
         # settings.critics[ResponseKind.hp_meg] = CriticSettings(
         #     critic_type=CriticKeys.k_least_se,
         #     critic_kwargs=dict(
@@ -442,8 +466,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HIKL_independent':
@@ -467,8 +493,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         # for subject in subjects_:
         #     settings.critics['hp_fmri_{}'.format(subject)] = CriticSettings(
         #         critic_type=CriticKeys.single_k_least_se,
@@ -500,8 +528,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         # for subject in subjects_:
         #     settings.critics['hp_fmri_{}'.format(subject)] = CriticSettings(
         #         critic_type=CriticKeys.single_k_least_se,
@@ -531,8 +561,10 @@ def named_variations(name):
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_combined':
@@ -563,10 +595,16 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedCombinedLinear, kwargs=dict(naked_pooled=True))
+
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(
+            combined_linear=KeyedCombinedLinear(
+                ('bert', 'sequence'),
+                ('bert', 'untransformed_pooled'),
+                targets=ResponseKind.hp_meg))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_linear':
@@ -589,8 +627,6 @@ def named_variations(name):
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_erp':
@@ -633,8 +669,6 @@ def named_variations(name):
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(
                 stop_mode='content', metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, head_type=KeyedLinear, kwargs=dict(is_sequence=True))
         num_runs = 12
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_fmri_linear':
@@ -667,8 +701,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_fmri':
@@ -701,8 +737,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_simple_fmri':
@@ -732,8 +770,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_simple_fmri_linear':
@@ -763,8 +803,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'erp_hp_fmri':
@@ -792,8 +834,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':
@@ -815,8 +859,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_20_linear':
@@ -838,8 +884,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'sst':
@@ -867,8 +915,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence=False))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 100
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_HKL_from_I_fine_tune':
@@ -894,8 +944,10 @@ def named_variations(name):
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled'))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_fmri_diff_cluster':
@@ -932,8 +984,10 @@ def named_variations(name):
                 data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0)]
         settings.preprocess_fork_fn = preprocess_fork_no_cluster_to_disk
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[20]))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
@@ -975,8 +1029,10 @@ def named_variations(name):
                 data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0)]
         settings.preprocess_fork_fn = preprocess_fork_no_cluster_to_disk
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[20]))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
@@ -1016,8 +1072,10 @@ def named_variations(name):
                 metadata_example_group_by='fmri_runs',
                 data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0)]
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[20]))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
@@ -1059,8 +1117,10 @@ def named_variations(name):
                 data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0)]
         settings.preprocess_fork_fn = preprocess_fork_no_cluster_to_disk
-        settings.prediction_heads[ResponseKind.hp_fmri] = PredictionHeadSettings(
-            ResponseKind.hp_fmri, KeyedLinear, dict(is_sequence='naked_pooled', hidden_sizes=[20]))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
         settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_mae)
         # settings.critics[ResponseKind.hp_fmri] = CriticSettings(
@@ -1114,9 +1174,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=None,
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_cluster_median':
@@ -1165,9 +1232,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=None,
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_cluster_median':
@@ -1257,9 +1331,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=None,
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_cluster_rms':
@@ -1309,9 +1390,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=None,
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_cluster_mean':
@@ -1402,9 +1490,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=[10], hidden_activation=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=[10],
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_cluster_mean_whole':
@@ -1453,9 +1548,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=[20], hidden_activation=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=[20],
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_cluster_sum_100ms':
@@ -1505,9 +1607,16 @@ def named_variations(name):
         #     critic_type=CriticKeys.single_k_least_ae_on_eval,
         #     critic_kwargs=dict(k_fn=KLeastSEHalvingEpochs(0.5, delay_in_epochs=9, minimum_k=5000)))
         settings.data_id_in_batch_keys += (ResponseKind.hp_meg,)
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedGroupConcatLinear,
-            dict(num_per_data_id=2, hidden_sizes=None, hidden_activation=None, include_pooled=True))
+        settings.head_graph_parts[ResponseKind.hp_meg] = group_concat_linear(
+            'hp_meg',
+            num_per_group=2,
+            groupby_prefixes=ResponseKind.hp_meg,
+            groupby_suffix='data_ids',
+            sequence_source_name=('bert', 'sequence'),
+            pooled_source_name=('bert', 'untransformed_pooled'),
+            hidden_sizes=None,
+            hidden_activation=None,
+            targets=ResponseKind.hp_meg)
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_drc_25':
@@ -1569,8 +1678,6 @@ def named_variations(name):
         # settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
         #     ResponseKind.hp_meg, KeyedGroupConcatLinear,
         #     dict(num_per_data_id=2, hidden_sizes=[100], hidden_activation=None, include_pooled=True))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedLinear, dict(is_sequence=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     elif name == 'hp_meg_diff_drc_25_one':
@@ -1634,8 +1741,6 @@ def named_variations(name):
         # settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
         #     ResponseKind.hp_meg, KeyedGroupConcatLinear,
         #     dict(num_per_data_id=2, hidden_sizes=[100], hidden_activation=None, include_pooled=True))
-        settings.prediction_heads[ResponseKind.hp_meg] = PredictionHeadSettings(
-            ResponseKind.hp_meg, KeyedLinear, dict(is_sequence=True))
         num_runs = 4
         min_memory = 4 * 1024 ** 3
     else:

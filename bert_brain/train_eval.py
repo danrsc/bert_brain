@@ -7,6 +7,7 @@ import logging
 
 import numpy as np
 import torch
+import torch.nn
 from pytorch_pretrained_bert import BertAdam
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
@@ -14,8 +15,9 @@ from tqdm import tqdm, trange
 from .data_sets import collate_fn, max_example_sequence_length, PreparedDataDataset, \
     PreparedDataDatasetOneTaskAtATime, PreparedData, BatchOneTaskSequentialSampler, \
     BatchOneTaskUniformTaskSampler, BatchOneTaskRandomSampler
-from .modeling import make_loss_handler, BertMultiPredictionHead, KeyedLinear
-from .settings import Settings, PredictionHeadSettings
+from .modeling import make_loss_handler, KeyedLinear
+from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
+from .settings import Settings
 from .result_output import write_predictions, write_loss_curve
 
 
@@ -105,6 +107,7 @@ def evaluate(
             batch[k] = batch[k].to(device)
         with torch.no_grad():
             predictions = model(batch, eval_data_set)
+            eval_data_set.just_in_time_targets(batch, predictions)
             loss_result = OrderedDict(
                 (h.field,
                  (h.weight,
@@ -215,7 +218,7 @@ def _raise_if_head_settings_inconsistent(head_a, head_b):
             raise ValueError('Inconsistent kwargs in prediction head settings with same key: {}'.format(head_b.key))
 
 
-def setup_prediction_heads_and_losses(settings, data_set):
+def setup_prediction_heads_and_losses(settings: Settings, data_set):
 
     loss_example_counts = dict()
     loss_handlers = list()
@@ -227,7 +230,12 @@ def setup_prediction_heads_and_losses(settings, data_set):
         if k not in all_kinds and k not in data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
-    prediction_heads = dict()
+    graph_parts = OrderedDict()
+    if settings.common_graph_parts is not None:
+        graph_parts.update(settings.common_graph_parts)
+
+    placeholder_name_to_fields = dict()
+    prediction_shapes = dict()
     for k in data_set.fields:
         kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
         corpus_key = data_set.data_set_key_for_field(k)
@@ -239,30 +247,52 @@ def setup_prediction_heads_and_losses(settings, data_set):
             loss_handlers.append(handler)
 
             prediction_shape = handler.shape_adjust(data_set.value_shape(k))
-            prediction_head_settings = None
-            if k in settings.prediction_heads:
-                prediction_head_settings = settings.prediction_heads[k]
-            elif kind in settings.prediction_heads:
-                prediction_head_settings = settings.prediction_heads[kind]
-            elif corpus_key in settings.prediction_heads:
-                prediction_head_settings = settings.prediction_heads[corpus_key]
+            prediction_shapes[k] = prediction_shape
 
-            if prediction_head_settings is None:
-                if data_set.is_sequence(k):
-                    prediction_head_settings = PredictionHeadSettings(
-                        '__default_sequence__', KeyedLinear, dict(is_sequence=True))
+            if kind is not None:
+                if kind not in placeholder_name_to_fields:
+                    placeholder_name_to_fields[kind] = [k]
                 else:
-                    prediction_head_settings = PredictionHeadSettings(
-                        '__default_pooled__', KeyedLinear, dict(is_sequence=False))
+                    placeholder_name_to_fields[kind].append(k)
+            if corpus_key is not None:
+                if corpus_key not in placeholder_name_to_fields:
+                    placeholder_name_to_fields[corpus_key] = [k]
+                else:
+                    placeholder_name_to_fields[corpus_key].append(k)
 
-            if prediction_head_settings.key not in prediction_heads:
-                prediction_heads[prediction_head_settings.key] = (prediction_head_settings, OrderedDict())
+    default_sequence_head = None
+    default_pooled_head = None
+    for k in prediction_shapes:
+        kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
+        corpus_key = data_set.data_set_key_for_field(k)
+        prediction_head_parts = None
+        if k in settings.head_graph_parts:
+            prediction_head_parts = settings.head_graph_parts[k]
+        elif kind in settings.head_graph_parts:
+            prediction_head_parts = settings.head_graph_parts[kind]
+        elif corpus_key in settings.head_graph_parts:
+            prediction_head_parts = settings.head_graph_parts[corpus_key]
+
+        if prediction_head_parts is None:
+            if data_set.is_sequence(k):
+                if default_sequence_head is None:
+                    default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(('bert', 'sequence'), True))
+                prediction_head_parts = default_sequence_head
+                prediction_head_parts['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
             else:
-                _raise_if_head_settings_inconsistent(
-                    prediction_heads[prediction_head_settings.key][0], prediction_head_settings)
-            prediction_heads[prediction_head_settings.key][1][k] = prediction_shape
+                if default_pooled_head is None:
+                    default_pooled_head = OrderedDict(
+                        default_pooled_linear=KeyedLinear(('bert', 'pooled'), False))
+                prediction_head_parts = default_pooled_head
+                prediction_head_parts['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
 
-    prediction_heads = [prediction_heads[k] for k in prediction_heads]
+        for key in prediction_head_parts:
+            if key not in graph_parts:
+                graph_parts[key] = prediction_head_parts[key]
+                graph_parts[key].resolve_placeholders(placeholder_name_to_fields, prediction_shapes)
+            else:
+                if id(graph_parts[key]) != id(prediction_head_parts[key]):
+                    raise ValueError('Duplicate graph_part name: {}'.format(key))
 
     if settings.weight_losses_by_inverse_example_counts:
         loss_weights = _loss_weights(loss_example_counts)
@@ -280,7 +310,7 @@ def setup_prediction_heads_and_losses(settings, data_set):
             else:
                 pooled_supplemental_key_to_shape[k] = data_set.value_shape(k)
 
-    return prediction_heads, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers
+    return graph_parts, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers
 
 
 def train(
@@ -310,7 +340,7 @@ def train(
         settings.optimization_settings.num_train_epochs
         - settings.optimization_settings.num_final_epochs_train_prediction_heads_only)
 
-    prediction_heads, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
+    graph_parts, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
@@ -319,7 +349,7 @@ def train(
     model = model_loader(
         load_from_path if load_from_path is not None else settings.bert_model,
         map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
-        prediction_head_settings=prediction_heads,
+        head_graph_parts=graph_parts,
         token_supplemental_key_to_shape=token_supplemental_key_to_shape,
         pooled_supplemental_key_to_shape=pooled_supplemental_key_to_shape)
 
@@ -421,6 +451,7 @@ def train(
                 for k in batch:
                     batch[k] = batch[k].to(device)
             predictions = model(batch, train_data_set)
+            train_data_set.just_in_time_targets(batch, predictions)
             loss_dict = OrderedDict(
                 (h.field,
                  (h.weight,
@@ -505,6 +536,7 @@ def train(
     logger.info("  Batch size = %d", settings.optimization_settings.predict_batch_size)
 
     if len(validation_data_set) > 0:
+
         all_validation = evaluate(
             settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
             global_step, TaskResults(), validation_data_set,

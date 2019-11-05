@@ -293,8 +293,10 @@ class PreparedDataDataset(torch.utils.data.Dataset):
     def max_sequence_length(self):
         return self._max_sequence_length
 
-    def is_response_data(self, field):
+    def is_response_data(self, field, allow_invalid_field=False):
         if field not in self._field_specs:
+            if allow_invalid_field:
+                return False
             raise KeyError('Invalid field: {}'.format(field))
         return field in self._response_data
 
@@ -354,6 +356,18 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             raise KeyError('Field is not a response data field: {}'.format(field))
         data_ids = np.asarray(data_ids)
         return torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
+
+    def just_in_time_targets(self, batch, predictions):
+        # fetch the data that was too expensive to put in batch as padded
+        for k in predictions:
+            if (isinstance(k, tuple)
+                    and len(k) == 2
+                    and k[0] not in batch
+                    and k[0] in predictions
+                    and k[1] == 'data_ids'
+                    and self.is_response_data(k[0], allow_invalid_field=True)):
+                group_data = self.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
+                batch[k[0]] = group_data.to(predictions[k[0]].device)
 
     def __len__(self):
         for k in self._example_tensors:

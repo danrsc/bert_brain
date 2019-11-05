@@ -1,16 +1,15 @@
 from dataclasses import dataclass, field
-from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple
+from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT
 
 import numpy as np
 from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, \
     ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData, CorpusKeys, CorpusBase, \
     UclCorpus
-from .modeling import CriticKeys, FMRIConvConvWithDilationHead
+from .modeling import CriticKeys, GraphPart
 
 
-__all__ = ['OptimizationSettings', 'PredictionHeadSettings', 'CriticSettings', 'TrainingVariation', 'LoadFrom',
-           'Settings']
+__all__ = ['OptimizationSettings', 'CriticSettings', 'TrainingVariation', 'LoadFrom', 'Settings']
 
 
 @dataclass
@@ -39,13 +38,6 @@ class OptimizationSettings:
     num_epochs_train_prediction_heads_only: int = 0
     # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
     num_final_epochs_train_prediction_heads_only: int = 0
-
-
-@dataclass
-class PredictionHeadSettings:
-    key: str
-    head_type: type
-    kwargs: dict
 
 
 @dataclass
@@ -99,26 +91,6 @@ def _default_preprocessors():
 
 def _default_supplemental_fields():
     return {'token_lengths', 'token_probabilities'}
-
-
-def _default_prediction_heads():
-
-    return {
-        ResponseKind.hp_fmri: PredictionHeadSettings(
-            ResponseKind.hp_fmri, FMRIConvConvWithDilationHead, dict(
-                hidden_channels=10,
-                hidden_kernel_size=5,
-                out_kernel_size=5,
-                out_dilation=5,
-                memory_efficient=False)),
-        ResponseKind.ns_froi: PredictionHeadSettings(
-            ResponseKind.ns_froi, FMRIConvConvWithDilationHead, dict(
-                hidden_channels=10,
-                hidden_kernel_size=5,
-                out_kernel_size=5,
-                out_dilation=5,
-                memory_efficient=False))
-    }
 
 
 def _default_critics():
@@ -206,6 +178,8 @@ class Settings:
     # fields which should be concatenated with the output of BERT before the prediction heads are applied
     supplemental_fields: set = field(default_factory=_default_supplemental_fields)
 
+    common_graph_parts: Optional[OrderedDictT[str, GraphPart]] = None
+
     # Mapping from [response_key, kind, or corpus_key] to a prediction head. Lookups fall back in that order.
     # This determines how the output from BERT is used to make predictions for each target. Note that whenever two
     # fields map to the same PredictionHeadSettings instance or to two PredictionHeadSettings instances with the same
@@ -213,7 +187,7 @@ class Settings:
     # to PredictionHeadSettings instances that have different keys, then the predictions for those fields will be made
     # by two different instances of the prediction head even if the head has the same type. This enables different kinds
     # of parameter-sharing between fields.
-    prediction_heads: MutableMapping[str, PredictionHeadSettings] = field(default_factory=_default_prediction_heads)
+    head_graph_parts: MutableMapping[str, OrderedDictT[str, GraphPart]] = field(default_factory=dict)
 
     # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into a
     # batch directly; This allows the system to save significant resources by not padding a tensor for a full
@@ -257,10 +231,6 @@ class Settings:
     # has been pre-trained to make a prediction on a non-response field, and we want to track how those predictions
     # are changing as we target a different optimization metric.
     non_response_outputs: set = field(default_factory=set)
-
-    # TODO: not currently used. Should revive from ulmfit code
-    # can use an extension to render to file, e.g. 'png', or 'show' to plot
-    visualize_mode: str = None
 
     seed: int = 42
 
