@@ -230,10 +230,6 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
         if k not in all_kinds and k not in data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
-    graph_parts = OrderedDict()
-    if settings.common_graph_parts is not None:
-        graph_parts.update(settings.common_graph_parts)
-
     placeholder_name_to_fields = dict()
     prediction_shapes = dict()
     for k in data_set.fields:
@@ -259,6 +255,19 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
                     placeholder_name_to_fields[corpus_key] = [k]
                 else:
                     placeholder_name_to_fields[corpus_key].append(k)
+
+    if settings.weight_losses_by_inverse_example_counts:
+        loss_weights = _loss_weights(loss_example_counts)
+        for loss_handler in loss_handlers:
+            if loss_handler.field in loss_weights:
+                loss_handler.weight = loss_weights[loss_handler.field]
+
+    graph_parts = OrderedDict()
+    if settings.common_graph_parts is not None:
+        for k in settings.common_graph_parts:
+            settings.common_graph_parts[k].resolve_placeholders(
+                placeholder_name_to_fields, prediction_shapes, len(loss_handlers))
+            graph_parts[k] = settings.common_graph_parts[k]
 
     default_sequence_head = None
     default_pooled_head = None
@@ -289,16 +298,11 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
         for key in prediction_head_parts:
             if key not in graph_parts:
                 graph_parts[key] = prediction_head_parts[key]
-                graph_parts[key].resolve_placeholders(placeholder_name_to_fields, prediction_shapes)
+                graph_parts[key].resolve_placeholders(
+                    placeholder_name_to_fields, prediction_shapes, len(loss_handlers))
             else:
                 if id(graph_parts[key]) != id(prediction_head_parts[key]):
                     raise ValueError('Duplicate graph_part name: {}'.format(key))
-
-    if settings.weight_losses_by_inverse_example_counts:
-        loss_weights = _loss_weights(loss_example_counts)
-        for loss_handler in loss_handlers:
-            if loss_handler.field in loss_weights:
-                loss_handler.weight = loss_weights[loss_handler.field]
 
     token_supplemental_key_to_shape = OrderedDict()
     pooled_supplemental_key_to_shape = OrderedDict()

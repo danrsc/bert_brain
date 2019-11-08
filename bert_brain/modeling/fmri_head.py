@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.nn
 
 from .utility_modules import Conv1DCausal
 

@@ -313,16 +313,19 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         return self._field_specs[field].fill_value
 
     def _data_keys_and_index(self, index):
+        response_id = 0
         for data_key in self._example_tensors:
             for response_data_key in self._response_data_indices[data_key]:
                 if index < self._num_examples[data_key]:
-                    return data_key, response_data_key, index
+                    return response_id, data_key, response_data_key, index
                 index -= self._num_examples[data_key]
+                response_id += 1
         raise IndexError('Index out of bounds: {}'.format(index))
 
     def __getitem__(self, item):
-        data_key, response_data_key, item = self._data_keys_and_index(item)
+        response_id, data_key, response_data_key, item = self._data_keys_and_index(item)
         result = OrderedDict((k, self._example_tensors[data_key][k][item]) for k in self._example_tensors[data_key])
+        result['response_id'] = response_id
         # we assemble the response data JIT to reduce the memory footprint
         response_data_indices = self._response_data_indices[data_key][response_data_key][item]
         if self._data_id_in_batch_keys is not None and (

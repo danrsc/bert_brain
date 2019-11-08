@@ -205,6 +205,8 @@ class HarryPotterCorpus(CorpusBase):
                 'harry_potter_meg_rank_clustered_sum_time_slice_ms_100_A.npz', is_preprocessed=True),
             'direct_rank_clustered_sum_25_ms': _MEGKindProperties(
                 'harry_potter_meg_direct_rank_clustered_sum_25.npz', is_preprocessed=True),
+            'direct_rank_clustered_percentile_75_25_ms': _MEGKindProperties(
+                'harry_potter_meg_direct_rank_clustered_percentile_75_25.npz', is_preprocessed=True),
         }
 
         if meg_kind not in kind_properties:
@@ -829,9 +831,7 @@ def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=
 
 
 def get_mask_for_subject(subject):
-    if subject in ['H', 'L', 'K']:
-        return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars_auto2'.format(subject), 'thick')
-    return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars'.format(subject), 'thick')
+    return cortex.db.get_mask('fMRI_story_{}'.format(subject), '{}_ars_auto2'.format(subject), 'thick')
 
 
 def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, distance=None):

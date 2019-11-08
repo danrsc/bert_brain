@@ -100,7 +100,7 @@ class GroupBase(GraphPart):
             return expanded[0]
         return expanded
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes):
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
         self.groupby_prefixes = GroupBase._expand_placeholders(self.groupby_prefixes, placeholder_name_to_fields)
 
     def _get_group_ids(self, batch):

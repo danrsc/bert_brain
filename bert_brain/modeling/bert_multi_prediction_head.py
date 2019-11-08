@@ -68,7 +68,7 @@ class MultiPredictionHead(torch.nn.Module):
         name_to_num_channels = LazyBertOutputNumChannels(
             self.token_supplement, self.pooled_supplement, in_channels, num_in_layers)
         for key in head_graph_parts:
-            graph_part_num_channels = head_graph_parts[key].instantiate(name_to_num_channels)
+            graph_part_num_channels = head_graph_parts[key].instantiate(name_to_num_channels.copy())
             for k in graph_part_num_channels:
                 if k in name_to_num_channels:
                     raise ValueError('Duplicate output: {}'.format(k))
@@ -445,6 +445,12 @@ class LazyBertOutputNumChannels:
         self.in_channels = in_channels
         self.num_layers = num_layers
         self.name_to_num_channels = OrderedDict()
+
+    def copy(self):
+        result = LazyBertOutputNumChannels(
+            self.sequence_supplement, self.pooled_supplement, self.in_channels, self.num_layers)
+        result.name_to_num_channels = OrderedDict(self.name_to_num_channels)
+        return result
 
     def __delitem__(self, key):
         del self.name_to_num_channels[key]

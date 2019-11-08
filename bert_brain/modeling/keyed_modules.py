@@ -46,13 +46,21 @@ def group_concat_linear(
 
 class KeyedBase(GraphPart):
 
+    @staticmethod
+    def _output_shape_normalize(output_key_to_shape):
+        keys = list(output_key_to_shape)
+        for key in keys:
+            if np.ndim(output_key_to_shape[key]) == 0:
+                output_key_to_shape[key] = (output_key_to_shape[key],)
+        return [int(np.prod(output_key_to_shape[k])) for k in output_key_to_shape]
+
     def __init__(self, output_key_to_shape, targets):
         super().__init__()
         if output_key_to_shape is None:
             self.output_key_to_shape = OrderedDict()
         else:
             self.output_key_to_shape = OrderedDict(output_key_to_shape)
-        self.splits = [int(np.prod(self.output_key_to_shape[k])) for k in self.output_key_to_shape]
+        self.splits = KeyedBase._output_shape_normalize(self.output_key_to_shape)
         if targets is None:
             self.targets = set()
         elif np.ndim(targets) == 0:
@@ -60,7 +68,7 @@ class KeyedBase(GraphPart):
         else:
             self.targets = set(targets)
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes):
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
         if self.targets is not None:
             remaining_targets = set()
             for target in self.targets:
@@ -71,7 +79,7 @@ class KeyedBase(GraphPart):
                 else:
                     remaining_targets.add(target)
             self.targets = remaining_targets
-        self.splits = [int(np.prod(self.output_key_to_shape[k])) for k in self.output_key_to_shape]
+        self.splits = KeyedBase._output_shape_normalize(self.output_key_to_shape)
 
     def forward(self, batch):
         raise NotImplementedError('{} does not implement forward'.format(type(self)))
@@ -178,7 +186,9 @@ class KeyedLinear(KeyedBase):
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
         self.linear = nn.Linear(in_channels, sum(self.splits))
-        result = OrderedDict(self.output_key_to_shape)
+        result = OrderedDict()
+        for key in self.output_key_to_shape:
+            result[key] = int(np.prod(self.output_key_to_shape[key]))
         for key in name_to_num_channels:
             if isinstance(key, tuple) and key[0] == self.source_name:
                 for result_key in self.output_key_to_shape:
