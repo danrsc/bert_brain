@@ -6,7 +6,7 @@ __all__ = ['GraphPart']
 
 class GraphPart(Module):
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
         raise NotImplementedError('{} does not implement resolve_placeholders'.format(type(self)))
 
     def forward(self, batch):

@@ -68,7 +68,7 @@ class KeyedBase(GraphPart):
         else:
             self.targets = set(targets)
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
         if self.targets is not None:
             remaining_targets = set()
             for target in self.targets:
@@ -164,7 +164,8 @@ class KeyedLinear(KeyedBase):
             force_cpu=False,
             output_key_to_shape=None,
             targets=None,
-            apply_at_most_one_data_id=False):
+            apply_at_most_one_data_id=False,
+            should_norm=False):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
         self.is_sequence = is_sequence
@@ -173,7 +174,9 @@ class KeyedLinear(KeyedBase):
         self.hidden_activation = hidden_activation
         self.hidden = None
         self.linear = None
+        self.norm_layers = None
         self.apply_at_most_one_data_id = apply_at_most_one_data_id
+        self.should_norm = should_norm
 
     def _instantiate(self, name_to_num_channels):
         in_channels = name_to_num_channels[self.source_name]
@@ -189,6 +192,8 @@ class KeyedLinear(KeyedBase):
         result = OrderedDict()
         for key in self.output_key_to_shape:
             result[key] = int(np.prod(self.output_key_to_shape[key]))
+        if self.should_norm:
+            self.norm_layers = torch.nn.ModuleList(modules=list(BertLayerNorm(result[k], eps=1e-12) for k in result))
         for key in name_to_num_channels:
             if isinstance(key, tuple) and key[0] == self.source_name:
                 for result_key in self.output_key_to_shape:
@@ -203,6 +208,8 @@ class KeyedLinear(KeyedBase):
             x = x.cpu()
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
+        if self.should_norm:
+            predictions = [norm(p) for norm, p in zip(self.norm_layers, predictions)]
         result = OrderedDict()
         assert(len(self.output_key_to_shape) == len(predictions))
         for k, p in zip(self.output_key_to_shape, predictions):

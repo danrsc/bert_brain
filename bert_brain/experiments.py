@@ -1865,10 +1865,12 @@ def named_variations(name):
         ]
 
         settings.common_graph_parts = OrderedDict(contextual_bottleneck=LinearContextualParameterGeneration(
-            'response_id', 'num_tasks', 5,
-            OrderedDict(bottleneck=KeyedLinear(
-                ('bert', 'sequence', 'all'), is_sequence=True,
-                output_key_to_shape=OrderedDict(sequence_all_bottleneck=100)))))
+            'response_id', 'num_response_data_fields', 3,
+            OrderedDict(
+                bottleneck=KeyedLinear(
+                    ('bert', 'sequence', 'all'), is_sequence=True,
+                    output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                    should_norm=True))))
 
         settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
             'sequence_all_bottleneck', is_sequence=True, targets=ResponseKind.hp_meg))

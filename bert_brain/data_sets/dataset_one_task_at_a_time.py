@@ -109,8 +109,9 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         self._response_data_indices = OrderedDict()
         self._response_data_kind = OrderedDict()
         self._response_data_example_counts = OrderedDict()
+        self._word_ids = OrderedDict()
 
-        self._data_id_to_tokens = dict()
+        self._example_to_tokens = dict()
         self._data_set_id_to_data_set_key = dict()
         self._field_to_data_set_key = dict()
 
@@ -226,18 +227,24 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                         raise ValueError('Fields must always be set to None in a given dataset '
                                          'if they are ever None in that dataset')
 
-                for response_data_key in current.data:
-                    if not PreparedDataDatasetOneTaskAtATime._is_field_allowed(
-                            filter_when_not_in_loss_keys, loss_keys, response_data_key,
-                            current.data[response_data_key].kind):
-                        continue
-                    self._response_data[response_data_key] = current.data[response_data_key].data
-                    self._response_data_kind[response_data_key] = current.data[response_data_key].kind
-
                 # remember the tokens
-                self._data_id_to_tokens[(data_set_id, example_values[id_field])] = example_values[token_field]
+                self._example_to_tokens[(data_set_id, example_values[id_field])] = example_values[token_field]
 
             self._num_examples[data_key] = len(examples)
+
+            for response_data_key in current.data:
+                if not PreparedDataDatasetOneTaskAtATime._is_field_allowed(
+                        filter_when_not_in_loss_keys, loss_keys, response_data_key,
+                        current.data[response_data_key].kind):
+                    continue
+                self._response_data[response_data_key] = current.data[response_data_key].data
+                self._response_data_kind[response_data_key] = current.data[response_data_key].kind
+                if current.data[response_data_key].word_ids is not None:
+                    max_word_id_length = max(len(w) for w in current.data[response_data_key].word_ids)
+                    word_ids = np.array(
+                        list(_pad(w, max_word_id_length, -1) for w in current.data[response_data_key].word_ids))
+                    self._word_ids[response_data_key] = word_ids
+
             if multipart_example_field in self._example_tensors[data_key]:
                 _, multipart_inverse = np.unique(
                     self._example_tensors[data_key][multipart_example_field], return_inverse=True)
@@ -285,8 +292,10 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                     and k[0] in predictions
                     and k[1] == 'data_ids'
                     and self.is_response_data(k[0], allow_invalid_field=True)):
-                group_data = self.get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
+                group_data, word_ids = self._get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
                 batch[k[0]] = group_data.to(predictions[k[0]].device)
+                if word_ids is not None:
+                    batch[(k[0], 'word_ids')] = word_ids
 
     def value_shape(self, field):
         if field not in self._field_specs:
@@ -305,6 +314,10 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         if field not in self._field_specs:
             raise KeyError('Unknown field: {}'.format(field))
         return self._response_data_kind[field] if field in self._response_data_kind else None
+
+    @property
+    def num_response_data_fields(self):
+        return len(self._response_data)
 
     def is_sequence(self, field):
         return self._field_specs[field].is_sequence
@@ -340,21 +353,30 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                     self._response_data[response_data_key],
                     self.max_sequence_length,
                     self._field_specs[response_data_key].fill_value)
+                if response_data_key in self._word_ids:
+                    result[(response_data_key, 'word_ids')] = torch.tensor(_filled_values(
+                        response_data_indices, self._word_ids[response_data_key], self.max_sequence_length, -1),
+                        dtype=torch.long)
             else:
                 response_data = _at_most_one_value(
                     response_data_indices,
                     self._response_data[response_data_key],
                     self._field_specs[response_data_key].fill_value)
+                if response_data_key in self._word_ids:
+                    result[(response_data_key, 'word_ids')] = torch.tensor(_at_most_one_value(
+                        response_data_indices, self._word_ids[response_data_key], -1), dtype=torch.long)
             result[response_data_key] = torch.tensor(
                 response_data, dtype=self._field_specs[response_data_key].tensor_dtype)
 
         return result
 
-    def get_data_for_data_ids(self, field, data_ids):
+    def _get_data_for_data_ids(self, field, data_ids):
         if field not in self._response_data:
             raise KeyError('Field is not a response data field: {}'.format(field))
         data_ids = np.asarray(data_ids)
-        return torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
+        data = torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
+        word_ids = self._word_ids[field][data_ids] if field in self._word_ids else None
+        return data, word_ids
 
     def __len__(self):
         task_indices = self.task_indices()
@@ -404,12 +426,12 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         elif isinstance(item_id, np.ndarray):
             item_id = item_id.item()
         key = (data_set_id, item_id)
-        if key not in self._data_id_to_tokens:
+        if key not in self._example_to_tokens:
             if data_set_id not in self._data_set_id_to_data_set_key:
                 raise ValueError('Invalid data_set_id: {}'.format(data_set_id))
             data_set_key = self._data_set_id_to_data_set_key[data_set_id]
             raise KeyError('Item does not exist in dataset: {}, {}'.format(data_set_key, item_id))
-        return self._data_id_to_tokens[key]
+        return self._example_to_tokens[key]
 
     def num_examples_for_field(self, field):
         if field not in self._field_specs:

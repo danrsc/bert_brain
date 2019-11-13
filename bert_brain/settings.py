@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT
 
 import numpy as np
@@ -178,6 +178,8 @@ class Settings:
     # fields which should be concatenated with the output of BERT before the prediction heads are applied
     supplemental_fields: set = field(default_factory=_default_supplemental_fields)
 
+    # Graph parts which are applied after BERT but before head_graph_parts. These can be used to apply a common mapping
+    # from BERT to a different representation which is then used by head_graph_parts
     common_graph_parts: Optional[OrderedDictT[str, GraphPart]] = None
 
     # Mapping from [response_key, kind, or corpus_key] to a prediction head. Lookups fall back in that order.
@@ -193,10 +195,10 @@ class Settings:
     # batch directly; This allows the system to save significant resources by not padding a tensor for a full
     # sequence of entries when the number of real entries in the tensor is sparse. Mostly, this is for fMRI where
     # each image is huge, and there are relatively few target images relative to the number of tokens in the sequence.
-    # Entries here must be paired with an appropriate prediction head, for example FMRIHead or KeyedGroupPooledLinear,
-    # which puts into its prediction output dictionary a (field, data_ids) key with the data_ids in the order of
-    # the predictions it made for that field. The system will then go fetch the data corresponding to those data_ids
-    # and put them into the batch before the losses are computed.
+    # If a prediction head modifies the sequence (for example performs a grouping or pooling operation) then that head
+    # must also handle modification of the (field, data_ids) so that the alignment between the model predictions and
+    # the target is correctly maintained. The system will then go fetch the data corresponding to data_ids
+    # and put them into the batch just before the losses are computed.
     data_id_in_batch_keys: Sequence[str] = (ResponseKind.ns_froi, ResponseKind.hp_fmri)
 
     # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into the dataset

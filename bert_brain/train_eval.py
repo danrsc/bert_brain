@@ -266,7 +266,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
     if settings.common_graph_parts is not None:
         for k in settings.common_graph_parts:
             settings.common_graph_parts[k].resolve_placeholders(
-                placeholder_name_to_fields, prediction_shapes, len(loss_handlers))
+                placeholder_name_to_fields, prediction_shapes, data_set.num_response_data_fields)
             graph_parts[k] = settings.common_graph_parts[k]
 
     default_sequence_head = None
@@ -299,7 +299,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             if key not in graph_parts:
                 graph_parts[key] = prediction_head_parts[key]
                 graph_parts[key].resolve_placeholders(
-                    placeholder_name_to_fields, prediction_shapes, len(loss_handlers))
+                    placeholder_name_to_fields, prediction_shapes, data_set.num_response_data_fields)
             else:
                 if id(graph_parts[key]) != id(prediction_head_parts[key]):
                     raise ValueError('Duplicate graph_part name: {}'.format(key))
@@ -319,8 +319,8 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
 
 def train(
         settings: Settings,
-        output_validation_path: str,
-        output_test_path: str,
+        output_dir: str,
+        completion_file_path: str,
         output_model_path: str,
         train_data_set: PreparedDataDataset,
         validation_data_set: PreparedDataDataset,
@@ -329,8 +329,8 @@ def train(
         device,
         load_from_path: str = None):
 
-    output_train_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'train_curve.npz')
-    output_validation_curve_path = os.path.join(os.path.split(output_validation_path)[0], 'validation_curve.npz')
+    output_train_curve_path = os.path.join(output_dir, 'train_curve.npz')
+    output_validation_curve_path = os.path.join(output_dir, 'validation_curve.npz')
 
     num_train_steps = int(
         len(train_data_set) /
@@ -555,13 +555,16 @@ def train(
     else:
         all_test = {}
 
-    write_predictions(output_validation_path, all_validation, validation_data_set, settings)
-    write_predictions(output_test_path, all_test, test_data_set, settings)
+    write_predictions(os.path.join(output_dir, 'validation_predictions'), all_validation, validation_data_set, settings)
+    write_predictions(os.path.join(output_dir, 'test_predictions'), all_test, test_data_set, settings)
 
     # Save a trained model and the associated configuration
     if not os.path.exists(output_model_path):
         os.makedirs(output_model_path)
     model.save(output_model_path)
+
+    with open(completion_file_path, 'wt') as completion_file:
+        completion_file.write('We did it!')
 
     # clean up after we're done to try to release CUDA resources to other people when there are no more tasks
     gc.collect()

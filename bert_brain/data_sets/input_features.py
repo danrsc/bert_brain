@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import dataclasses
-from typing import Sequence, Optional, Mapping, Any, Union
+from typing import Sequence, Optional, Mapping, Any, Union, OrderedDict as OrderedDictT
 
 import numpy as np
 import torch
@@ -17,7 +17,9 @@ class FieldSpec:
 
     def __post_init__(self):
         if self.fill_value is None:
-            if self.tensor_dtype.is_floating_point:
+            if self.tensor_dtype is torch.bool:
+                self.fill_value = False
+            elif self.tensor_dtype.is_floating_point:
                 self.fill_value = np.nan
             else:
                 self.fill_value = 0
@@ -34,8 +36,8 @@ class InputFeatures:
     tokens: Sequence[str]
     token_ids: Sequence[int]
     mask: Sequence[int]
-    is_stop: Sequence[int]
-    is_begin_word_pieces: Sequence[int]
+    is_stop: Sequence[bool]
+    is_begin_word_pieces: Sequence[bool]
     token_lengths: Sequence[int]
     token_probabilities: Sequence[float]
     type_ids: Sequence[int]
@@ -53,6 +55,13 @@ class InputFeatures:
 class KindData:
     kind: str
     data: np.array
+    word_ids: Optional[np.array] = None
+
+    def copy(self):
+        return KindData(
+            self.kind,
+            np.copy(self.data) if self.data is not None else None,
+            np.copy(self.word_ids) if self.word_ids is not None else None)
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ import hashlib
 from collections import OrderedDict
 import itertools
 import dataclasses
-from typing import Sequence, Union, Optional, Hashable, Mapping
+from typing import Sequence, Union, Optional, Hashable, Mapping, Tuple
 
 import numpy as np
 import torch
@@ -44,7 +44,9 @@ class CorpusExampleUnifier:
             is_apply_data_id_to_entire_group: bool = False,
             multipart_id: Optional[int] = None,
             span_ids: Optional[Sequence[int]] = None,
-            allow_new_examples: bool = True) -> Optional[InputFeatures]:
+            allow_new_examples: bool = True,
+            return_included_indices: bool = False) -> Union[
+                Optional[InputFeatures], Optional[Tuple[InputFeatures, np.array]]]:
         """
         Adds an example for the current data loader to return later. Simplifies the process of merging examples
         across different response measures. For example MEG and fMRI
@@ -85,10 +87,12 @@ class CorpusExampleUnifier:
             allow_new_examples: If False, then if the example does not already exist in this instance, it will not
                 be added. Only new data_ids will be added to existing examples. Returns None when the example does
                 not exist.
+            return_included_indices: If True, then the indices into words determined by start, stop,
+                start_sequence_2, etc. are returned to the caller
         Returns:
             The InputFeatures instance associated with the example
         """
-        input_features = bert_tokenize_with_spacy_meta(
+        input_features, included_indices = bert_tokenize_with_spacy_meta(
             self.spacy_tokenize_model, self.bert_tokenizer,
             len(self._examples), words, sentence_ids, data_key, data_ids,
             start, stop,
@@ -124,6 +128,8 @@ class CorpusExampleUnifier:
                     self._seen_data_keys[k] = True
                     self._examples[example_key].data_ids[k] = input_features.data_ids[k]
 
+        if return_included_indices:
+            return self._examples[example_key], included_indices
         return self._examples[example_key]
 
     def iterate_examples(self, fill_data_keys=False):
@@ -233,8 +239,8 @@ class CorpusBase:
             'tokens': FieldSpec(fill_value='[PAD]', tensor_dtype=str),
             'token_ids': FieldSpec(tensor_dtype=torch.long),
             'mask': FieldSpec(tensor_dtype=torch.uint8),
-            'is_stop': FieldSpec(fill_value=1, tensor_dtype=torch.uint8),
-            'is_begin_word_pieces': FieldSpec(tensor_dtype=torch.uint8),
+            'is_stop': FieldSpec(fill_value=True, tensor_dtype=torch.bool),
+            'is_begin_word_pieces': FieldSpec(tensor_dtype=torch.bool),
             'token_lengths': FieldSpec(tensor_dtype=torch.long),
             'token_probabilities': FieldSpec(fill_value=-20.),
             'head_location': FieldSpec(fill_value=np.nan),

@@ -1,6 +1,7 @@
+import os
 from collections import OrderedDict
 import dataclasses
-from typing import Mapping, Any, Sequence
+from typing import Mapping, Any, Sequence, Optional
 import logging
 
 import numpy as np
@@ -28,6 +29,7 @@ class OutputResult:
     prediction: Sequence[float]
     target: Sequence[float]
     sequence_type: str
+    word_ids: Optional[Sequence[int]]
 
 
 def _num_tokens(tokens):
@@ -37,13 +39,17 @@ def _num_tokens(tokens):
     return len(tokens)
 
 
-def write_predictions(output_path, all_results, data_set, settings):
+def write_predictions(output_dir, all_results, data_set, settings):
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     """Write final predictions to an output file."""
-    logger.info("Writing predictions to: %s" % output_path)
+    logger.info("Writing predictions to: %s" % output_dir)
 
-    output_dict = dict()
     for key in all_results:
+
+        output_dict = dict()
 
         if len(all_results[key]) == 0:
             continue
@@ -58,6 +64,7 @@ def write_predictions(output_path, all_results, data_set, settings):
         data_keys = list()
         unique_ids = list()
         tokens = list()
+        word_ids = list()
 
         sequence_type = None
         for detailed_result in all_results[key]:
@@ -78,54 +85,85 @@ def write_predictions(output_path, all_results, data_set, settings):
                     masks.append(detailed_result.mask[:num_tokens])
                 else:
                     masks.append(None)
+                if detailed_result.word_ids is not None:
+                    word_ids.append(detailed_result.word_ids[:num_tokens])
+                else:
+                    word_ids.append(None)
                 target_lengths.append(num_tokens)
             elif sequence_type == 'single':
                 predictions.append(np.expand_dims(detailed_result.prediction, 0))
                 targets.append(np.expand_dims(detailed_result.target, 0))
                 masks.append(np.expand_dims(detailed_result.mask, 0) if detailed_result.mask is not None else None)
+                word_ids.append(
+                    np.expand_dims(detailed_result.word_ids, 0) if detailed_result.word_ids is not None else None)
             elif sequence_type == 'grouped':
                 predictions.append(detailed_result.prediction)
                 targets.append(detailed_result.target)
                 masks.append(detailed_result.mask)
+                word_ids.append(detailed_result.word_ids)
                 target_lengths.append(len(detailed_result.target))
 
         if any(m is None for m in masks) and any(m is not None for m in masks):
             raise ValueError('Unable to write a mixture of None and non-None masks')
+        if any(w is None for w in word_ids) and any(w is not None for w in word_ids):
+            raise ValueError('Unable to write a mixture of None and non-None word_ids')
 
-        output_dict['predictions_{}'.format(key)] = np.concatenate(predictions)
-        output_dict['target_{}'.format(key)] = np.concatenate(targets)
-        output_dict['masks_{}'.format(key)] = np.concatenate(masks) if masks[0] is not None else None
-        output_dict['lengths_{}'.format(key)] = np.array(lengths)
-        output_dict['target_lengths_{}'.format(key)] = np.array(target_lengths)
-        output_dict['data_keys_{}'.format(key)] = np.array(data_keys)
-        output_dict['unique_ids_{}'.format(key)] = np.array(unique_ids)
-        output_dict['tokens_{}'.format(key)] = np.array(tokens)
-        output_dict['critic_{}'.format(key)] = critic_settings.critic_type
-        output_dict['sequence_type_{}'.format(key)] = sequence_type
+        output_dict['predictions'] = np.concatenate(predictions)
+        output_dict['target'] = np.concatenate(targets)
+        output_dict['masks'] = np.concatenate(masks) if masks[0] is not None else None
+        output_dict['lengths'] = np.array(lengths)
+        output_dict['target_lengths'] = np.array(target_lengths)
+        output_dict['data_keys'] = np.array(data_keys)
+        output_dict['unique_ids'] = np.array(unique_ids)
+        output_dict['tokens'] = np.array(tokens)
+        output_dict['critic'] = critic_settings.critic_type
+        output_dict['sequence_type'] = sequence_type
+        output_dict['word_ids'] = np.concatenate(word_ids) if word_ids[0] is not None else None
         if critic_settings.critic_kwargs is not None:
             for critic_key in critic_settings.critic_kwargs:
-                output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_settings.critic_kwargs[critic_key]
+                output_dict['critic_kwarg_{}'.format(critic_key)] = critic_settings.critic_kwargs[critic_key]
 
-    np.savez(output_path, keys=np.array([k for k in all_results if len(all_results[k]) > 0]), **output_dict)
+        np.savez(os.path.join(output_dir, '{}.npz'.format(key)), **output_dict)
+
+    with open(os.path.join(output_dir, 'keys.txt'), 'wt') as key_file:
+        for key in all_results:
+            if len(all_results[key]) > 0:
+                key_file.write(key)
+                key_file.write('\n')
 
 
-def read_predictions(output_path):
-    with np.load(output_path, allow_pickle=True) as npz:
-        keys = [k.item() for k in npz['keys']]
+def read_predictions(output_dir, keys=None):
 
-        result = OrderedDict()
-        for key in keys:
-            predictions = npz['predictions_{}'.format(key)]
-            target = npz['target_{}'.format(key)]
-            masks = npz['masks_{}'.format(key)]
-            lengths = npz['lengths_{}'.format(key)]
-            target_lengths = npz['target_lengths_{}'.format(key)]
-            data_keys = npz['data_keys_{}'.format(key)]
-            unique_ids = npz['unique_ids_{}'.format(key)]
-            tokens = npz['tokens_{}'.format(key)]
-            critic_type = npz['critic_{}'.format(key)].item()
-            sequence_type = npz['sequence_type_{}'.format(key)].item()
-            critic_kwarg_prefix = 'critic_kwarg_{}'.format(key)
+    with open(os.path.join(output_dir, 'keys.txt'), 'rt') as key_file:
+        file_keys = [k.strip() for k in key_file.readlines()]
+        if keys is None:
+            keys = file_keys
+        else:
+            keys_ = list()
+            for key in keys:
+                if key not in file_keys:
+                    print('Warning: key {} is not available'.format(key))
+                else:
+                    keys_.append(key)
+            keys = keys_
+
+    result = OrderedDict()
+    for key in keys:
+        with np.load(os.path.join(output_dir, '{}.npz'.format(key)), allow_pickle=True) as npz:
+
+            predictions = npz['predictions']
+            target = npz['target']
+            masks = npz['masks']
+            lengths = npz['lengths']
+            target_lengths = npz['target_lengths']
+            data_keys = npz['data_keys']
+            unique_ids = npz['unique_ids']
+            tokens = npz['tokens']
+            critic_type = npz['critic'].item()
+            sequence_type = npz['sequence_type'].item()
+            word_ids = npz['word_ids']
+
+            critic_kwarg_prefix = 'critic_kwarg'
             critic_kwargs = dict()
             for npz_key in npz.keys():
                 if npz_key.startswith(critic_kwarg_prefix):
@@ -146,6 +184,8 @@ def read_predictions(output_path):
                 if masks is not None:
                     # noinspection PyTypeChecker
                     masks = np.split(masks, target_splits)
+                if word_ids is not None:
+                    word_ids = np.split(word_ids, target_splits)
             data_keys = [k.item() for k in data_keys]
             unique_ids = [u.item() for u in unique_ids]
             tokens = np.split(tokens, splits)
@@ -156,7 +196,7 @@ def read_predictions(output_path):
                 results.append(OutputResult(
                     key, critic_type, critic_kwargs,
                     unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx],
-                    sequence_type))
+                    sequence_type, word_ids[idx] if word_ids is not None else None))
 
             result[key] = results
 

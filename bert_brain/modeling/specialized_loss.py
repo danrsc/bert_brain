@@ -9,7 +9,6 @@ import torch
 
 __all__ = [
     'NoValidInputs',
-    'logical_not',
     'masked_squared_error',
     'masked_absolute_error',
     'masked_pearsons_distance',
@@ -48,12 +47,6 @@ class NoValidInputs(Exception):
 
     def __init__(self):
         super().__init__()
-
-
-def logical_not(t):
-    # use xor with 1 to give a logical not
-    # return t ^ 1
-    return ~t  # newer version of torch supports not operator
 
 
 def masked_squared_error(mask, predictions, target):
@@ -201,22 +194,22 @@ def stop_word_and_target_not_nan_mask(keep_content, target, is_stop, is_begin_wo
     if is_stop is not None:
         if len(is_stop.size()) < len(target.size()):
             is_stop = is_stop.view(is_stop.size() + (1,) * (len(target.size()) - len(is_stop.size())))
-        is_keep = logical_not(is_stop) if keep_content else is_stop
+        is_keep = ~is_stop if keep_content else is_stop
         if is_begin_word_pieces is not None:
             if len(is_begin_word_pieces.size()) < len(target.size()):
                 is_begin_word_pieces = is_begin_word_pieces.view(
                     is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
-            return is_keep.type(torch.bool) & logical_not(torch.isnan(target)) & is_begin_word_pieces.type(torch.bool)
+            return is_keep & ~torch.isnan(target) & is_begin_word_pieces
         else:
-            return is_keep.type(torch.bool) & logical_not(torch.isnan(target))
+            return is_keep & ~torch.isnan(target)
     else:
         if is_begin_word_pieces is not None:
             if len(is_begin_word_pieces.size()) < len(target.size()):
                 is_begin_word_pieces = is_begin_word_pieces.view(
                     is_begin_word_pieces.size() + (1,) * (len(target.size()) - len(is_begin_word_pieces.size())))
-            return logical_not(torch.isnan(target)) & is_begin_word_pieces.type(torch.bool)
+            return ~torch.isnan(target) & is_begin_word_pieces
         else:
-            return logical_not(torch.isnan(target))
+            return ~torch.isnan(target)
 
 
 def k_least_squared_error(
@@ -359,6 +352,7 @@ class DetailedResult:
     sequence_type: str
     data_set_id: Optional[int] = None
     unique_id: Optional[int] = None
+    word_ids: Optional[int] = None
 
 
 def _masked_reduce(loss, valid_count, reduction, as_numpy):
@@ -442,6 +436,9 @@ class _NamedTargetMaskedLoss:
             if group_prediction_key in prediction_dict:
                 example_indices = prediction_dict[group_prediction_key].detach().cpu().numpy()
 
+            word_ids = batch[(self.field, 'word_ids')].detach().cpu().numpy() \
+                if (self.field, 'word_ids') in batch else None
+
             batch_mask = mask.detach().cpu().numpy()
             batch_predictions = predictions.detach().cpu().numpy()
             batch_target = target.detach().cpu().numpy()
@@ -449,30 +446,42 @@ class _NamedTargetMaskedLoss:
             batch_predictions = np.split(batch_predictions, len(batch_predictions)) \
                 if len(batch_predictions) > 0 else batch_predictions
             batch_target = np.split(batch_target, len(batch_target)) if len(batch_target) > 0 else batch_target
+            word_ids = np.split(word_ids, len(word_ids)) if word_ids is not None and len(word_ids) > 0 else word_ids
 
             sequence_type = 'sequence' if self._is_sequence_loss() else 'single'
 
             if example_indices is not None:  # group by the example indices
                 sequence_type = 'grouped'
                 grouped = dict()
-                for m, p, t, ex in zip(batch_mask, batch_predictions, batch_target, example_indices):
+                for i_ex in range(len(example_indices)):
+                    m, p, t, ex = batch_mask[i_ex], batch_predictions[i_ex], batch_target[i_ex], example_indices[i_ex]
+                    w = word_ids[i_ex] if word_ids is not None else None
                     if ex not in grouped:
-                        grouped[ex] = (list(), list(), list())
+                        grouped[ex] = (list(), list(), list(), list())
                     grouped[ex][0].append(np.expand_dims(m, 1))
                     grouped[ex][1].append(np.expand_dims(p, 1))
                     grouped[ex][2].append(np.expand_dims(t, 1))
+                    if w is not None:
+                        grouped[ex][3].append(np.expand_dims(w, 1))
                 batch_mask = list()
                 batch_predictions = list()
                 batch_target = list()
+                word_ids = list() if word_ids is not None else None
                 example_indices = [ex for ex in sorted(grouped)]
                 for ex in example_indices:
                     batch_mask.append(np.concatenate(grouped[ex][0], axis=1))
                     batch_predictions.append(np.concatenate(grouped[ex][1], axis=1))
                     batch_target.append(np.concatenate(grouped[ex][2], axis=1))
+                    if word_ids is not None:
+                        word_ids.append(np.concatenate(grouped[ex][3], axis=1))
 
             detailed_result = list()
             for idx, (example_mask, example_predictions, example_targets) in enumerate(zip(
                     batch_mask, batch_predictions, batch_target)):
+
+                example_word_ids = None
+                if word_ids is not None:
+                    example_word_ids = word_ids[idx]
 
                 if example_indices is not None:
                     idx = example_indices[idx]
@@ -488,12 +497,13 @@ class _NamedTargetMaskedLoss:
                         target=np.squeeze(example_targets, axis=0),
                         sequence_type=sequence_type,
                         data_set_id=data_set_id,
-                        unique_id=unique_id))
+                        unique_id=unique_id,
+                        word_ids=np.squeeze(example_word_ids, axis=0) if example_word_ids is not None else None))
             return result, detailed_result
         return result
 
     def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
-        return logical_not(torch.isnan(target))
+        return ~torch.isnan(target)
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))

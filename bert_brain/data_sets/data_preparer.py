@@ -26,6 +26,7 @@ class PreparedDataView:
     validation: Optional[Sequence[InputFeatures]] = None
     test: Optional[Sequence[InputFeatures]] = None
     data: Optional[np.array] = None
+    word_ids: Optional[np.array] = None
 
 
 def _make_examples_view(
@@ -38,7 +39,8 @@ def _make_prepared_data_view(prepared_data: PreparedData, response_key: str) -> 
         train=_make_examples_view(prepared_data.train, response_key),
         validation=_make_examples_view(prepared_data.validation, response_key),
         test=_make_examples_view(prepared_data.test, response_key),
-        data=prepared_data.data[response_key].data)
+        data=prepared_data.data[response_key].data,
+        word_ids=prepared_data.data[response_key].word_ids)
 
 
 def _reconcile_view_examples(
@@ -46,13 +48,16 @@ def _reconcile_view_examples(
         view_examples: Sequence[InputFeatures],
         response_key: str):
     if prepared_data_examples is None:
-        return
+        return False
     view_examples = dict((ex.unique_id, ex.data_ids) for ex in view_examples) if view_examples is not None else {}
+    is_modified = False
     for ex in prepared_data_examples:
         if ex.unique_id not in view_examples:
             ex.data_ids[response_key] = -1 * np.ones_like(ex.data_ids[response_key])
         else:
+            is_modified = is_modified or not np.array_equal(ex.data_ids[response_key], view_examples[ex.unique_id])
             ex.data_ids[response_key] = view_examples[ex.unique_id]
+    return is_modified
 
 
 def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, response_key: str):
@@ -61,10 +66,20 @@ def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, respons
             del ex.data_ids[response_key]
         del prepared_data.data[response_key]
     else:
-        _reconcile_view_examples(prepared_data.train, view.train, response_key)
-        _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
-        _reconcile_view_examples(prepared_data.test, view.test, response_key)
-        prepared_data.data[response_key] = replace(prepared_data.data[response_key], data=view.data)
+        is_modified = _reconcile_view_examples(prepared_data.train, view.train, response_key)
+        is_modified = is_modified or _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
+        is_modified = is_modified or _reconcile_view_examples(prepared_data.test, view.test, response_key)
+        if is_modified and prepared_data.data[response_key].word_ids is not None:
+            is_word_ids_updated = len(prepared_data.data[response_key].word_ids) != len(view.word_ids)
+            if not is_word_ids_updated:
+                for word_ids in prepared_data.data[response_key].word_ids:
+                    if not np.array_equal(word_ids, view.word_ids):
+                        is_word_ids_updated = True
+                        break
+            if not is_word_ids_updated:
+                raise ValueError('If data_ids are modified, word_ids must also be modified')
+        prepared_data.data[response_key] = replace(
+            prepared_data.data[response_key], data=view.data, word_ids=view.word_ids)
 
 
 def _copy_examples(examples):
@@ -165,8 +180,7 @@ class DataPreparer(object):
                     if forked_name is not None:
                         if forked_name in result[k].data:
                             raise ValueError('Duplicate name: {}'.format(forked_name))
-                        result[k].data[forked_name] = KindData(
-                            result[k].data[response_k].kind, np.copy(result[k].data[response_k].data))
+                        result[k].data[forked_name] = result[k].data[response_k].copy()
                     if forked_preprocessor is not None:
                         self._preprocess_dict[forked_name] = forked_preprocessor
                     for ex in chain(result[k].train, result[k].validation, result[k].test):

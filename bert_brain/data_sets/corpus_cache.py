@@ -85,6 +85,13 @@ def save_to_cache(cache_path, data, run_info, kwargs):
     for k in data.response_data:
         result['__response_data_kind__{}'.format(k)] = data.response_data[k].kind
         result['__response_data__{}'.format(k)] = data.response_data[k].data
+        if data.response_data[k].word_ids is not None:
+            result['__response_data_word_id_lengths__{}'.format(k)] = np.array(
+                list(len(w) for w in data.response_data[k].word_ids))
+            result['__response_data_word_ids__{}'.format(k)] = np.concatenate(data.response_data[k].word_ids)
+        else:
+            result['__response_data_word_id_lengths__{}'.format(k)] = np.array([])
+            result['__response_data_word_ids__{}'.format(k)] = np.array([])
 
     for k in data_ids:
         result['__data_ids__{}'.format(k)] = np.array(data_ids[k])
@@ -134,6 +141,8 @@ def _str_to_torch_dtype(s):
         return torch.int32
     if s in {'torch.int64', 'torch.long', 'int64', 'long'}:
         return torch.long
+    if s in {'torch.bool', 'bool'}:
+        return torch.bool
     raise ValueError('Unknown dtype: {}'.format(s))
 
 
@@ -163,6 +172,8 @@ def load_from_cache(cache_path, run_info, kwargs, force_cache_miss):
             '__kwarg__',
             '__response_data__',
             '__response_data_kind__',
+            '__response_data_word_ids__',
+            '__response_data_word_id_lengths__',
             '__metadata__',
             '__data_ids__',
             '__field_spec_tensor_dtype__',
@@ -284,8 +295,17 @@ def load_from_cache(cache_path, run_info, kwargs, force_cache_miss):
         response_data = OrderedDict()
         for k in prefix_results['__response_data__']:
             prefix_results['__response_data__'][k].setflags(write=False)
+            word_id_lengths = prefix_results['__response_data_word_id_lengths__'][k]
+            if len(word_id_lengths) > 0:
+                word_ids = np.split(
+                    prefix_results['__response_data_word_ids__'][k],
+                    np.cumsum(list(int(wl) for wl in word_id_lengths))[:-1])
+            else:
+                word_ids = None
             response_data[k] = KindData(
-                prefix_results['__response_data_kind__'][k].item(), prefix_results['__response_data__'][k])
+                prefix_results['__response_data_kind__'][k].item(),
+                prefix_results['__response_data__'][k],
+                word_ids)
 
         return RawData(
             input_examples,

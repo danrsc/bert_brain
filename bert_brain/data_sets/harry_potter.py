@@ -143,7 +143,7 @@ class HarryPotterCorpus(CorpusBase):
             len_1 = len(example.words)
             start_2 = None
             stop_2 = None
-        features = example_manager.add_example(
+        features, included_indices = example_manager.add_example(
             key,
             words_override if words_override is not None else [w.word for w in example.full_sentences],
             [w.sentence_id for w in example.full_sentences],
@@ -154,10 +154,11 @@ class HarryPotterCorpus(CorpusBase):
             start_sequence_2=start_2,
             stop_sequence_2=stop_2,
             is_apply_data_id_to_entire_group=is_apply_data_id_to_entire_group,
-            allow_new_examples=allow_new_examples)
+            allow_new_examples=allow_new_examples,
+            return_included_indices=True)
 
         assert (all(w.run == example.words[0].run for w in example.words[1:]))
-        return features
+        return features, included_indices
 
     def story_features_per_fmri_example(self, paths_obj):
         if paths_obj is not None:
@@ -219,7 +220,7 @@ class HarryPotterCorpus(CorpusBase):
         return os.path.join(self.path, HarryPotterCorpus._meg_kind_properties(self.meg_kind).file_name)
 
     def _run_info(self, index_run):
-        if self.meg_kind in ('rank_clustered',):
+        if HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed:
             return index_run % 4
         return -1
 
@@ -235,7 +236,7 @@ class HarryPotterCorpus(CorpusBase):
                 or len(self.fmri_subjects)) > 0:
             fmri_examples = self._compute_examples_for_fmri()
             for example in fmri_examples:
-                features = HarryPotterCorpus._add_fmri_example(example, example_manager)
+                features, _ = HarryPotterCorpus._add_fmri_example(example, example_manager)
                 assert(features.unique_id == len(run_at_unique_id))
                 run_at_unique_id.append(example.words[0].run)
         meg_examples = None
@@ -270,18 +271,20 @@ class HarryPotterCorpus(CorpusBase):
 
         indicator_validation = None
         if self.meg_subjects is None or len(self.meg_subjects) > 0:
-            meg, block_metadata, indicator_validation = self._read_meg(run_info, example_manager, meg_examples)
+            meg, block_metadata, indicator_validation, word_ids = self._read_meg(
+                run_info, example_manager, meg_examples)
             for k in meg:
-                data[k] = KindData(ResponseKind.hp_meg, meg[k])
+                data[k] = KindData(ResponseKind.hp_meg, meg[k], word_ids)
             if block_metadata is not None:
                 metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri = self._read_fmri(run_info, example_manager, fmri_examples)
+            fmri, word_ids = self._read_fmri(run_info, example_manager, fmri_examples)
             for k in fmri:
-                data[k] = KindData(ResponseKind.hp_fmri, fmri[k])
+                data[k] = KindData(ResponseKind.hp_fmri, fmri[k], word_ids)
 
         for k in data:
             data[k].data.setflags(write=False)
+            data[k].word_ids = np.copy(data[k].word_ids)
 
         input_examples = list(example_manager.iterate_examples(fill_data_keys=True))
 
@@ -295,11 +298,17 @@ class HarryPotterCorpus(CorpusBase):
                     train.append(ex)
             return RawData(
                 input_examples=train,
-                validation_input_examples=validation, response_data=data, is_pre_split=True, metadata=metadata)
+                validation_input_examples=validation,
+                response_data=data,
+                is_pre_split=True,
+                metadata=metadata)
 
         return RawData(
             input_examples,
-            response_data=data, metadata=metadata, validation_proportion_of_train=0.1, test_proportion=0.)
+            response_data=data,
+            metadata=metadata,
+            validation_proportion_of_train=0.1,
+            test_proportion=0.)
 
     def _read_preprocessed_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
         # see make_harry_potter.ipynb for how these are constructed
@@ -310,12 +319,15 @@ class HarryPotterCorpus(CorpusBase):
             assert (stimuli[2364] == '..."')
             stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
 
+            assert (run_info >= 0)
             held_out_block = np.unique(blocks)[run_info]
             not_fixation = np.logical_not(stimuli == '+')
+            word_ids = np.expand_dims(np.arange(len(stimuli)), 1)
             new_indices = np.full(len(not_fixation), -1, dtype=np.int64)
             new_indices[not_fixation] = np.arange(np.count_nonzero(not_fixation))
             stimuli = stimuli[not_fixation]
             blocks = blocks[not_fixation]
+            word_ids = word_ids[not_fixation]
 
             subjects = loaded['subjects']
 
@@ -328,6 +340,7 @@ class HarryPotterCorpus(CorpusBase):
             for subject in subjects:
                 data['hp_meg_{}'.format(subject)] = \
                     loaded['data_{}_hold_out_{}'.format(subject, held_out_block)][not_fixation]
+                assert(len(data['hp_meg_{}'.format(subject)]) == len(word_ids))
 
             if 'data_multi_subject_hold_out_{}'.format(held_out_block) in loaded \
                     and (self.meg_subjects is None or 'multi_subject' in self.meg_subjects):
@@ -354,20 +367,22 @@ class HarryPotterCorpus(CorpusBase):
             # we will fail an assert below if we try to add something messed up
             example_stimuli = stimuli[new_indices[indices]]
 
-            features = HarryPotterCorpus._add_fmri_example(
+            data_ids = new_indices[indices]
+            added = HarryPotterCorpus._add_fmri_example(
                 example,
                 example_manager,
                 words_override=[_clean_word(w) for w in example_stimuli],
                 data_keys=[k for k in data],
-                data_ids=new_indices[indices],
+                data_ids=data_ids,
                 allow_new_examples=False)
-            assert (features is not None)
+            assert (added is not None)
+            features, _ = added
 
             example_blocks = blocks[new_indices[indices]]
             assert (np.all(example_blocks == example_blocks[0]))
             block_metadata[features.unique_id] = example_blocks[0]
 
-        return data, block_metadata, block_metadata == held_out_block
+        return data, block_metadata, block_metadata == held_out_block, word_ids
 
     def _read_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
 
@@ -448,8 +463,10 @@ class HarryPotterCorpus(CorpusBase):
         new_indices = -1 * np.ones(len(data), dtype=np.int64)
 
         not_plus = np.logical_not(indicator_plus)
+        word_ids = np.expand_dims(np.arange(len(stimuli), 1))
         data = data[not_plus]
         stimuli = stimuli[not_plus]
+        word_ids = word_ids[not_plus]
         if blocks is not None:
             blocks = blocks[not_plus]
 
@@ -503,21 +520,23 @@ class HarryPotterCorpus(CorpusBase):
             # we will fail an assert below if we try to add something messed up
             example_stimuli = stimuli[new_indices[indices]]
 
-            features = HarryPotterCorpus._add_fmri_example(
+            data_ids = new_indices[indices]
+            added = HarryPotterCorpus._add_fmri_example(
                 example,
                 example_manager,
                 words_override=[_clean_word(w) for w in example_stimuli],
                 data_keys=[k for k in data],
-                data_ids=new_indices[indices],
+                data_ids=data_ids,
                 allow_new_examples=False)
-            assert (features is not None)
+            assert (added is not None)
+            features, _ = added
 
             if blocks is not None:
                 example_blocks = blocks[new_indices[indices]]
                 assert(np.all(example_blocks == example_blocks[0]))
                 block_metadata[features.unique_id] = example_blocks[0]
 
-        return data, block_metadata, None
+        return data, block_metadata, None, word_ids
 
     def _read_harry_potter_fmri_files(self):
         # noinspection PyPep8
@@ -689,8 +708,9 @@ class HarryPotterCorpus(CorpusBase):
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
             data[subject] = np.expand_dims(data[subject], axis=1)
 
+        word_ids = list()
         for example in local_examples:
-            features = HarryPotterCorpus._add_fmri_example(
+            added = HarryPotterCorpus._add_fmri_example(
                 example,
                 example_manager,
                 data_keys=[k for k in data],
@@ -698,9 +718,12 @@ class HarryPotterCorpus(CorpusBase):
                 is_apply_data_id_to_entire_group=True,
                 allow_new_examples=False)
 
-            assert(features is not None)
+            assert(added is not None)
+            _, included_indices = added
+            assert(example.tr_target == len(word_ids))
+            word_ids.append(np.array(list(example.full_sentences[i].index_in_all_words for i in included_indices)))
 
-        return data
+        return data, word_ids
 
 
 def read_harry_potter_story_features(path):

@@ -1,5 +1,6 @@
 import os
 import warnings
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from itertools import chain
 from dataclasses import replace, asdict
@@ -945,6 +946,7 @@ class PreprocessRandomPair:
         old_to_new = dict()
         metadata_indices = list()
         unique_id = 0
+        new_word_ids = OrderedDict()
         for split_name in ['train', 'validation', 'test']:
             split = getattr(loaded_data_tuple, split_name)
             grouped_examples = _unsorted_group_by(
@@ -1023,6 +1025,7 @@ class PreprocessRandomPair:
                         self.stop_mode)
                     assert(len(data_id_pairs) == len(pair.data_ids[response_k]))
                     new_data_ids = list()
+                    new_word_ids[response_k] = list()
                     for data_id_pair in data_id_pairs:
                         if isinstance(data_id_pair, tuple):
                             id1, id2 = data_id_pair
@@ -1032,12 +1035,21 @@ class PreprocessRandomPair:
                                 if (id1, id2) in old_to_new[response_k]:
                                     new_data_ids.append(old_to_new[response_k][(id1, id2)])
                                 else:
-                                    old_to_new[response_k][(id1, id2)] = len(combined[response_k])
-                                    new_data_ids.append(len(combined[response_k]))
+                                    new_id = len(combined[response_k])
+                                    old_to_new[response_k][(id1, id2)] = new_id
+                                    new_data_ids.append(new_id)
                                     if self.combine_fn is None:
                                         combined[response_k].append(data[id2] - data[id1])
                                     else:
                                         combined[response_k].append(self.combine_fn(data[id1], data[id2]))
+                                    if loaded_data_tuple.data[response_k].word_ids is not None:
+                                        a = []
+                                        b = []
+                                        if id1 in loaded_data_tuple.data[response_k].word_ids:
+                                            a = loaded_data_tuple.data[response_k].word_ids[id1]
+                                        if id2 in loaded_data_tuple.data[response_k].word_ids:
+                                            b = loaded_data_tuple.data[response_k].word_ids[id2]
+                                        new_word_ids[response_k][new_id] = np.concatenate((a, b))
                         elif isinstance(data_id_pair, int):
                             if data_id_pair >= 0:
                                 raise ValueError('Invalid data_id_pair: {}'.format(data_id_pair))
@@ -1051,7 +1063,12 @@ class PreprocessRandomPair:
                     pair.data_ids[response_k] = np.array(new_data_ids)
             loaded_data_tuple = replace(loaded_data_tuple, **{split_name: paired})
         loaded_data_tuple = replace(loaded_data_tuple, data=type(loaded_data_tuple.data)(
-            (k, KindData(loaded_data_tuple.data[k].kind, np.array(combined[k]))) for k in loaded_data_tuple.data))
+            (k,
+             KindData(
+                 loaded_data_tuple.data[k].kind,
+                 np.array(combined[k]),
+                 new_word_ids[k] if len(new_word_ids[k]) > 0 else None))
+            for k in loaded_data_tuple.data))
         metadata = type(metadata)((k, metadata[k][metadata_indices]) for k in metadata)
         return loaded_data_tuple, metadata
 
@@ -1084,7 +1101,8 @@ class PreprocessToDisk:
             unique_ids=np.array(unique_ids),
             lengths=np.array(lengths),
             data_ids=np.array(data_ids),
-            data=loaded_data_tuple.data)
+            data=loaded_data_tuple.data,
+            word_ids=loaded_data_tuple.word_ids)
         if self.delete:
             return replace(loaded_data_tuple, data=None)
         print('done')

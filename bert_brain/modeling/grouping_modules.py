@@ -100,7 +100,7 @@ class GroupBase(GraphPart):
             return expanded[0]
         return expanded
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
         self.groupby_prefixes = GroupBase._expand_placeholders(self.groupby_prefixes, placeholder_name_to_fields)
 
     def _get_group_ids(self, batch):
@@ -135,6 +135,62 @@ class GroupBase(GraphPart):
         return result
 
 
+def _sequence_sort_info(x, return_unique_id=False, return_counts=False):
+    """
+    Information about sorting x by (example_id, x) which is useful for downstream grouping operations
+    Args:
+        x: A 2d tensor
+
+    Returns:
+        example_ids: A 1d tensor with the coordinates of x in axis 0, sorted by (example_id, x)
+        indices_sort: Indices in the range [0, x.size()[0] * x.size()[1]], sorted by (example_id, x) which
+            can be used to sort some data by applying:
+                sorted_data = data.view((data.size()[0] * data.size()[1],) + data.size()[2:])[indices_sort]
+            and which can also be used to recover the token indices by applying:
+                token_ids = indices_sort - example_ids * x.size()[1]
+        values: values in x, [not unique] sorted by (example_id, x)
+        unique_id: (only if return_inverse=True) each item belongs to, sorted by (example_id, x)
+        counts: (only if return_counts=True) How many items in x belong to each unique (example_id, x),
+            sorted by (example_id, x)
+    """
+    # array of shape (batch, sequence, 1) which identifies example
+    example_ids = torch.arange(
+        x.size()[0], device=x.device).view((x.size()[0], 1, 1)).repeat((1, x.size()[1], 1))
+
+    # indices to ensure stable sort, and to give us indices_sort
+    indices = torch.arange(x.size()[0] * x.size()[1], device=x.device).view(x.size() + (1,))
+
+    # -> (batch, sequence, 3): attach example_id to each group and add indices to guarantee stable sort
+    x = torch.cat((example_ids, x.view(x.size() + (1,)), indices), dim=2)
+
+    # -> (batch * sequence, 3)
+    x = x.view((x.size()[0] * x.size()[1], x.size()[2]))
+
+    # this sorts the 3 dimensions together, output is the same size as input
+    groups = torch.unique(x, sorted=True, dim=0)
+    example_ids = groups[:, 0]
+    values = groups[:, 1]
+    indices_sort = groups[:, 2]
+
+    optional_result = ()
+    if return_unique_id or return_counts:
+        inverse = None
+        counts = None
+        info = torch.unique_consecutive(groups[:, :2], return_inverse=return_unique_id, return_counts=return_counts)
+        if return_unique_id and return_counts:
+            _, inverse, counts = info
+        elif return_unique_id:
+            _, inverse = info
+        else:
+            _, counts = info
+        if return_unique_id:
+            optional_result = optional_result + (inverse,)
+        if return_counts:
+            optional_result = optional_result + (counts,)
+
+    return (example_ids, indices_sort, values) + optional_result
+
+
 class GroupConcatFixedGroupSize(GroupBase):
 
     def __init__(
@@ -160,38 +216,19 @@ class GroupConcatFixedGroupSize(GroupBase):
 
         x = batch[self.sequence_source_name]
 
-        # first attach an example_id to the groups to ensure that we don't concat across examples in the batch
-
-        # array of shape (batch, sequence, 1) which identifies example
-        example_ids = torch.arange(
-            groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
-
-        # indices to ensure stable sort, and to give us indices_sort
-        indices = torch.arange(groupby.size()[0] * groupby.size()[1], device=x.device).view(groupby.size() + (1,))
-
-        # -> (batch, sequence, 3): attach example_id to each group and add indices to guarantee stable sort
-        groupby = torch.cat((example_ids, groupby.view(groupby.size() + (1,)), indices), dim=2)
-
-        # -> (batch * sequence, 3)
-        groupby = groupby.view((groupby.size()[0] * groupby.size()[1], groupby.size()[2]))
+        example_ids, indices_sort, groups, counts = _sequence_sort_info(groupby, return_counts=True)
 
         # filter out the bogus groupby
-        groupby = groupby[groupby[:, 1] >= 0]
-
-        # this allows us to sort the 3 dimensions together
-        groups = torch.unique(groupby, sorted=True, dim=0)
-
-        _, counts = torch.unique_consecutive(groups[:, :2], return_counts=True, dim=0)
+        indicator_valid = groups >= 0
+        example_ids = example_ids[indicator_valid]
+        indices_sort = indices_sort[indicator_valid]
+        groups = groups[indicator_valid]
+        counts = counts[indicator_valid]
 
         # check that the input is what we expected
         if torch.min(counts) != self.num_per_group or torch.max(counts) != self.num_per_group:
             raise ValueError('Expected exactly {} per unique groupby. min count: {}, max count: {}'.format(
                 self.num_per_group, torch.min(counts), torch.max(counts)))
-
-        # get the true groups and example_ids
-        example_ids = groups[:, 0]
-        indices_sort = groups[:, 2]
-        groups = groups[:, 1]
 
         # -> (batch * sequence, n, m, ..., k)
         x = x.view((x.size()[0] * x.size()[1],) + x.size()[2:])
@@ -232,49 +269,34 @@ class GroupPool(GroupBase):
 
         x = batch[self.sequence_source_name]
 
-        # first attach an example_id to the groups to ensure that we don't pool across examples in the batch
+        example_ids, indices_sort, groups, group_ids, counts = _sequence_sort_info(
+            groupby, return_unique_id=True, return_counts=True)
 
-        # array of shape (batch, sequence, 1) which identifies example
-        example_ids = torch.arange(
-            groupby.size()[0], device=x.device).view((groupby.size()[0], 1, 1)).repeat((1, groupby.size()[1], 1))
-        # -> (batch, sequence, 2): attach example_id to each group
-        groupby = torch.cat((example_ids, groupby.view(groupby.size() + (1,))), dim=2)
-
-        # -> (batch * sequence, 2)
-        groupby = groupby.view((groupby.size()[0] * groupby.size()[1], groupby.size()[2]))
-
-        # each group is a (example_id, group) tuple
-        groups, group_indices = torch.unique(groupby, sorted=True, return_inverse=True, dim=0)
-
-        # split the groups into the true groups and example_ids
-        example_ids = groups[:, 0]
-        groups = groups[:, 1]
-
-        # -> (batch * sequence, 1, 1, ..., 1)
-        group_indices = group_indices.view((x.size()[0] * x.size()[1],) + (1,) * (len(x.size()) - 2))
-
-        # -> (batch * sequence, n, m, ..., k)
-        group_indices = group_indices.repeat((1,) + x.size()[2:])
+        # filter out the bogus groupby
+        indicator_valid = groups >= 0
+        del groups
+        example_ids = example_ids[indicator_valid]
+        indices_sort = indices_sort[indicator_valid]
+        group_ids = group_ids[indicator_valid]
+        counts = counts[indicator_valid]
 
         # -> (batch * sequence, n, m, ..., k)
         x = x.view((x.size()[0] * x.size()[1],) + x.size()[2:])
+        # sort x so that grouped items are together
+        x = x[indices_sort]
+        x = x[indicator_valid]
 
-        pooled = torch.zeros((groups.size()[0],) + x.size()[1:], dtype=x.dtype, device=x.device)
-        pooled.scatter_add_(dim=0, index=group_indices, src=x)
+        # -> (batch * sequence, 1, 1, ..., 1)
+        group_ids = group_ids.view((x.size()[0] * x.size()[1],) + (1,) * (len(x.size()) - 2))
 
-        # -> (batch * sequence)
-        group_indices = group_indices[:, 0]
-        counts = torch.zeros(groups.size()[0], dtype=x.dtype, device=x.device)
-        counts.scatter_add_(
-            dim=0, index=group_indices, src=torch.ones(len(group_indices), dtype=x.dtype, device=x.device))
+        # -> (batch * sequence, n, m, ..., k)
+        group_ids = group_ids.repeat((1,) + x.size()[2:])
+
+        pooled = torch.zeros((len(counts),) + x.size()[1:], dtype=x.dtype, device=x.device)
+        pooled.scatter_add_(dim=0, index=group_ids, src=x)
+
         counts = counts.view(counts.size() + (1,) * len(pooled.size()[1:]))
         pooled = pooled / counts
-
-        # filter out groups < 0
-        indicator_valid = groups >= 0
-        pooled = pooled[indicator_valid]
-        groups = groups[indicator_valid]
-        example_ids = example_ids[indicator_valid]
 
         return pooled, groups, example_ids
 
@@ -312,8 +334,4 @@ class MarkedTokenConcatFixedNumTokens(GroupBase):
             gathered_outputs = torch.cat(
                 [torch.unsqueeze(batch[self.pooled_source_name], dim=1), gathered_outputs], dim=1)
 
-        result = OrderedDict()
-        result[self.output_name] = gathered_outputs
-        result[(self.output_name, self.output_marker_name)] = marker_ids
-        result[(self.output_name, 'example_ids')] = torch.arange(len(marker_ids), device=marker_ids.device)
-        return result
+        return gathered_outputs, marker_ids, torch.arange(len(marker_ids), device=marker_ids.device)

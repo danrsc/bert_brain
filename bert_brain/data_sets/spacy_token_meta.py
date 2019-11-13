@@ -1,5 +1,5 @@
 from string import punctuation
-from typing import Union, Sequence, Optional
+from typing import Union, Sequence, Optional, Tuple
 
 import numpy as np
 
@@ -203,7 +203,7 @@ def bert_tokenize_with_spacy_meta(
         stop_sequence_3: Optional[int] = None,
         multipart_id: Optional[int] = None,
         span_ids: Optional[Sequence[int]] = None,
-        is_apply_data_offset_entire_group: bool = False) -> InputFeatures:
+        is_apply_data_offset_entire_group: bool = False) -> Tuple[InputFeatures, np.array]:
     """
     Uses spacy to get information such as part of speech, probability of word, etc. and aligns the tokenization from
     spacy with the bert tokenization.
@@ -277,12 +277,13 @@ def bert_tokenize_with_spacy_meta(
     example_span_ids = list() if span_ids is not None else None
     example_index_word_in_example = list()
     example_index_token_in_sentence = list()
+    included_indices = list()
 
     def _append_special_token(special_token, index_word_in_example_, index_token_in_sentence_, type_id_):
         example_tokens.append(special_token)
         example_mask.append(1)
-        example_is_stop.append(1)
-        example_is_begin_word_pieces.append(1)
+        example_is_stop.append(True)
+        example_is_begin_word_pieces.append(True)
         example_lengths.append(0)
         example_probs.append(-20.)
         example_head_location.append(np.nan)
@@ -353,6 +354,7 @@ def bert_tokenize_with_spacy_meta(
         if idx_group < sequences[idx_sequence][0]:
             continue
         assert(sequences[idx_sequence][0] <= idx_group < sequences[idx_sequence][1])
+        included_indices.append(idx_group)
         index_word_in_example += 1
         idx_data = get_data_token_index(bert_tokens_with_spacy)
         for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
@@ -366,13 +368,13 @@ def bert_tokenize_with_spacy_meta(
                 head_location = idx_head_group - idx_group
             example_tokens.append(t)
             example_mask.append(1)
-            example_is_stop.append(1 if _is_stop(spacy_token) else 0)
+            example_is_stop.append(_is_stop(spacy_token))
             example_lengths.append(length)
             example_probs.append(-20. if spacy_token is None else spacy_token.prob)
             example_head_location.append(head_location)
             example_token_head.append(head_token)
             is_continue_word_piece = t.startswith('##')
-            example_is_begin_word_pieces.append(0 if is_continue_word_piece else 1)
+            example_is_begin_word_pieces.append(not is_continue_word_piece)
             example_type_ids.append(type_id)
             if span_ids is not None:
                 example_span_ids.append(span_ids[idx_group])
@@ -399,7 +401,7 @@ def bert_tokenize_with_spacy_meta(
 
     example_data_ids = _readonly(np.array(example_data_ids))
 
-    return InputFeatures(
+    input_features = InputFeatures(
         unique_id=unique_id,
         tokens=tuple(example_tokens),
         token_ids=_readonly(np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens))),
@@ -417,3 +419,5 @@ def bert_tokenize_with_spacy_meta(
         multipart_id=multipart_id,
         span_ids=_readonly(np.array(example_span_ids)) if example_span_ids is not None else None,
         data_ids=dict((k, example_data_ids) for k in data_key))
+
+    return input_features, np.array(included_indices)

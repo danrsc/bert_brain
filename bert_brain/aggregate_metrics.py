@@ -58,7 +58,7 @@ class Aggregator:
                 raise ValueError('Unexpected field in result: {}'.format(field))
             if result[field] is None:
                 self._counts[field].append(0)
-            elif np.isscalar(result[field]):
+            elif np.ndim(result[field]) == 0:
                 self._field_values[field].append(result[field])
                 self._counts[field].append(1)
             elif is_sequence:
@@ -139,10 +139,10 @@ def _read_variation_parallel_helper(item):
         raise RuntimeError('Bad variation hash')
     output_dir = os.path.join(result_path, variation_set_name, variation_hash)
     model_dir = os.path.join(model_path, variation_set_name, variation_hash, 'run_{}'.format(index_run))
-    validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
-    if not os.path.exists(validation_npz_path):
+    if not os.path.exists(os.path.join(output_dir, 'run_{}'.format(index_run), 'completed.txt')):
         return index_run, None
-    output_results_by_name = read_predictions(validation_npz_path)
+    validation_dir = os.path.join(output_dir, 'run_{}'.format(index_run), 'validation_predictions')
+    output_results_by_name = read_predictions(validation_dir)
     run_results = dict()
     for name in output_results_by_name:
         if isinstance(training_variation, TrainingVariation):
@@ -854,15 +854,17 @@ def get_field_predictions(
     if not pre_matched:
         training_variation = match_variation(variation_set_name, training_variation)
     output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(training_variation))
-    aggregator = None
+    aggregator = Aggregator()
     run_iterable = (index_run,) if index_run is not None else range(num_runs)
     for index_run in run_iterable:
-        validation_npz_path = os.path.join(output_dir, 'run_{}'.format(index_run), 'output_validation.npz')
-        if not os.path.exists(validation_npz_path):
-            raise ValueError('Path does not exist: {}'.format(validation_npz_path))
-        output_results = read_predictions(validation_npz_path)
+        output_dir_run = os.path.join(output_dir, 'run_{}'.format(index_run))
+        if not os.path.exists(os.path.join(output_dir_run, 'completed.txt')):
+            raise ValueError('Incomplete results')
+        validation_dir = os.path.join(output_dir_run, 'validation_predictions')
+        if not os.path.exists(validation_dir):
+            raise ValueError('Path does not exist: {}'.format(validation_dir))
+        output_results = read_predictions(validation_dir, keys=[field_name])
         field_results = output_results[field_name]
-        aggregator = Aggregator()
         for result in field_results:
             aggregator.update(result, is_sequence=result.sequence_type != 'single')
 
@@ -870,5 +872,6 @@ def get_field_predictions(
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
     ids = np.array(aggregator.values('unique_id'))
+    word_ids = np.array(aggregator.values('word_ids'))
     masked_target = np.where(mask, target, np.nan)
-    return predictions, masked_target, ids
+    return predictions, masked_target, ids, word_ids

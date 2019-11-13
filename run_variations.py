@@ -99,9 +99,9 @@ def run_variation(
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        output_validation_path = os.path.join(output_dir, 'output_validation.npz')
-        output_test_path = os.path.join(output_dir, 'output_test.npz')
-        if os.path.exists(output_validation_path) and os.path.exists(output_test_path):
+        completion_file_path = os.path.join(output_dir, 'completed.txt')
+
+        if os.path.exists(completion_file_path):
             continue
 
         output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
@@ -131,7 +131,7 @@ def run_variation(
                 task_hash(load_from.loss_tasks),
                 'run_{}'.format(load_from_index_run))
 
-        train(settings, output_validation_path, output_test_path, output_model_path,
+        train(settings, output_dir, completion_file_path, output_model_path,
               train_data, validation_data, test_data, n_gpu, device, load_from_path)
 
 

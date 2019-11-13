@@ -3,6 +3,9 @@ from collections import OrderedDict
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional
+
+from pytorch_pretrained_bert.modeling import BertLayerNorm
 
 from .graph_part import GraphPart
 
@@ -24,6 +27,20 @@ class ContextualizedLinear(nn.Module):
         return nn.functional.linear(x, self.weight, self.bias)
 
 
+class ContextualizedBertLayerNorm(nn.Module):
+    def __init__(self, bert_layer_norm):
+        super().__init__()
+        self.weight = bert_layer_norm.weight.detach()
+        self.bias = bert_layer_norm.bias.detach()
+        self.variance_epsilon = bert_layer_norm.variance_epsilon
+
+    def forward(self, x):
+        u = x.mean(-1, keepdim=True)
+        s = (x - u).pow(2).mean(-1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.variance_epsilon)
+        return self.weight * x + self.bias
+
+
 class LinearContextualParameterGeneration(GraphPart):
 
     def __init__(
@@ -42,11 +59,12 @@ class LinearContextualParameterGeneration(GraphPart):
         self.generator = None
         self.embedding = None
 
-    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_tasks):
-        if self.num_contexts == 'num_tasks':
-            self.num_contexts = num_tasks
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
+        if self.num_contexts == 'num_response_data_fields':
+            self.num_contexts = num_response_data_fields
         for key in self.inner_graph_parts:
-            self.inner_graph_parts[key].resolve_placeholders(placeholder_name_to_fields, field_shapes, num_tasks)
+            self.inner_graph_parts[key].resolve_placeholders(
+                placeholder_name_to_fields, field_shapes, num_response_data_fields)
 
     def instantiate(self, name_to_num_channels):
         for key in self.inner_graph_parts:
@@ -71,9 +89,12 @@ class LinearContextualParameterGeneration(GraphPart):
             # parameters in a module into variables, so we create specialized modules. We could support
             # multiple types here easily, but for now we just support nn.Linear
             if len(module_result) > 0:
-                if type(module_) is not nn.Linear:
+                if type(module_) is nn.Linear:
+                    replacement_module = ContextualizedLinear(module_)
+                elif type(module_) is BertLayerNorm:
+                    replacement_module = ContextualizedBertLayerNorm(module_)
+                else:
                     raise ValueError('Unsupported module type: {}'.format(type(module_)))
-                replacement_module = ContextualizedLinear(module_)
                 for name_ in module_result:
                     result[name_] = (replacement_module,) + module_result[name_][1:]
                 assert (len(list(module_.named_children())) == 0)
