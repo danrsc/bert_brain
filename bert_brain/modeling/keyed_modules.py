@@ -4,6 +4,7 @@ import itertools
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional
 from pytorch_pretrained_bert.modeling import gelu, BertLayerNorm
 
 from ..common import NamedSpanEncoder

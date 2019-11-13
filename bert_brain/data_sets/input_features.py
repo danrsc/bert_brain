@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import dataclasses
-from typing import Sequence, Optional, Mapping, Any, Union, OrderedDict as OrderedDictT
+from typing import Sequence, Optional, Mapping, Any, Union
 
 import numpy as np
 import torch

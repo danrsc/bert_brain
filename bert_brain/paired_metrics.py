@@ -4,7 +4,7 @@ from scipy.stats import ttest_1samp, ttest_rel
 
 from tqdm import trange
 
-from .experiments import named_variations, match_variation
+from .experiments import singleton_variation
 from .aggregate_metrics import get_field_predictions
 
 
@@ -23,14 +23,14 @@ __all__ = [
 
 def paired_squared_error(
         paths_obj,
-        variation_set_name_a, training_variation_a,
-        variation_set_name_b, training_variation_b,
+        variation_set_name_a,
+        variation_set_name_b,
         field_name,
         num_contiguous):
-    predictions_a, target_a, ids_a = get_field_predictions(
-        paths_obj, variation_set_name_a, training_variation_a, field_name)
-    predictions_b, target_b, ids_b = get_field_predictions(
-        paths_obj, variation_set_name_b, training_variation_b, field_name)
+    predictions_a, target_a, ids_a, _ = get_field_predictions(
+        paths_obj, variation_set_name_a, field_name)
+    predictions_b, target_b, ids_b, _ = get_field_predictions(
+        paths_obj, variation_set_name_b, field_name)
 
     def _sort(p, t, i):
         sort_order = np.argsort(i)
@@ -81,13 +81,11 @@ class PermutationTestResult:
 
 def paired_k_vs_k_permutation(
         paths_obj,
-        variation_set_name_a, training_variation_a, variation_set_name_b, training_variation_b, field_name,
+        variation_name_a, variation_name_b, field_name,
         k=20, num_k_vs_k_samples=100, num_permutations=1000):
-    _, _, num_runs_a, _, _ = named_variations(variation_set_name_a)
-    _, _, num_runs_b, _, _ = named_variations(variation_set_name_b)
-    assert (num_runs_a == num_runs_b)
-    training_variation_a = match_variation(variation_set_name_a, training_variation_a)
-    training_variation_b = match_variation(variation_set_name_b, training_variation_b)
+    _, settings_a = singleton_variation(variation_name_a)
+    _, settings_b = singleton_variation(variation_name_b)
+    assert (settings_a.num_runs == settings_b.num_runs)
 
     results_a = list()
     results_b = list()
@@ -101,15 +99,14 @@ def paired_k_vs_k_permutation(
         permute_indices_ = np.reshape(permute_indices_, -1)
         return permute_indices_[permute_indices_ < count]
 
-    def read_results(variation_name, training_variation, idx_run):
-        p, t, ids = get_field_predictions(
-            paths_obj, variation_name, training_variation, field_name, idx_run, pre_matched=True)
+    def read_results(variation_name, idx_run):
+        p, t, ids = get_field_predictions(paths_obj, variation_name, field_name, idx_run)
         sort_order = np.argsort(ids)
         return p[sort_order], t[sort_order]
 
-    for index_run in range(num_runs_a):
-        predictions_a, target_a = read_results(variation_set_name_a, training_variation_a, index_run)
-        predictions_b, target_b = read_results(variation_set_name_b, training_variation_b, index_run)
+    for index_run in range(settings_a.num_runs):
+        predictions_a, target_a = read_results(variation_name_a, index_run)
+        predictions_b, target_b = read_results(variation_name_b, index_run)
         assert (len(target_a) == len(target_b))
 
         for index_permutation in trange(num_permutations + 1):
@@ -165,38 +162,35 @@ def paired_k_vs_k_permutation(
 
 def get_k_vs_k_paired(
         paths_obj,
-        variation_set_name_a, training_variation_a, variation_set_name_b, training_variation_b, field_name,
+        variation_name_a, variation_name_b, field_name,
         k=20, num_samples=1000, mean_within_run=False):
-    _, _, num_runs_a, _, _ = named_variations(variation_set_name_a)
-    _, _, num_runs_b, _, _ = named_variations(variation_set_name_b)
-    assert (num_runs_a == num_runs_b)
-    training_variation_a = match_variation(variation_set_name_a, training_variation_a)
-    training_variation_b = match_variation(variation_set_name_b, training_variation_b)
+    _, settings_a = singleton_variation(variation_name_a)
+    _, settings_b = singleton_variation(variation_name_b)
+    assert (settings_a.num_runs == settings_b.num_runs)
     index_sample = 0
     accuracy_a = None
     accuracy_b = None
     sample_accuracy_a = None
     sample_accuracy_b = None
 
-    def read_results(variation_name, training_variation, idx_run):
-        p, t, ids = get_field_predictions(
-            paths_obj, variation_name, training_variation, field_name, idx_run, pre_matched=True)
+    def read_results(variation_name, idx_run):
+        p, t, ids, _ = get_field_predictions(paths_obj, variation_name, field_name, idx_run)
         sort_order = np.argsort(ids)
         return p[sort_order], t[sort_order]
 
-    for index_run in range(num_runs_a):
-        predictions_a, target_a = read_results(variation_set_name_a, training_variation_a, index_run)
-        predictions_b, target_b = read_results(variation_set_name_b, training_variation_b, index_run)
+    for index_run in range(settings_a.num_runs):
+        predictions_a, target_a = read_results(variation_name_a, index_run)
+        predictions_b, target_b = read_results(variation_name_b, index_run)
         assert (len(target_a) == len(target_b))
         if index_run == 0:
             if mean_within_run:
                 sample_accuracy_a = np.full((num_samples, target_a.shape[-1]), np.nan)
                 sample_accuracy_b = np.full((num_samples, target_b.shape[-1]), np.nan)
-                accuracy_a = np.full((num_runs_a, target_a.shape[-1]), np.nan)
-                accuracy_b = np.full((num_runs_b, target_b.shape[-1]), np.nan)
+                accuracy_a = np.full((settings_a.num_runs, target_a.shape[-1]), np.nan)
+                accuracy_b = np.full((settings_b.num_runs, target_b.shape[-1]), np.nan)
             else:
-                accuracy_a = np.full((num_samples * num_runs_a, target_a.shape[-1]), np.nan)
-                accuracy_b = np.full((num_samples * num_runs_a, target_b.shape[-1]), np.nan)
+                accuracy_a = np.full((num_samples * settings_a.num_runs, target_a.shape[-1]), np.nan)
+                accuracy_b = np.full((num_samples * settings_b.num_runs, target_b.shape[-1]), np.nan)
                 sample_accuracy_a = accuracy_a
                 sample_accuracy_b = accuracy_b
         if mean_within_run:
@@ -217,16 +211,13 @@ def get_k_vs_k_paired(
 
 def get_mse_paired(
         paths_obj,
-        variation_set_name_a, training_variation_a, variation_set_name_b, training_variation_b, field_name):
-    _, _, num_runs_a, _, _ = named_variations(variation_set_name_a)
-    _, _, num_runs_b, _, _ = named_variations(variation_set_name_b)
-    assert (num_runs_a == num_runs_b)
-    training_variation_a = match_variation(variation_set_name_a, training_variation_a)
-    training_variation_b = match_variation(variation_set_name_b, training_variation_b)
+        variation_name_a, variation_name_b, field_name):
+    _, settings_a = singleton_variation(variation_name_a)
+    _, settings_b = singleton_variation(variation_name_b)
+    assert (settings_a.num_runs == settings_b.num_runs)
 
-    def read_results(variation_name, training_variation, idx_run):
-        p, t, ids = get_field_predictions(
-            paths_obj, variation_name, training_variation, field_name, idx_run, pre_matched=True)
+    def read_results(variation_name, idx_run):
+        p, t, ids, _ = get_field_predictions(paths_obj, variation_name, field_name, idx_run)
         sort_order = np.argsort(ids)
         return p[sort_order], t[sort_order], ids[sort_order]
 
@@ -234,9 +225,9 @@ def get_mse_paired(
     mse_b = list()
     pove_a = list()
     pove_b = list()
-    for index_run in range(num_runs_a):
-        predictions_a, target_a, ids_a = read_results(variation_set_name_a, training_variation_a, index_run)
-        predictions_b, target_b, ids_b = read_results(variation_set_name_b, training_variation_b, index_run)
+    for index_run in range(settings_a.num_runs):
+        predictions_a, target_a, ids_a = read_results(variation_name_a, index_run)
+        predictions_b, target_b, ids_b = read_results(variation_name_b, index_run)
         if not np.array_equal(ids_a, ids_b):
             raise ValueError('Mismatched ids')
         err_a = np.square(predictions_a - target_a)

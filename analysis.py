@@ -3,7 +3,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from bert_brain import TrainingVariation, read_variation_results
+from bert_brain import read_variation_results
 from ocular import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
@@ -27,11 +27,11 @@ output_order = (
 
 
 def print_variation_results_sliced(
-        paths, variation_set_name, training_variation, aux_loss, num_runs, metric='pove',
+        paths, variation_set_name, metric='pove',
         field_precision=2, num_values_per_table=10, **loss_handler_kwargs):
 
-    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
-                                                    compute_scalar=False, **loss_handler_kwargs)
+    aggregated, count_runs, settings = read_variation_results(
+        paths, variation_set_name, compute_scalar=False, **loss_handler_kwargs)
 
     values = OrderedDict((name, np.nanmean(aggregated[name].values(metric), axis=0)) for name in aggregated)
 
@@ -42,7 +42,8 @@ def print_variation_results_sliced(
         else:
             grouped_by_shape[values[name].shape].append(name)
 
-    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, ', '.join(sorted(training_variation))))
+    print('Variation ({} of {} runs found): {}'.format(
+        count_runs, settings.num_runs, ', '.join(sorted(settings.all_loss_tasks))))
 
     for shape in grouped_by_shape:
         num_tables = int(np.ceil(np.prod(shape) / num_values_per_table))
@@ -73,11 +74,9 @@ def print_variation_results_sliced(
     print('')
 
 
-def print_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs, field_precision=2,
-                            **loss_handler_kwargs):
+def print_variation_results(paths, variation_set_name, field_precision=2, **loss_handler_kwargs):
 
-    aggregated, count_runs = read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
-                                                    **loss_handler_kwargs)
+    aggregated, count_runs, settings = read_variation_results(paths, variation_set_name, **loss_handler_kwargs)
 
     metrics = list()
     for metric in output_order:
@@ -99,11 +98,8 @@ def print_variation_results(paths, variation_set_name, training_variation, aux_l
             text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
 
-    if isinstance(training_variation, TrainingVariation):
-        training_variation_name = str(training_variation)
-    else:
-        training_variation_name = ', '.join(sorted(training_variation))
-    print('Variation ({} of {} runs found): {}'.format(count_runs, num_runs, training_variation_name))
+    training_variation_name = ', '.join(sorted(settings.all_loss_tasks))
+    print('Variation ({} of {} runs found): {}'.format(count_runs, settings.num_runs, training_variation_name))
     write_text_grid_to_console(text_grid, width='tight')
     print('')
     print('')

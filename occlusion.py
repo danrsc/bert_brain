@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 
-from bert_brain import cuda_most_free_device, DataPreparer, Settings, task_hash, set_random_seeds, named_variations, collate_fn, setup_prediction_heads_and_losses, make_datasets, \
-    CorpusLoader, make_prediction_handler, TrainingVariation
+from bert_brain import cuda_most_free_device, DataPreparer, Settings, task_hash, set_random_seeds, named_variations, \
+    collate_fn, setup_prediction_heads_and_losses, make_datasets, CorpusLoader, make_prediction_handler
 from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
 from bert_brain_paths import Paths
 
@@ -70,7 +70,7 @@ def _run_occlusion_for_variation(
 
     _, validation_data, _ = make_datasets(
         data_preparer.prepare(data),
-        settings.loss_tasks,
+        settings.all_loss_tasks,
         data_id_in_batch_keys=settings.data_id_in_batch_keys,
         filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
 
@@ -149,11 +149,11 @@ def _run_occlusion_for_variation(
 
 def run_occlusion(variation_set_name, index_run=None):
 
-    def io_setup():
-        hash_ = task_hash(training_variation)
+    def io_setup(variation_, settings_):
+        hash_ = task_hash(settings_)
         paths_ = Paths()
-        paths_.model_path_ = os.path.join(paths_.model_path, variation_set_name, hash_)
-        paths_.result_path_ = os.path.join(paths_.result_path, variation_set_name, hash_)
+        paths_.model_path_ = os.path.join(paths_.model_path, variation_, hash_)
+        paths_.result_path_ = os.path.join(paths_.result_path, variation_, hash_)
 
         corpus_loader_ = CorpusLoader(paths_.cache_path)
 
@@ -164,42 +164,33 @@ def run_occlusion(variation_set_name, index_run=None):
 
         return corpus_loader_, paths_
 
-    training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(variation_set_name)
-
-    if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
-        if not torch.cuda.is_available or settings.no_cuda:
-            device = torch.device('cpu')
+    named_settings = named_variations(variation_set_name)
+    for variation, training_variation in named_settings:
+        settings = named_settings[(variation, training_variation)]
+        if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
+            if not torch.cuda.is_available or settings.no_cuda:
+                device = torch.device('cpu')
+            else:
+                device_id, free = cuda_most_free_device()
+                torch.cuda.set_device(device_id)
+                logger.info('binding to device {} with {} memory free'.format(device_id, free))
+                device = torch.device('cuda:{}'.format(device_id))
+            n_gpu = 1  # torch.cuda.device_count()
         else:
-            device_id, free = cuda_most_free_device()
-            torch.cuda.set_device(device_id)
-            logger.info('binding to device {} with {} memory free'.format(device_id, free))
-            device = torch.device('cuda:{}'.format(device_id))
-        n_gpu = 1  # torch.cuda.device_count()
-    else:
-        device = torch.device('cuda', settings.local_rank)
-        n_gpu = 1
-        # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl')
-        if settings.optimization_settings.fp16:
-            settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
-
-    for training_variation in training_variations:
+            device = torch.device('cuda', settings.local_rank)
+            n_gpu = 1
+            # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+            torch.distributed.init_process_group(backend='nccl')
+            if settings.optimization_settings.fp16:
+                settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
 
         print('Running on variation: {}'.format(training_variation))
 
-        corpus_loader, paths = io_setup()
-
-        if isinstance(loss_tasks, TrainingVariation):
-            loss_tasks = set(loss_tasks.loss_tasks)
-        else:
-            loss_tasks = set(loss_tasks)
-
-        loss_tasks.update(aux_loss_tasks)
-        settings = dataclasses.replace(settings, loss_tasks=loss_tasks)
+        corpus_loader, paths = io_setup(variation, settings)
 
         tokenizer = corpus_loader.make_bert_tokenizer()
 
-        run_iterator = trange(num_runs, desc='Runs')
+        run_iterator = trange(settings.num_runs, desc='Runs')
         if index_run is not None:
             run_iterator = trange(index_run, index_run + 1, desc='Runs')
 

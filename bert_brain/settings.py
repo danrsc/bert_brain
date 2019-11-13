@@ -9,7 +9,7 @@ from .data_sets import PreprocessStandardize, PreprocessLog, \
 from .modeling import CriticKeys, GraphPart
 
 
-__all__ = ['OptimizationSettings', 'CriticSettings', 'TrainingVariation', 'LoadFrom', 'Settings']
+__all__ = ['OptimizationSettings', 'CriticSettings', 'Settings']
 
 
 @dataclass
@@ -107,33 +107,6 @@ def _default_critics():
     }
 
 
-@dataclass
-class LoadFrom:
-    variation_name: str
-    loss_tasks: Union[Sequence[str], 'TrainingVariation']
-    map_run: Optional[Callable[[int], int]] = None
-    name: Optional[str] = None
-
-    def __post_init__(self):
-        if self.name is None:
-            self.name = '{}:{}'.format(
-                self.variation_name,
-                self.loss_tasks.name if isinstance(self.loss_tasks, TrainingVariation) else tuple(self.loss_tasks))
-
-
-@dataclass
-class TrainingVariation:
-    loss_tasks: Sequence[str]
-    # If specified, then this causes a partially fine-tuned model to be loaded instead of the base pre-trained model.
-    load_from: Optional[LoadFrom] = None
-    name: Optional[str] = None
-
-    def __post_init__(self):
-        if self.name is None:
-            suffix = '.' + self.load_from.name if self.load_from is not None else ''
-            self.name = '{}{}'.format(tuple(self.loss_tasks), suffix)
-
-
 _PreprocessorTypeUnion = Union[
     Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
     Tuple[
@@ -220,7 +193,29 @@ class Settings:
     # but only the fields listed here will be considered part of the loss for the purpose of optimization and
     # only those fields will be reported in train_loss / eval_loss. Other critic output is available as metrics for
     # reporting, but is otherwise ignored by training.
-    loss_tasks: Union[set, TrainingVariation] = field(default_factory=set)
+    loss_tasks: set = field(default_factory=set)
+
+    # fields which should be used in a Model Agnostic Meta-Learning (MAML) setup. If either inner_maml_loss_tasks or
+    # outer_maml_loss_tasks is not empty, then both must be non-empty. A task is allowed to appear in both. If either
+    # is non-empty, then settings.loss_tasks must be empty. When these are specified, MAML learning is used instead
+    # of standard training
+    inner_maml_loss_tasks: set = field(default_factory=set)
+    output_maml_loss_tasks: set = field(default_factory=set)
+
+    @property
+    def all_loss_tasks(self):
+        all_loss_tasks = set(self.loss_tasks)
+        all_loss_tasks.update(self.inner_maml_loss_tasks)
+        all_loss_tasks.update(self.output_maml_loss_tasks)
+        return all_loss_tasks
+
+    # when specified, this acts as a key to determine a partially pre-trained model which should be used as a starting
+    # point
+    load_from: str = None
+
+    # Used in combination with load from to map the run of the current model to a run of the model we're loading
+    # If None, uses identity mapping
+    load_from_run_map: Optional[Callable[[int], int]] = None
 
     # If true, tasks are re-weighted by the inverse of the number of available examples so that the expected
     # effect of different data sets is balanced
@@ -235,6 +230,9 @@ class Settings:
     non_response_outputs: set = field(default_factory=set)
 
     seed: int = 42
+
+    # The number of times to run the training
+    num_runs: int = 1
 
     # turn on tqdm at more granular levels
     show_epoch_progress: bool = False

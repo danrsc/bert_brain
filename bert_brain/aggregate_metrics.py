@@ -1,18 +1,15 @@
-import fnmatch
 import inspect
 import os
 import warnings
 from collections import OrderedDict
 import dataclasses
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Optional
 
 import numpy as np
 from scipy.special import logsumexp
 
-from .experiments import named_variations, task_hash, match_variation
-from .settings import TrainingVariation
+from .experiments import singleton_variation, task_hash
 from .modeling import CriticMapping
 from .result_output import read_predictions
 
@@ -24,8 +21,6 @@ __all__ = [
     'class_handler',
     'bincount_axis',
     'make_prediction_handler',
-    'ResultQuery',
-    'query_results',
     'get_field_predictions',
     'k_vs_k']
 
@@ -127,29 +122,19 @@ def expand_predictions(prediction, cluster_ids):
 
 
 def _read_variation_parallel_helper(item):
-    (result_path, model_path, variation_set_name, variation_hash, index_run, aux_loss,
+    (result_path, model_path, variation_name, index_run,
      compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) = item
-    training_variations, _, _, _, _ = named_variations(variation_set_name)
-    training_variation = None
-    for v in training_variations:
-        if task_hash(v) == variation_hash:
-            training_variation = v
-            break
-    if training_variation is None:
-        raise RuntimeError('Bad variation hash')
-    output_dir = os.path.join(result_path, variation_set_name, variation_hash)
-    model_dir = os.path.join(model_path, variation_set_name, variation_hash, 'run_{}'.format(index_run))
+    (variation_set_name, training_variation_name), settings = singleton_variation(variation_name)
+    output_dir = os.path.join(result_path, variation_set_name, task_hash(settings))
+    model_dir = os.path.join(model_path, variation_set_name, task_hash(settings), 'run_{}'.format(index_run))
     if not os.path.exists(os.path.join(output_dir, 'run_{}'.format(index_run), 'completed.txt')):
         return index_run, None
     validation_dir = os.path.join(output_dir, 'run_{}'.format(index_run), 'validation_predictions')
     output_results_by_name = read_predictions(validation_dir)
     run_results = dict()
     for name in output_results_by_name:
-        if isinstance(training_variation, TrainingVariation):
-            in_training_variation = name in training_variation.loss_tasks
-        else:
-            in_training_variation = name in training_variation
-        if not in_training_variation and name not in aux_loss:
+        in_training_variation = name in settings.all_loss_tasks
+        if not in_training_variation:
             continue
         no_cluster_path = os.path.join(model_dir, '{}_no_cluster_to_disk.npz'.format(name))
         cluster_id_path = os.path.join(model_dir, 'kmeans_clusters_{}.npy'.format(name))
@@ -204,11 +189,11 @@ def _read_variation_parallel_helper(item):
     return index_run, run_results
 
 
-def read_variation_results(paths, variation_set_name, training_variation, aux_loss, num_runs,
-                           compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
+def read_variation_results(paths, variation_name, compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
 
-    task_arguments = [(paths.result_path, paths.model_path, variation_set_name, task_hash(training_variation), i,
-                       aux_loss, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(num_runs)]
+    _, settings = singleton_variation(variation_name)
+    task_arguments = [(paths.result_path, paths.model_path, variation_name, i,
+                       compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(settings.num_runs)]
 
     with ThreadPoolExecutor() as ex:
         mapped = ex.map(_read_variation_parallel_helper, task_arguments)
@@ -230,7 +215,7 @@ def read_variation_results(paths, variation_set_name, training_variation, aux_lo
                 aggregated[name] = Aggregator()
             aggregated[name].update(run_results[name], is_sequence=False)
 
-    return aggregated, count_runs
+    return aggregated, count_runs, settings
 
 
 def nan_pearson(x, y, axis=0, keepdims=False):
@@ -696,166 +681,11 @@ def _find_restricted_distractor_indices(indices_true, pair_examples):
     return indices_distractor
 
 
-@dataclasses.dataclass
-class ResultQuery:
-    variation_set_name: str
-    metric: str
-    key: str
-    training_variation: Optional[str] = None
-    second_variation_set_name: Optional[str] = None
-    second_training_variation: Optional[str] = None
-
-    def as_dict_with_combined_second(self, sep=':', key_shorten_fn=None):
-        result = dataclasses.asdict(self, dict_factory=OrderedDict)
-        if key_shorten_fn is not None:
-            result['key'] = key_shorten_fn(result['key'])
-            result['training_variation'] = tuple(key_shorten_fn(x) for x in result['training_variation'])
-            if result['second_training_variation'] is not None:
-                result['second_training_variation'] = tuple(
-                    key_shorten_fn(x) for x in result['second_training_variation'])
-        result['combined_variation_set_name'] = result['variation_set_name']
-        result['combined_training_variation'] = result['training_variation']
-        if self.second_variation_set_name is not None and self.second_variation_set_name != self.variation_set_name:
-            result['combined_variation_set_name'] = \
-                result['variation_set_name'] + sep + result['second_variation_set_name']
-        if self.second_variation_set_name is not None and self.second_training_variation != self.training_variation:
-            result['combined_training_variation'] = \
-                str(result['training_variation']) + sep + str(result['second_training_variation'])
-        return result
-
-
-def is_metric_k_vs_k(metric):
-    split_metric = metric.split('_')
-    if len(split_metric) == 3 and split_metric[1] == 'vs' and split_metric[0] == split_metric[2]:
-        return True
-
-
-def _run_query(item):
-    paths, variation_set_name, variation_hash, needs_k_vs_k, compute_scalar, loss_handler_kwargs = item
-    variations, _, num_runs, _, aux_loss = named_variations(variation_set_name)
-    variation = None
-    for v in variations:
-        if task_hash(v) == variation_hash:
-            variation = v
-            break
-    if variation is None:
-        raise RuntimeError('Bad hash: unable to find match')
-    current_loss_handler_kwargs = loss_handler_kwargs
-    if needs_k_vs_k:
-        if 'k_vs_k_num_samples' not in current_loss_handler_kwargs:
-            current_loss_handler_kwargs = dict(current_loss_handler_kwargs)
-            current_loss_handler_kwargs['k_vs_k_num_samples'] = 1000
-    query_key = variation_set_name, variation_hash
-    result = read_variation_results(
-        paths, variation_set_name, variation, aux_loss, num_runs, compute_scalar=compute_scalar,
-        **current_loss_handler_kwargs)
-    return query_key, result
-
-
-def query_results(paths, result_queries, compute_scalar=False, **loss_handler_kwargs):
-    needs_k_vs_k = set()
-    query_set = set()
-    for result_query in result_queries:
-        training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
-        query_training_variation_hash = task_hash(result_query.training_variation) \
-            if result_query.training_variation is not None else None
-        for training_variation in training_variations:
-            training_variation_hash = task_hash(training_variation)
-            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
-                result_key = result_query.variation_set_name, training_variation_hash
-                query_set.add(result_key)
-                if result_query.metric == 'k_vs_k':
-                    needs_k_vs_k.add(result_key)
-                if result_query.second_variation_set_name is not None:
-                    second_variation = result_query.second_training_variation \
-                        if result_query.second_training_variation is not None else training_variation
-                    second_key = result_query.second_variation_set_name, task_hash(second_variation)
-                    query_set.add(second_key)
-                    if result_query.metric == 'k_vs_k':
-                        needs_k_vs_k.add(second_key)
-
-    query_items = list()
-    for query_key in query_set:
-        variation_set_name, variation_hash = query_key
-        query_items.append(
-            (paths, variation_set_name, variation_hash, query_key in needs_k_vs_k, compute_scalar, loss_handler_kwargs))
-
-    cache = dict()
-    result = list()
-    with ProcessPoolExecutor() as ex:
-        q_results = ex.map(_run_query, query_items)
-    for query_key, query_result in q_results:
-        cache[query_key] = query_result
-
-    for result_query in result_queries:
-        matched = False
-        training_variations, _, num_runs, _, aux_loss = named_variations(result_query.variation_set_name)
-        query_training_variation_hash = task_hash(result_query.training_variation) \
-            if result_query.training_variation is not None else None
-        for training_variation in training_variations:
-            training_variation_hash = task_hash(training_variation)
-            if query_training_variation_hash is None or query_training_variation_hash == training_variation_hash:
-                cache_key = result_query.variation_set_name, training_variation_hash
-                aggregated, count_runs = cache[cache_key]
-                for aggregated_key in aggregated:
-                    if fnmatch.fnmatch(aggregated_key, result_query.key):
-                        result_query = dataclasses.replace(result_query, key=aggregated_key)
-                        if result_query.metric == 'k_vs_k':
-                            values = None
-                            for metric in aggregated[result_query.key]:
-                                if is_metric_k_vs_k(metric):
-                                    values = aggregated[result_query.key].values(metric)
-                                    break
-                            if values is None:
-                                raise ValueError('k_vs_k not found')
-                        else:
-                            values = aggregated[result_query.key].values(result_query.metric)
-                        if result_query.training_variation is None:
-                            result_query = dataclasses.replace(result_query, training_variation=training_variation)
-                        matched = True
-                        result.append((result_query, np.asarray(values)))
-        if not matched:
-            raise ValueError('No match for query: {}'.format(result_query))
-    for idx_result in range(len(result)):
-        if result[idx_result][0].second_variation_set_name is not None:
-            result_query, first_values = result[idx_result]
-            training_variations, _, num_runs, _, aux_loss = named_variations(result_query.second_variation_set_name)
-            if result_query.second_training_variation is None:
-                result_query = dataclasses.replace(
-                    result_query, second_training_variation=result_query.training_variation)
-            query_training_variation_hash = task_hash(result_query.second_training_variation)
-            for training_variation in training_variations:
-                training_variation_hash = task_hash(training_variation)
-                if query_training_variation_hash == training_variation_hash:
-                    cache_key = result_query.second_variation_set_name, training_variation_hash
-                    aggregated, count_runs = cache[cache_key]
-                    if result_query.metric == 'k_vs_k':
-                        second_values = None
-                        for metric in aggregated[result_query.key]:
-                            if is_metric_k_vs_k(metric):
-                                second_values = aggregated[result_query.key].values(metric)
-                                break
-                        if second_values is None:
-                            raise ValueError('k_vs_k not found')
-                    else:
-                        second_values = aggregated[result_query.key].values(result_query.metric)
-                    result[idx_result] = (result_query, first_values, np.asarray(second_values))
-                    break  # break out of looping over training variations
-            if len(result[idx_result]) == 2:
-                raise ValueError('No match for query: {}'.format(result_query))
-    return result
-
-
-def get_field_predictions(
-        paths_obj, variation_set_name, training_variation, field_name, index_run=None, pre_matched=False):
-    num_runs = None
-    if index_run is None:
-        _, _, num_runs, _, _ = named_variations(variation_set_name)
-    if not pre_matched:
-        training_variation = match_variation(variation_set_name, training_variation)
-    output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(training_variation))
+def get_field_predictions(paths_obj, variation_set_name, field_name, index_run=None):
+    (variation_set_name, _), settings = singleton_variation(variation_set_name)
+    output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(settings))
     aggregator = Aggregator()
-    run_iterable = (index_run,) if index_run is not None else range(num_runs)
+    run_iterable = (index_run,) if index_run is not None else range(settings.num_runs)
     for index_run in run_iterable:
         output_dir_run = os.path.join(output_dir, 'run_{}'.format(index_run))
         if not os.path.exists(os.path.join(output_dir_run, 'completed.txt')):

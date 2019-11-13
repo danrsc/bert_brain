@@ -389,6 +389,8 @@ class BertMultiPredictionHead(BertPreTrainedModel):
                 def set_forced_cpu_tensor(t):
                     forced_cpu.append(t)
                     return t
+
+                # noinspection PyProtectedMember
                 module._apply(set_forced_cpu_tensor)
 
         set_forced_cpu(self)

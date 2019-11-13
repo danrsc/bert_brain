@@ -138,7 +138,7 @@ def evaluate(
 
                 if data_valid_count > 0:
                     kind = eval_data_set.response_data_kind(data_key)
-                    if data_key in settings.loss_tasks or kind in settings.loss_tasks:
+                    if data_key in settings.all_loss_tasks or kind in settings.all_loss_tasks:
                         total_loss += current
                         total_count += data_valid_count
 
@@ -226,7 +226,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
     all_kinds = set([data_set.response_data_kind(k) for k in data_set.fields
                      if data_set.response_data_kind(k) is not None])
 
-    for k in settings.loss_tasks:
+    for k in settings.all_loss_tasks:
         if k not in all_kinds and k not in data_set.fields:
             raise ValueError('loss_task is not present as a field: {}'.format(k))
 
@@ -235,8 +235,8 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
     for k in data_set.fields:
         kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
         corpus_key = data_set.data_set_key_for_field(k)
-        if k in settings.loss_tasks or k in settings.non_response_outputs or data_set.is_response_data(k):
-            if k in settings.loss_tasks or kind in settings.loss_tasks:
+        if k in settings.all_loss_tasks or k in settings.non_response_outputs or data_set.is_response_data(k):
+            if k in settings.all_loss_tasks or kind in settings.all_loss_tasks:
                 loss_example_counts[k] = data_set.num_examples_for_field(k)
             critic_settings = settings.get_critic(k, data_set)
             handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
@@ -471,7 +471,7 @@ def train(
                 weight, data_loss = loss_dict[data_key]
                 no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
                 kind = train_data_set.response_data_kind(data_key)
-                if (data_key in settings.loss_tasks or kind in settings.loss_tasks) and not no_valid_inputs:
+                if (data_key in settings.all_loss_tasks or kind in settings.all_loss_tasks) and not no_valid_inputs:
                     current = weight * data_loss
                     losses_to_write[data_key] = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
                     if loss is None:

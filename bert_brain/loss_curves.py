@@ -51,24 +51,26 @@ class LossCurve:
 
 
 def loss_curves_for_variation(paths, variation_set_name):
-    training_variations, _, num_runs, _, _ = named_variations(variation_set_name)
+    named_settings = named_variations(variation_set_name)
 
-    def read_curve(kind, training_variation_, index_run_):
+    def read_curve(kind, variation_name_, settings_, index_run_):
         file_name = 'train_curve.npz' if kind == 'train' else 'validation_curve.npz'
-        output_dir = os.path.join(paths.result_path, variation_set_name, task_hash(training_variation_))
+        output_dir = os.path.join(paths.result_path, variation_name_, task_hash(settings_))
         curve_path = os.path.join(output_dir, 'run_{}'.format(index_run_), file_name)
         result_ = list()
         if os.path.exists(curve_path):
             curve = read_loss_curve(curve_path)
             for key in curve:
                 result_.append(
-                    LossCurve(training_variation_, kind, index_run_, key, curve[key][0], curve[key][1], curve[key][2]))
+                    LossCurve(
+                        settings_.all_loss_tasks, kind, index_run_, key, curve[key][0], curve[key][1], curve[key][2]))
         return result_
 
     result = list()
-    for training_variation in training_variations:
-        for index_run in range(num_runs):
-            result.extend(read_curve('train', training_variation, index_run))
-            result.extend(read_curve('validation', training_variation, index_run))
+    for variation_name, training_variation_name in named_settings:
+        settings = named_settings[(variation_name, training_variation_name)]
+        for index_run in range(settings.num_runs):
+            result.extend(read_curve('train', variation_name, settings, index_run))
+            result.extend(read_curve('validation', variation_name, settings, index_run))
 
     return result

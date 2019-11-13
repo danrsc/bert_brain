@@ -5,6 +5,8 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.nn
+import torch.nn.functional
 
 
 __all__ = [

@@ -38,7 +38,7 @@ from pytorch_pretrained_bert.modeling import BertForSequenceClassification, Bert
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
-from bert_brain import cuda_most_free_device, task_hash, set_random_seeds, named_variations, Settings, TrainingVariation
+from bert_brain import cuda_most_free_device, task_hash, set_random_seeds, singleton_variation, Settings
 from tqdm_logging import replace_root_logger_handler
 from bert_brain_paths import Paths
 
@@ -828,6 +828,8 @@ def _run_glue_for_variation(
             all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
         elif output_mode == "regression":
             all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
+        else:
+            raise ValueError('Unknown output_mode: {}'.format(output_mode))
 
         eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
         # Run prediction for full data
@@ -1057,7 +1059,7 @@ def main():
 
     setattr(args, 'name', 'hp_meg_simple_fmri')
 
-    training_variations, settings, num_runs, min_memory, aux_loss_tasks = named_variations(args.name)
+    (variation, training_variation_name), settings = singleton_variation(args.name)
     settings.optimization_settings.num_epochs_train_prediction_heads_only = 0
     settings.optimization_settings.num_final_epochs_train_prediction_heads_only = 0
     settings.optimization_settings.num_train_epochs = args.num_train_epochs
@@ -1071,8 +1073,7 @@ def main():
     # if chosen_variation is None:
     #     raise ValueError('Unable to find variation which matches chosen variation')
     # training_variations = [chosen_variation]
-    training_variations = [('hp_fmri_I',)]
-    num_runs = 4
+    settings.num_runs = 4
 
     if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
         if not torch.cuda.is_available or settings.no_cuda:
@@ -1112,11 +1113,11 @@ def main():
     else:
         task_names = [task_names]
 
-    def io_setup(training_variation_):
+    def io_setup():
         temp_paths = Paths()
-        hash_ = task_hash(training_variation_)
-        model_path_ = os.path.join(temp_paths.model_path, args.name, hash_)
-        result_path_ = os.path.join(temp_paths.result_path, args.name, hash_)
+        hash_ = task_hash(settings)
+        model_path_ = os.path.join(temp_paths.model_path, variation, hash_)
+        result_path_ = os.path.join(temp_paths.result_path, variation, hash_)
 
         if not os.path.exists(model_path_):
             os.makedirs(model_path_)
@@ -1156,59 +1157,54 @@ def main():
                     processor.get_labels(), args.max_seq_length, tokenizer, output_mode)
 
         if args.do_train or args.do_eval:
-            for training_variation in training_variations:
-                result_path, model_path = io_setup(training_variation)
-                for index_run in range(num_runs):
-                    for index_sub_run in range(num_runs_per_input_run[task_name]):
-                        settings.optimization_settings.learning_rate = learning_rates[task_name]
-                        set_random_seeds(
-                            settings.seed, index_run * num_runs_per_input_run[task_name] + index_sub_run, n_gpu)
-                        _run_glue_for_variation(
-                            model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
-                            settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
-                        gc.collect()
-                        torch.cuda.empty_cache()
-
-        for training_variation in training_variations:
-            result_path, model_path = io_setup(training_variation)
-            for index_run in range(num_runs):
+            result_path, model_path = io_setup()
+            for index_run in range(settings.num_runs):
                 for index_sub_run in range(num_runs_per_input_run[task_name]):
-                    output_eval_file = os.path.join(
+                    settings.optimization_settings.learning_rate = learning_rates[task_name]
+                    set_random_seeds(
+                        settings.seed, index_run * num_runs_per_input_run[task_name] + index_sub_run, n_gpu)
+                    _run_glue_for_variation(
+                        model_path, result_path, task_name, train_features, eval_features, processor, output_mode,
+                        settings, index_run, index_sub_run, device, n_gpu, mnli_mm_eval_features)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+        result_path, model_path = io_setup()
+        for index_run in range(settings.num_runs):
+            for index_sub_run in range(num_runs_per_input_run[task_name]):
+                output_eval_file = os.path.join(
+                    result_path,
+                    'run_{}'.format(index_run),
+                    '{}_{:.0e}_{}_results.txt'.format(task_name, learning_rates[task_name], index_sub_run))
+
+                def _read_eval_file(eval_file_path, task_name_):
+                    with open(eval_file_path, 'rt') as eval_file:
+                        for line in eval_file:
+                            line = line.strip()
+                            if len(line) == 0:
+                                continue
+                            index_equals = line.index(' = ')
+                            metric = line[:index_equals].strip()
+                            if metric == 'global_step' or metric == 'loss' or metric == 'eval_loss':
+                                continue
+                            value_str = line[index_equals + len(' = '):].strip()
+                            if value_str == 'None':
+                                continue
+                            value = float(value_str)
+                            results.append(Result(
+                                task_name_, training_variation_name, index_run, index_sub_run,
+                                learning_rates[task_name], metric, value))
+
+                _read_eval_file(output_eval_file, task_name)
+
+                if task_name == 'mnli':
+                    second_task_name = 'mnli-mm'
+                    output_eval_file_2 = os.path.join(
                         result_path,
                         'run_{}'.format(index_run),
-                        '{}_{:.0e}_{}_results.txt'.format(task_name, learning_rates[task_name], index_sub_run))
-
-                    training_variation_name = training_variation.name \
-                        if isinstance(training_variation, TrainingVariation) else str(training_variation)
-
-                    def _read_eval_file(eval_file_path, task_name_):
-                        with open(eval_file_path, 'rt') as eval_file:
-                            for line in eval_file:
-                                line = line.strip()
-                                if len(line) == 0:
-                                    continue
-                                index_equals = line.index(' = ')
-                                metric = line[:index_equals].strip()
-                                if metric == 'global_step' or metric == 'loss' or metric == 'eval_loss':
-                                    continue
-                                value_str = line[index_equals + len(' = '):].strip()
-                                if value_str == 'None':
-                                    continue
-                                value = float(value_str)
-                                results.append(Result(
-                                    task_name_, training_variation_name, index_run, index_sub_run,
-                                    learning_rates[task_name], metric, value))
-
-                    _read_eval_file(output_eval_file, task_name)
-
-                    if task_name == 'mnli':
-                        second_task_name = 'mnli-mm'
-                        output_eval_file_2 = os.path.join(
-                            result_path,
-                            'run_{}'.format(index_run),
-                            '{}_{:.0e}_{}_results.txt'.format(
-                                second_task_name, learning_rates[task_name], index_sub_run))
-                        _read_eval_file(output_eval_file_2, second_task_name)
+                        '{}_{:.0e}_{}_results.txt'.format(
+                            second_task_name, learning_rates[task_name], index_sub_run))
+                    _read_eval_file(output_eval_file_2, second_task_name)
 
     results = sorted(
         results, key=lambda r: dataclasses.astuple(dataclasses.replace(r, value=0., index_sub_run=-1)))

@@ -19,14 +19,13 @@ import argparse
 import logging
 import os
 from dataclasses import replace
-from typing import Sequence, Union
 from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
 
 import torch
 
 from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, DataPreparer, CorpusLoader, \
-    Settings, TrainingVariation, task_hash, set_random_seeds, named_variations, train, make_datasets
+    Settings, task_hash, set_random_seeds, named_variations, singleton_variation, train, make_datasets
 from bert_brain_paths import Paths
 
 
@@ -44,11 +43,8 @@ def progress_iterate(iterable, progress_bar):
 
 
 def run_variation(
-            set_name,
-            loss_tasks: Union[Sequence[str], TrainingVariation],
+            set_name: str,
             settings: Settings,
-            num_runs: int,
-            auxiliary_loss_tasks: Sequence[str],
             force_cache_miss: bool,
             device: torch.device,
             n_gpu: int,
@@ -63,7 +59,7 @@ def run_variation(
     #   settings, train_batch_size=int(settings.train_batch_size / settings.gradient_accumulation_steps))
 
     def io_setup():
-        hash_ = task_hash(loss_tasks)
+        hash_ = task_hash(settings)
         paths_ = Paths()
         paths_.model_path = os.path.join(paths_.model_path, set_name, hash_)
         paths_.result_path = os.path.join(paths_.result_path, set_name, hash_)
@@ -79,20 +75,10 @@ def run_variation(
 
     corpus_loader, paths = io_setup()
 
-    load_from = None
-    if isinstance(loss_tasks, TrainingVariation):
-        load_from = loss_tasks.load_from
-        loss_tasks = set(loss_tasks.loss_tasks)
-    else:
-        loss_tasks = set(loss_tasks)
-
-    loss_tasks.update(auxiliary_loss_tasks)
-    settings = replace(settings, loss_tasks=loss_tasks)
-
     if progress_bar is None:
-        progress_bar = tqdm(total=num_runs, desc='Runs')
+        progress_bar = tqdm(total=settings.num_runs, desc='Runs')
 
-    for index_run in progress_iterate(range(num_runs), progress_bar):
+    for index_run in progress_iterate(range(settings.num_runs), progress_bar):
 
         output_dir = os.path.join(paths.result_path, 'run_{}'.format(index_run))
 
@@ -116,19 +102,22 @@ def run_variation(
 
         train_data, validation_data, test_data = make_datasets(
             data_preparer.prepare(data),
-            loss_tasks,
+            settings.all_loss_tasks,
             data_id_in_batch_keys=settings.data_id_in_batch_keys,
             filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
             is_one_task_at_a_time=settings.is_one_task_at_a_time)
 
         load_from_path = None
-        if load_from is not None:
+        if settings.load_from is not None:
             # noinspection PyCallingNonCallable
-            load_from_index_run = index_run if load_from.map_run is None else load_from.map_run(index_run)
+            (load_from_variation, _), load_from_settings = singleton_variation(settings.load_from)
+            # noinspection PyCallingNonCallable
+            load_from_index_run = index_run \
+                if settings.load_from_run_map is None else settings.load_from_run_map(index_run)
             load_from_path = os.path.join(
                 Paths().model_path,
-                load_from.variation_name,
-                task_hash(load_from.loss_tasks),
+                load_from_variation,
+                task_hash(load_from_settings),
                 'run_{}'.format(load_from_index_run))
 
         train(settings, output_dir, completion_file_path, output_model_path,
@@ -170,20 +159,30 @@ def main():
                 break
 
         paths_ = Paths()
-        model_path = os.path.join(paths_.model_path, args.name)
-        result_path = os.path.join(paths_.result_path, args.name)
+
+        variation_name = args.name
+        try:
+            named_settings = named_variations(args.name)
+            for k in named_settings:
+                variation_name = k[0]
+                break
+        except (TypeError, KeyError, ValueError):
+            pass
+
+        model_path = os.path.join(paths_.model_path, variation_name)
+        result_path = os.path.join(paths_.result_path, variation_name)
         if os.path.exists(model_path):
             rmtree(model_path)
         if os.path.exists(result_path):
             rmtree(result_path)
         sys.exit(0)
 
-    training_variations_, settings_, num_runs_, min_memory_, aux_loss_tasks = named_variations(args.name)
-    if args.no_cuda:
-        settings_.no_cuda = True
-
-    progress_bar = tqdm(total=len(training_variations_) * num_runs_, desc='Runs')
-    for training_variation in training_variations_:
+    named_settings = named_variations(args.name)
+    progress_bar = tqdm(total=sum(named_settings[k].num_runs for k in named_settings), desc='Runs')
+    for variation, training_variation in named_settings:
+        settings_ = named_settings[(variation, training_variation)]
+        if args.no_cuda:
+            settings_ = replace(settings_, no_cuda=True)
 
         if settings_.optimization_settings.local_rank == -1 or settings_.no_cuda:
             if not torch.cuda.is_available or settings_.no_cuda:
@@ -208,9 +207,7 @@ def main():
             settings_.optimization_settings.fp16))
 
         with cuda_auto_empty_cache_context(device):
-            run_variation(
-                args.name, training_variation, settings_, num_runs_, aux_loss_tasks, args.force_cache_miss,
-                device, n_gpu, progress_bar=progress_bar)
+            run_variation(variation, settings_, args.force_cache_miss, device, n_gpu, progress_bar=progress_bar)
 
     progress_bar.close()
 
