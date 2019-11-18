@@ -535,6 +535,13 @@ class LazyBertOutputBatch:
     def __setitem__(self, key, value):
         self.batch[key] = value
 
+    def __contains__(self, item):
+        try:
+            _ = self[item]
+            return True
+        except KeyError:
+            return False
+
     def __getitem__(self, item):
         if item in self.batch:
             return self.batch[item]

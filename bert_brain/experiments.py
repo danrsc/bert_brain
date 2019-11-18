@@ -23,11 +23,11 @@ def _internal_hash_update(hash_, settings: Settings):
     hash_.update('standard_losses'.encode())
     for loss_task in sorted(settings.loss_tasks):
         hash_.update(loss_task.encode())
-    hash_.update('inner_maml_losses'.encode())
-    for loss_task in sorted(settings.inner_maml_loss_tasks):
+    hash_.update('meta_learn_no_gradient_losses'.encode())
+    for loss_task in sorted(settings.meta_learn_no_gradient_loss_tasks):
         hash_.update(loss_task.encode())
-    hash_.update('outer_maml_losses'.encode())
-    for loss_task in sorted(settings.output_maml_loss_tasks):
+    hash_.update('meta_learn_gradient_losses'.encode())
+    for loss_task in sorted(settings.meta_learn_gradient_loss_tasks):
         hash_.update(loss_task.encode())
     if settings.load_from is not None:
         hash_.update('load_from')
@@ -178,6 +178,32 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=2,
                 num_final_epochs_train_prediction_heads_only=0),
             loss_tasks={'hp_fmri_I'},
+            num_runs=4)
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
+        return settings
+    elif name == 'hp_fmri_I_reptile':
+        settings = Settings(
+            corpora=(CorpusTypes.HarryPotterCorpus(
+                fmri_subjects=['I'],
+                fmri_sentence_mode='ignore',
+                fmri_window_duration=10.1,
+                fmri_minimum_duration_required=9.6,
+                group_meg_sentences_like_fmri=False,
+                meg_subjects=[]),),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=2,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0),
+            meta_learn_gradient_loss_tasks={'hp_fmri_I'},
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            batch_kind='single_task_random',
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -445,6 +471,36 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
 
         settings.critics[ResponseKind.hp_meg] = CriticSettings(
             critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        return settings
+    elif name == 'hp_fmri_reptile':
+        settings = Settings(
+            corpora=(CorpusTypes.HarryPotterCorpus(
+                fmri_subjects=None,  # None means all
+                fmri_sentence_mode='ignore',
+                fmri_window_duration=10.1,
+                fmri_minimum_duration_required=9.6,
+                fmri_kind='rank_clustered',
+                fmri_smooth_factor=None,
+                group_meg_sentences_like_fmri=False,
+                meg_subjects=[],
+                meg_kind='direct_rank_clustered_percentile_75_25_ms')),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=2,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0),
+            meta_learn_gradient_loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects),
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            weight_losses_by_inverse_example_counts=False,
+            batch_kind='single_task_random',
+            num_runs=4)
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            untransformed_pooled_linear=KeyedLinear(
+                ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
         return settings
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

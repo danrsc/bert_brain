@@ -295,7 +295,7 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                 group_data, word_ids = self._get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
                 batch[k[0]] = group_data.to(predictions[k[0]].device)
                 if word_ids is not None:
-                    batch[(k[0], 'word_ids')] = word_ids
+                    batch[(k[0], 'word_ids')] = torch.as_tensor(word_ids, device=predictions[k[0]].device)
 
     def value_shape(self, field):
         if field not in self._field_specs:
@@ -378,9 +378,15 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         word_ids = self._word_ids[field][data_ids] if field in self._word_ids else None
         return data, word_ids
 
-    def __len__(self):
+    def length(self, task_filter=None):
         task_indices = self.task_indices()
+        if task_filter is not None:
+            return sum(sum(len(task_item_list) for task_item_list in task_indices[task])
+                       for task in task_indices if task in task_filter or self.response_data_kind(task) in task_filter)
         return sum(sum(len(task_item_list) for task_item_list in task_indices[task]) for task in task_indices)
+
+    def __len__(self):
+        return self.length()
 
     def task_indices(self):
         indices = OrderedDict()
@@ -443,9 +449,13 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
 
 class BatchOneTaskRandomSampler(torch.utils.data.Sampler):
 
-    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size):
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, task_filter=None):
         super().__init__(data_source)
         self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, "
@@ -477,9 +487,13 @@ class BatchOneTaskRandomSampler(torch.utils.data.Sampler):
 
 class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
 
-    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, batches_per_epoch):
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, batches_per_epoch, task_filter=None):
         super().__init__(data_source)
         self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, "
@@ -511,9 +525,13 @@ class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
 
 class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
 
-    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size):
+    def __init__(self, data_source: PreparedDataDatasetOneTaskAtATime, batch_size, task_filter=None):
         super().__init__(data_source)
         self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
                 batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, "

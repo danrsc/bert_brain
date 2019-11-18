@@ -35,7 +35,7 @@ class _HarryPotterWordFMRI:
 
 
 @dataclass(frozen=True)
-class _MEGKindProperties:
+class _DataKindProperties:
     file_name: str
     is_preprocessed: bool = False
 
@@ -56,7 +56,7 @@ class HarryPotterCorpus(CorpusBase):
             self,
             path: Optional[str] = None,
             meg_subjects: Optional[Sequence[str]] = None,
-            meg_kind: str = 'pca',
+            meg_kind: str = 'leila',
             separate_meg_axes: Optional[Union[str, Sequence[str]]] = None,
             group_meg_sentences_like_fmri: bool = False,
             fmri_subjects: Optional[Sequence[str]] = None,
@@ -65,7 +65,8 @@ class HarryPotterCorpus(CorpusBase):
             fmri_skip_end_trs: int = 15,
             fmri_window_duration: float = 8.,
             fmri_minimum_duration_required: float = 7.8,
-            fmri_sentence_mode: str = 'multiple'):
+            fmri_sentence_mode: str = 'multiple',
+            fmri_kind: str = 'raw'):
         """
         Loader for Harry Potter data
         Args:
@@ -129,6 +130,7 @@ class HarryPotterCorpus(CorpusBase):
             minimum_duration_required=fmri_minimum_duration_required,
             use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
             sentence_mode=fmri_sentence_mode)
+        self.fmri_kind = fmri_kind
 
     @staticmethod
     def _add_fmri_example(
@@ -176,37 +178,47 @@ class HarryPotterCorpus(CorpusBase):
         return words
 
     @staticmethod
+    def _fmri_kind_properties(fmri_kind):
+        kind_properties = {
+            'raw': _DataKindProperties('', is_preprocessed=False),
+            'rank_clustered': _DataKindProperties('harry_potter_fmri_rank_clustered.npz', is_preprocessed=True)}
+        if fmri_kind not in kind_properties:
+            raise ValueError('Unknown fmri_kind: {}'.format(fmri_kind))
+
+        return kind_properties[fmri_kind]
+
+    @staticmethod
     def _meg_kind_properties(meg_kind):
         kind_properties = {
-            'pca_label': _MEGKindProperties('harry_potter_meg_100ms_pca.npz'),
-            'mean_label': _MEGKindProperties('harry_potter_meg_100ms_mean_flip.npz'),
-            'pca_sensor': _MEGKindProperties('harry_potter_meg_sensor_pca_35_word_mean.npz'),
-            'pca_sensor_full': _MEGKindProperties('harry_potter_meg_sensor_pca_35_word_full.npz'),
-            'ica_sensor_full': _MEGKindProperties('harry_potter_meg_sensor_ica_35_word_full.npz'),
-            'leila': _MEGKindProperties('harry_potter_meg_sensor_25ms_leila.npz'),
-            'rank_clustered_kmeans_L2_A': _MEGKindProperties(
+            'pca_label': _DataKindProperties('harry_potter_meg_100ms_pca.npz'),
+            'mean_label': _DataKindProperties('harry_potter_meg_100ms_mean_flip.npz'),
+            'pca_sensor': _DataKindProperties('harry_potter_meg_sensor_pca_35_word_mean.npz'),
+            'pca_sensor_full': _DataKindProperties('harry_potter_meg_sensor_pca_35_word_full.npz'),
+            'ica_sensor_full': _DataKindProperties('harry_potter_meg_sensor_ica_35_word_full.npz'),
+            'leila': _DataKindProperties('harry_potter_meg_sensor_25ms_leila.npz'),
+            'rank_clustered_kmeans_L2_A': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_kmeans_L2_A.npz', is_preprocessed=True),
-            'rank_clustered_kmeans': _MEGKindProperties(
+            'rank_clustered_kmeans': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_kmeans_L2.npz', is_preprocessed=True),
-            'rank_clustered_L2': _MEGKindProperties(
+            'rank_clustered_L2': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_L2.npz', is_preprocessed=True),
-            'rank_clustered_median': _MEGKindProperties(
+            'rank_clustered_median': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_median.npz', is_preprocessed=True),
-            'rank_clustered_mean': _MEGKindProperties(
+            'rank_clustered_mean': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_mean.npz', is_preprocessed=True),
-            'rank_clustered_rms': _MEGKindProperties(
+            'rank_clustered_rms': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_rms.npz', is_preprocessed=True),
-            'rank_clustered_counts': _MEGKindProperties(
+            'rank_clustered_counts': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_counts.npz', is_preprocessed=True),
-            'rank_clustered_mean_time_slice_ms_100_A': _MEGKindProperties(
+            'rank_clustered_mean_time_slice_ms_100_A': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_mean_time_slice_ms_100_A.npz', is_preprocessed=True),
-            'rank_clustered_mean_whole_A': _MEGKindProperties(
+            'rank_clustered_mean_whole_A': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_mean_whole_A.npz', is_preprocessed=True),
-            'rank_clustered_sum_time_slice_ms_100_A': _MEGKindProperties(
+            'rank_clustered_sum_time_slice_ms_100_A': _DataKindProperties(
                 'harry_potter_meg_rank_clustered_sum_time_slice_ms_100_A.npz', is_preprocessed=True),
-            'direct_rank_clustered_sum_25_ms': _MEGKindProperties(
+            'direct_rank_clustered_sum_25_ms': _DataKindProperties(
                 'harry_potter_meg_direct_rank_clustered_sum_25.npz', is_preprocessed=True),
-            'direct_rank_clustered_percentile_75_25_ms': _MEGKindProperties(
+            'direct_rank_clustered_percentile_75_25_ms': _DataKindProperties(
                 'harry_potter_meg_direct_rank_clustered_percentile_75_25.npz', is_preprocessed=True),
         }
 
@@ -219,12 +231,28 @@ class HarryPotterCorpus(CorpusBase):
     def meg_path(self):
         return os.path.join(self.path, HarryPotterCorpus._meg_kind_properties(self.meg_kind).file_name)
 
+    @property
+    def fmri_path(self):
+        if not HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed:
+            assert(HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).file_name is None
+                   or len(HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).file_name) == 0)
+            return os.path.join(self.path, 'fmri', '{subject}', 'funct', '{run}', 'ars{run:03}a001.hdr')
+        return os.path.join(self.path, HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).file_name)
+
     def _run_info(self, index_run):
-        if HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed:
+        if HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed \
+                or HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed:
             return index_run % 4
         return -1
 
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
+
+        if (HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed
+                != HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed
+                and (self.fmri_subjects is None or len(self.fmri_subjects) > 0)
+                and (self.meg_subjects is None or len(self.meg_subjects) > 0)):
+            raise ValueError(
+                'Currently we only support data kinds all being preprocessed or all not being preprocessed')
 
         data = OrderedDict()
 
@@ -538,7 +566,41 @@ class HarryPotterCorpus(CorpusBase):
 
         return data, block_metadata, None, word_ids
 
-    def _read_harry_potter_fmri_files(self):
+    def _read_preprocessed_fmri_files(self, run_info):
+        with np.load(self.fmri_path, allow_pickle=True) as loaded:
+            assert (run_info >= 0)
+            subjects = set()
+            blocks = set()
+            for key in loaded:
+                if key.startswith('data_'):
+                    block = int(key[key.rindex('_') + 1:])
+                    if not key.endswith('_hold_out_{}'.format(block)):
+                        raise ValueError('Unexpected key {} in {}'.format(key, self.fmri_path))
+                    subject = key[len('data_'):-len('_hold_out_{}'.format(block))]
+                    subjects.add(subject)
+                    blocks.add(block)
+            subjects = list(sorted(subjects))
+            blocks = list(sorted(blocks))
+            held_out_block = blocks[run_info]
+
+            if self.fmri_subjects is not None:
+                subjects = [s for s in subjects if s in self.fmri_subjects]
+
+            run_lengths = loaded['run_lengths']
+            splits = np.cumsum(run_lengths)[:-1]
+
+            data = OrderedDict()
+            masks = OrderedDict()
+            for subject in subjects:
+                data[subject] = np.split(
+                    loaded['data_{}_hold_out_{}'.format(subject, held_out_block)], splits)
+                masks[subject] = get_mask_for_subject(subject)
+            return data, masks
+
+    def _read_harry_potter_fmri_files(self, run_info):
+        if HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed:
+            return self._read_preprocessed_fmri_files(run_info)
+
         # noinspection PyPep8
         subject_runs = dict(
             F=[4, 5, 6, 7],
@@ -558,8 +620,7 @@ class HarryPotterCorpus(CorpusBase):
         if isinstance(subjects, str):
             subjects = [subjects]
 
-        path_fmt = os.path.join(self.path, 'fmri', '{subject}', 'funct', '{run}', 'ars{run:03}a001.hdr')
-
+        path_fmt = self.fmri_path
         all_subject_data = OrderedDict()
         masks = OrderedDict()
 
@@ -658,7 +719,7 @@ class HarryPotterCorpus(CorpusBase):
 
     def _read_fmri(self, run_info, example_manager: CorpusExampleUnifier, fmri_examples):
 
-        data, spatial_masks = self._read_harry_potter_fmri_files()
+        data, spatial_masks = self._read_harry_potter_fmri_files(run_info)
 
         # we assume that the runs are the same across subjects below. assert it here
         run_lengths = None
@@ -676,12 +737,15 @@ class HarryPotterCorpus(CorpusBase):
             if self.fmri_smooth_factor is not None:
                 for idx in range(len(subject_data)):
                     # for each example, apply a gaussian filter spatially
+                    if np.ndim(subject_data[idx] != 4):
+                        raise ValueError('Expected raw data for application of spatial smoothing')
                     for ax_idx in range(len(subject_data[idx])):
                         subject_data[idx][ax_idx] = gaussian_filter(
                             subject_data[idx][ax_idx],
                             sigma=self.fmri_smooth_factor, order=0, mode='reflect', truncate=4.0)
             # apply spatial mask
-            data[subject] = [d[:, spatial_masks[subject]] for d in subject_data]
+            if np.ndim(subject_data[0]) == 4:
+                data[subject] = [d[:, spatial_masks[subject]] for d in subject_data]
 
         active_image_indices = list()
 
@@ -720,10 +784,26 @@ class HarryPotterCorpus(CorpusBase):
 
             assert(added is not None)
             _, included_indices = added
-            assert(example.tr_target == len(word_ids))
-            word_ids.append(np.array(list(example.full_sentences[i].index_in_all_words for i in included_indices)))
+            for tr in example.tr_target:
+                example_word_ids = np.array(
+                    list(example.full_sentences[i].index_in_all_words for i in included_indices))
+                if tr >= 0:
+                    while len(word_ids) <= tr:
+                        word_ids.append(None)
+                    if word_ids[tr] is None:
+                        word_ids[tr] = example_word_ids
+                    else:
+                        assert(np.array_equal(word_ids[tr], example_word_ids))
 
-        return data, word_ids
+        for example_word_ids in word_ids:
+            assert(example_word_ids is not None)
+
+        max_word_ids = max(len(w) for w in word_ids)
+        word_ids_ = np.full((len(word_ids), max_word_ids), -1)
+        for i in range(len(word_ids)):
+            word_ids_[i, :len(word_ids[i])] = word_ids[i]
+
+        return data, word_ids_
 
 
 def read_harry_potter_story_features(path):

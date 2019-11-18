@@ -387,7 +387,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
                 group_data, word_ids = self._get_data_for_data_ids(k[0], predictions[k].cpu().numpy())
                 batch[k[0]] = group_data.to(predictions[k[0]].device)
                 if word_ids is not None:
-                    batch[(k[0], 'word_ids')] = word_ids
+                    batch[(k[0], 'word_ids')] = torch.as_tensor(word_ids, predictions[k[0]].device)
 
     def __len__(self):
         for k in self._example_tensors:

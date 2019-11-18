@@ -222,7 +222,9 @@ class KeyedLinear(KeyedBase):
             else:
                 p = p.view(p.size()[:1] + self.output_key_to_shape[k])
             result[k] = p
-            if (self.apply_at_most_one_data_id == 'if_no_target' and k not in batch) or self.apply_at_most_one_data_id:
+
+            if (self.apply_at_most_one_data_id == 'if_no_target' and k not in batch and (k, 'data_ids') in batch) \
+                    or self.apply_at_most_one_data_id is True:
                 data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
                 indicator_valid = data_ids >= 0
                 result[k] = result[k][indicator_valid]

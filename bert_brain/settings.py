@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, fields as dataclass_fields
+from dataclasses import dataclass, field
 from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT
 
 import numpy as np
@@ -195,18 +195,31 @@ class Settings:
     # reporting, but is otherwise ignored by training.
     loss_tasks: set = field(default_factory=set)
 
-    # fields which should be used in a Model Agnostic Meta-Learning (MAML) setup. If either inner_maml_loss_tasks or
-    # outer_maml_loss_tasks is not empty, then both must be non-empty. A task is allowed to appear in both. If either
-    # is non-empty, then settings.loss_tasks must be empty. When these are specified, MAML learning is used instead
-    # of standard training
-    inner_maml_loss_tasks: set = field(default_factory=set)
-    output_maml_loss_tasks: set = field(default_factory=set)
+    # Training can use a meta learning mode similar to Reptile (https://arxiv.org/abs/1803.02999) or First-Order
+    # Model Agnostic Meta Learning (FOMAML) depending on the precise configuration. To turn on meta-learning mode,
+    # set meta_learn_gradient_loss_tasks to non-empty. If meta_learn_gradient_loss_tasks is non-empty, then loss_tasks
+    # must be empty. Training works by running num_meta_learn_no_gradient_samples batches of the tasks which appear
+    # in meta_learn_no_gradient_loss_tasks, followed by num_meta_learn_gradient_samples of the tasks which appear in
+    # meta_learn_gradient_loss_tasks. The meta-gradient is computed by storing the parameter values just before the
+    # batches of meta_learn_gradient_loss_tasks and subtracting the parameter values after those batches from the
+    # parameter values before those batches. Reptile can be set up by putting all tasks into
+    # meta_learn_gradient_loss_tasks. FOMAML can be set up by putting all tasks into both
+    # meta_learn_no_gradient_loss_tasks and meta_learn_gradient_loss_tasks and setting num_meta_learn_gradient_samples
+    # to 1 and num_meta_learn_no_gradient_samples to k > 1. In the FOMAML framework, the meta_learn_gradient_loss_tasks
+    # would be validation tasks (but note that like Reptile, we don't do a train/test split here). We also consider
+    # an algorithm inspired by FOMAML which is meant for transfer learning from higher SnR to lower SnR tasks
+    # where we put the high SnR tasks into meta_learn_no_gradient_loss_tasks and low SnR tasks into
+    # meta_learn_gradient_loss_tasks
+    meta_learn_no_gradient_loss_tasks: set = field(default_factory=set)
+    meta_learn_gradient_loss_tasks: set = field(default_factory=set)
+    num_meta_learn_no_gradient_samples: int = 10
+    num_meta_learn_gradient_samples: int = 10
 
     @property
     def all_loss_tasks(self):
         all_loss_tasks = set(self.loss_tasks)
-        all_loss_tasks.update(self.inner_maml_loss_tasks)
-        all_loss_tasks.update(self.output_maml_loss_tasks)
+        all_loss_tasks.update(self.meta_learn_no_gradient_loss_tasks)
+        all_loss_tasks.update(self.meta_learn_gradient_loss_tasks)
         return all_loss_tasks
 
     # when specified, this acts as a key to determine a partially pre-trained model which should be used as a starting
