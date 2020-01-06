@@ -67,13 +67,16 @@ class LinearContextualParameterGeneration(GraphPart):
                 placeholder_name_to_fields, field_shapes, num_response_data_fields)
 
     def instantiate(self, name_to_num_channels):
+        # noinspection PyTypeChecker
         for key in self.inner_graph_parts:
+            # noinspection PyUnresolvedReferences
             graph_part_num_channels = self.inner_graph_parts[key].instantiate(name_to_num_channels)
             for k in graph_part_num_channels:
                 if k in name_to_num_channels:
                     raise ValueError('Duplicate output: {}'.format(k))
                 name_to_num_channels[k] = graph_part_num_channels[k]
 
+        # noinspection PyTypeChecker
         self.inner_graph_parts = torch.nn.ModuleDict(
             modules=[(k, self.inner_graph_parts[k]) for k in self.inner_graph_parts])
 
@@ -123,6 +126,7 @@ class LinearContextualParameterGeneration(GraphPart):
 
     def forward(self, batch):
         context_id = batch[self.context_id_source_name]
+        # noinspection PyTypeChecker
         if not torch.all(context_id == context_id[0]):
             raise ValueError('Expected a single context_id per batch')
         context_embedding = self.embedding(context_id[0])

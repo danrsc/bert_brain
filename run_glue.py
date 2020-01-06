@@ -615,14 +615,18 @@ def from_fine_tuned(model_path, map_location='default_map_location', *inputs, **
     start_prefix = ''
     if not hasattr(model, 'bert') and any(s.startswith('bert.') for s in state_dict.keys()):
         start_prefix = 'bert.'
+    # noinspection PyTypeChecker
     load(model, prefix=start_prefix)
     if len(missing_keys) > 0:
+        # noinspection PyUnresolvedReferences
         logger.info("Weights of {} not initialized from pretrained model: {}".format(
             model.__class__.__name__, missing_keys))
     if len(unexpected_keys) > 0:
+        # noinspection PyUnresolvedReferences
         logger.info("Weights from pretrained model not used in {}: {}".format(
             model.__class__.__name__, unexpected_keys))
     if len(error_msgs) > 0:
+        # noinspection PyUnresolvedReferences
         raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
             model.__class__.__name__, "\n\t".join(error_msgs)))
     return model
@@ -658,7 +662,9 @@ def _run_glue_for_variation(
         num_labels=len(processor.get_labels()))
 
     if settings.optimization_settings.fp16:
+        # noinspection PyUnresolvedReferences
         model.half()
+    # noinspection PyUnresolvedReferences
     model.to(device)
     if settings.optimization_settings.local_rank != -1:
         try:
@@ -684,6 +690,7 @@ def _run_glue_for_variation(
                     / settings.optimization_settings.gradient_accumulation_steps)
                 * settings.optimization_settings.num_train_epochs)
         if settings.optimization_settings.local_rank != -1:
+            # noinspection PyUnresolvedReferences
             num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
 
         param_optimizer = list(model.named_parameters())
@@ -719,7 +726,6 @@ def _run_glue_for_variation(
                                  t_total=num_train_optimization_steps)
 
     global_step = 0
-    nb_tr_steps = 0
     tr_loss = 0
     if train_features is not None:
         logger.info("***** Running training *****")
@@ -780,6 +786,7 @@ def _run_glue_for_variation(
                     if settings.optimization_settings.fp16:
                         # modify learning rate with special warm up BERT uses
                         # if args.fp16 is False, BertAdam is used that handles this automatically
+                        # noinspection PyUnresolvedReferences
                         lr_this_step = settings.optimization_settings.learning_rate \
                                        * warmup_linear.get_lr(
                                             global_step, settings.optimization_settings.warmup_proportion)
@@ -792,6 +799,7 @@ def _run_glue_for_variation(
     task_model_path = os.path.join(run_model_path, task_name, '{:.0e}_{}'.format(
         settings.optimization_settings.learning_rate, index_sub_run))
 
+    # noinspection PyUnresolvedReferences
     if train_features is not None \
             and (settings.optimization_settings.local_rank == -1 or torch.distributed.get_rank() == 0):
         # Save a trained model, configuration and tokenizer
@@ -815,6 +823,7 @@ def _run_glue_for_variation(
             task_model_path, num_labels=len(processor.get_labels()))
     model.to(device)
 
+    # noinspection PyUnresolvedReferences
     if eval_features is not None \
             and (settings.optimization_settings.local_rank == -1 or torch.distributed.get_rank() == 0):
         logger.info("***** Running evaluation *****")
@@ -1003,6 +1012,7 @@ def main():
 
     if args.server_ip and args.server_port:
         # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
+        # noinspection PyUnresolvedReferences
         import ptvsd
         print("Waiting for debugger attach")
         ptvsd.enable_attach(address=(args.server_ip, args.server_port), redirect_output=True)
@@ -1089,6 +1099,7 @@ def main():
         device = torch.device("cuda", settings.optimization_settings.local_rank)
         n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        # noinspection PyUnresolvedReferences
         torch.distributed.init_process_group(backend='nccl')
 
     logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(

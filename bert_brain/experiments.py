@@ -7,16 +7,73 @@ from typing import Union, Iterable, Mapping, Tuple
 
 import numpy as np
 import torch
+import torch.cuda
 
 from .common import SwitchRemember
 from .data_sets import ResponseKind, CorpusTypes, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, preprocess_fork_no_cluster_to_disk, \
     PreprocessQuantileDigitize
-from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration
+from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration, PooledFromSequence, \
+    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention
 from .settings import Settings, OptimizationSettings, CriticSettings
 
 
 __all__ = ['task_hash', 'set_random_seeds', 'iterate_powerset', 'named_variations', 'singleton_variation']
+
+
+def superglue_heads(corpus, sequence_key=None, pooled_key=None):
+
+    if pooled_key is None:
+        pooled_key = ('bert', 'pooled')
+    if sequence_key is None:
+        sequence_key = ('bert', 'sequence')
+
+    response_key = type(corpus).response_key()
+
+    head = OrderedDict()
+    critic = OrderedDict()
+    if isinstance(corpus, CorpusTypes.CommitmentBank):
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
+        critic[response_key] = CriticSettings(
+            critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=4))
+        return head, critic
+    if isinstance(corpus, (CorpusTypes.BooleanQuestions, CorpusTypes.RecognizingTextualEntailment)):
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
+        critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        return head, critic
+    elif isinstance(corpus, CorpusTypes.WordInContext):
+        head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokens(
+            2,
+            response_key, 'data_ids',
+            '{}_concat'.format(response_key),
+            sequence_key)
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            '{}_concat'.format(response_key), is_sequence=False,
+            output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
+        critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        return head, critic
+    elif isinstance(
+            corpus,
+            (CorpusTypes.ChoiceOfPlausibleAlternatives,
+             CorpusTypes.ReadingComprehensionWithCommonSenseReasoning,
+             CorpusTypes.MultiSentenceReadingComprehension)):
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            pooled_key, is_sequence=False, output_key_to_shape={
+                '{}_choice'.format(response_key): 1}, apply_at_most_one_data_id=True)
+        head['{}_mc'.format(response_key)] = GroupMultipart(
+            None, 'multipart_id', response_key, '{}_choice'.format(response_key))
+        critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        return head, critic
+    elif isinstance(corpus, CorpusTypes.WinogradSchemaChallenge):
+        head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
+            2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
+            output_key_to_shape={response_key: 1})
+        critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        return head, critic
+    else:
+        raise ValueError('Unknown corpus type: {}'.format(type(corpus)))
 
 
 def _internal_hash_update(hash_, settings: Settings):
@@ -52,6 +109,7 @@ def set_random_seeds(seed, index_run, n_gpu):
     random.seed(seed)
     torch.manual_seed(seed)
     if n_gpu > 0:
+        # noinspection PyUnresolvedReferences
         torch.cuda.manual_seed_all(seed)
     return seed
 
@@ -481,7 +539,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 fmri_minimum_duration_required=9.6,
                 fmri_kind='rank_clustered',
                 fmri_smooth_factor=None,
-                group_meg_sentences_like_fmri=False,
+                group_meg_sentences_like_fmri=True,
                 meg_subjects=[],
                 meg_kind='direct_rank_clustered_percentile_75_25_ms')),
             optimization_settings=OptimizationSettings(
@@ -492,15 +550,118 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             weight_losses_by_inverse_example_counts=False,
-            batch_kind='single_task_random',
+            batch_kind=('single_task_uniform', 100),
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
-            PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
-            PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode=None,
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
             untransformed_pooled_linear=KeyedLinear(
                 ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+            critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=2))
+        return settings
+    elif name == 'hp_fmri_meg_meta':
+        settings = Settings(
+            corpora=(CorpusTypes.HarryPotterCorpus(
+                fmri_subjects=None,  # None means all
+                fmri_sentence_mode='ignore',
+                fmri_window_duration=10.1,
+                fmri_minimum_duration_required=9.6,
+                fmri_kind='rank_clustered',
+                fmri_smooth_factor=None,
+                group_meg_sentences_like_fmri=True,
+                meg_subjects=None,  # None means all
+                meg_kind='direct_rank_clustered_percentile_75_25_ms')),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=20,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0),
+            # loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects),
+            meta_learn_gradient_loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects).union(
+                'hp_meg_{}'.format(s) for s in hp_meg_subjects),
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            weight_losses_by_inverse_example_counts=False,
+            batch_kind=('single_task_uniform', 100),
+            num_runs=4)
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode=None,
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
+        settings.preprocessors[ResponseKind.hp_meg] = [
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode='content',
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
+        # settings.common_graph_parts = OrderedDict(
+        #     bottleneck=KeyedLinear(
+        #         ('bert', 'sequence', 'all'), is_sequence=True,
+        #         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+        #         should_norm=True))
+
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 3,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'), is_sequence=True,
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                        should_norm=True))),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+            'sequence_all_bottleneck', is_sequence=True, targets=ResponseKind.hp_meg))
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinear(
+            'pooled_all_bottleneck',
+            is_sequence=False,
+            apply_at_most_one_data_id='if_no_target',
+            targets=ResponseKind.hp_fmri))
+        settings.critics[ResponseKind.hp_meg] = CriticSettings(
+            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
+            critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=2))
+        return settings
+    elif name == 'superglue':
+        settings = Settings(
+            corpora=(
+                CorpusTypes.BooleanQuestions(),
+                CorpusTypes.CommitmentBank(),
+                CorpusTypes.ChoiceOfPlausibleAlternatives(),
+                # CorpusTypes.MultiSentenceReadingComprehension(),
+                # CorpusTypes.ReadingComprehensionWithCommonSenseReasoning(),
+                CorpusTypes.RecognizingTextualEntailment(),
+                CorpusTypes.WinogradSchemaChallenge(),
+                CorpusTypes.WordInContext()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=2,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0),
+            loss_tasks=set(),
+            # loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects),
+            # meta_learn_gradient_loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects).union(
+            #     'hp_meg_{}'.format(s) for s in hp_meg_subjects),
+            # num_meta_learn_gradient_samples=10,
+            # num_meta_learn_no_gradient_samples=0,
+            weight_losses_by_inverse_example_counts=False,
+            batch_kind=('single_task_uniform', 100),
+            num_runs=4)
+        for corpus in settings.corpora:
+            heads, critics = superglue_heads(
+                corpus, sequence_key=('bert', 'sequence'), pooled_key=('bert', 'pooled'))
+            settings.head_graph_parts.update(heads)
+            settings.critics.update(critics)
+            for k in critics:
+                settings.loss_tasks.add(k)
         return settings
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

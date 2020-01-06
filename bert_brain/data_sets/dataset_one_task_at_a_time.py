@@ -123,7 +123,6 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
         self._multipart_indices = dict()
 
         for data_set_id, data_key in enumerate(prepared_data):
-
             # add a special field to track which data-set
             self._example_tensors[data_key] = OrderedDict()
             self._example_tensors[data_key][PreparedDataDatasetOneTaskAtATime.data_set_id_field] = list()
@@ -187,6 +186,7 @@ class PreparedDataDatasetOneTaskAtATime(torch.utils.data.Dataset):
                                 if not is_added:
                                     # could happen if there is a conflict between response_data and example fields
                                     raise ValueError('Field name conflict: {}'.format(field))
+                            if field not in self._example_tensors[data_key]:
                                 self._example_tensors[data_key][field] = list()
 
                 # add the current example
@@ -481,8 +481,13 @@ class BatchOneTaskRandomSampler(torch.utils.data.Sampler):
         for batch in batches:
             yield batch
 
+    def true_div_len(self):
+        return (
+            sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
+            / self.batch_size)
+
     def __len__(self):
-        return sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
+        return int(self.true_div_len())
 
 
 class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
@@ -507,7 +512,8 @@ class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
 
     def __iter__(self):
         tasks = [task for task in self.task_indices]
-        for _ in range(self.batches_per_epoch):
+        idx = 0
+        while self.batches_per_epoch <= 0 or idx < self.batches_per_epoch:
             task = np.random.choice(tasks)
             task_sample = np.random.permutation(len(self.task_indices[task]))
             batch = list()
@@ -518,6 +524,10 @@ class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
                     break
                 batch.append(self.task_indices[task][i])
             yield np.concatenate(batch)
+            idx += 1
+
+    def true_div_len(self):
+        return self.batches_per_epoch
 
     def __len__(self):
         return self.batches_per_epoch
@@ -552,5 +562,10 @@ class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
             if len(batch) > 0:
                 yield np.concatenate(batch)
 
+    def true_div_len(self):
+        return (
+            sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
+            / self.batch_size)
+
     def __len__(self):
-        return sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
+        return int(self.true_div_len())

@@ -74,6 +74,7 @@ class MultiPredictionHead(torch.nn.Module):
                     raise ValueError('Duplicate output: {}'.format(k))
                 name_to_num_channels[k] = graph_part_num_channels[k]
 
+        # noinspection PyTypeChecker
         self.head_graph_parts = torch.nn.ModuleDict(modules=[(k, head_graph_parts[k]) for k in head_graph_parts])
 
     def forward(self, sequence_output, pooled_output, batch, dataset):
@@ -86,7 +87,9 @@ class MultiPredictionHead(torch.nn.Module):
             self.pooled_supplement)
 
         outputs = OrderedDict()
+        # noinspection PyTypeChecker
         for name in self.head_graph_parts:
+            # noinspection PyUnresolvedReferences
             head = self.head_graph_parts[name]
             head_outputs = head(batch_inputs)
 
@@ -179,6 +182,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
 
         super(BertMultiPredictionHead, self).__init__(config)
         self.bert = BertModel(config)
+        # noinspection PyUnresolvedReferences
         self.prediction_head = MultiPredictionHead(
             config.hidden_size,
             len(self.bert.encoder.layer),
@@ -196,6 +200,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         output_config_file = os.path.join(output_model_path, CONFIG_NAME)
         with open(output_config_file, 'w') as f:
             f.write(self.config.to_json_string())
+        # noinspection PyUnresolvedReferences
         self.prediction_head.save_kwargs(output_model_path)
 
     @classmethod
@@ -226,6 +231,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         if map_location == 'default_map_location':
             map_location = 'cpu' if not torch.cuda.is_available() else None
         state_dict = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location)
+        # noinspection PyUnresolvedReferences
         model.prediction_head.update_state_dict('prediction_head.', state_dict, saved_kwargs)
         model.load_state_dict(state_dict, strict=False)
         return model
@@ -371,7 +377,7 @@ class BertMultiPredictionHead(BertPreTrainedModel):
 
     def to(self, *args, **kwargs):
 
-        # noinspection PyProtectedMember
+        # noinspection PyProtectedMember, PyUnresolvedReferences
         device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
 
         if dtype is not None:

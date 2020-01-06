@@ -11,6 +11,7 @@ from scipy.io import loadmat
 from scipy.ndimage.filters import gaussian_filter
 
 import nibabel
+# noinspection PyUnresolvedReferences
 import cortex
 
 from ..common import MultiReplace
@@ -756,6 +757,7 @@ class HarryPotterCorpus(CorpusBase):
                     # keep only the first target if there are multiple
                     data_ids[i + ex_.offset] = len(active_list_)
                     active_list_.append(t[0])
+            assert(any(d >= 0 for d in data_ids))
             return dataclass_replace(ex_, tr_target=data_ids)
 
         # filter unused images

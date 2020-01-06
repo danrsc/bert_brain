@@ -177,9 +177,11 @@ def run_occlusion(variation_set_name, index_run=None):
                 device = torch.device('cuda:{}'.format(device_id))
             n_gpu = 1  # torch.cuda.device_count()
         else:
+            # noinspection PyUnresolvedReferences
             device = torch.device('cuda', settings.local_rank)
             n_gpu = 1
             # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+            # noinspection PyUnresolvedReferences
             torch.distributed.init_process_group(backend='nccl')
             if settings.optimization_settings.fp16:
                 settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
@@ -285,6 +287,7 @@ def write_occlusion_predictions(output_path, all_results):
         output_dict['critic_{}'.format(key)] = critic_type
         output_dict['sequence_type_{}'.format(key)] = sequence_type
         if critic_kwargs is not None:
+            # noinspection PyTypeChecker
             for critic_key in critic_kwargs:
                 output_dict['critic_kwarg_{}_{}'.format(key, critic_key)] = critic_kwargs[critic_key]
 

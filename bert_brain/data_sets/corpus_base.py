@@ -22,11 +22,12 @@ __all__ = ['CorpusBase', 'CorpusExampleUnifier']
 
 class CorpusExampleUnifier:
 
-    def __init__(self, spacy_tokenize_model: SpacyLanguage, bert_tokenizer: BertTokenizer):
+    def __init__(self, spacy_tokenize_model: SpacyLanguage, bert_tokenizer: BertTokenizer, max_sequence_length=None):
         self.spacy_tokenize_model = spacy_tokenize_model
         self.bert_tokenizer = bert_tokenizer
         self._examples = OrderedDict()
         self._seen_data_keys = OrderedDict()
+        self.max_sequence_length = max_sequence_length
 
     def add_example(
             self,
@@ -45,7 +46,9 @@ class CorpusExampleUnifier:
             multipart_id: Optional[int] = None,
             span_ids: Optional[Sequence[int]] = None,
             allow_new_examples: bool = True,
-            return_included_indices: bool = False) -> Union[
+            return_included_indices: bool = False,
+            allow_duplicates: bool = True,
+            auto_high_frequency_on_collision: bool = False) -> Union[
                 Optional[InputFeatures], Optional[Tuple[InputFeatures, np.array]]]:
         """
         Adds an example for the current data loader to return later. Simplifies the process of merging examples
@@ -89,6 +92,12 @@ class CorpusExampleUnifier:
                 not exist.
             return_included_indices: If True, then the indices into words determined by start, stop,
                 start_sequence_2, etc. are returned to the caller
+            allow_duplicates: If False and an example key already exists in the Corpus, then None is returned rather
+                than the existing example and the data_ids are not merged
+            auto_high_frequency_on_collision: If True and two examples have the same example keys but different
+                token_probabilities (because the case of the input words differs between the examples), then the
+                token_probabilities is set to
+                np.maximum(current_example.token_probabilities, new_example.token_probabilities)
         Returns:
             The InputFeatures instance associated with the example
         """
@@ -100,7 +109,8 @@ class CorpusExampleUnifier:
             start_sequence_3, stop_sequence_3,
             multipart_id,
             span_ids,
-            is_apply_data_id_to_entire_group)
+            is_apply_data_id_to_entire_group,
+            max_sequence_length=self.max_sequence_length)
 
         if example_key is None:
             example_key = tuple(input_features.token_ids)
@@ -111,16 +121,34 @@ class CorpusExampleUnifier:
             else:
                 return None
         else:
-            current = dataclasses.asdict(input_features)
-            have = dataclasses.asdict(self._examples[example_key])
-            assert(len(have) == len(current))
-            for k in have:
-                assert(k in current)
-                if k == 'unique_id' or k == 'data_ids':
-                    continue
-                else:
-                    # handles NaN, whereas np.array_equal does not
-                    np.testing.assert_array_equal(have[k], current[k])
+            check_collision = True
+            if (auto_high_frequency_on_collision
+                    and
+                    len(input_features.token_probabilities) == len(self._examples[example_key].token_probabilities)):
+                check_collision = False
+                if np.sum(input_features.token_probabilities) > np.sum(self._examples[example_key].token_probabilities):
+                    # overwrite the token-dependent input_features with the higher probability example
+                    current = dataclasses.asdict(input_features)
+                    del current['unique_id']
+                    del current['multipart_id']
+                    del current['data_ids']
+                    self._examples[example_key] = dataclasses.replace(self._examples[example_key], **current)
+
+            if check_collision:
+                current = dataclasses.asdict(input_features)
+                have = dataclasses.asdict(self._examples[example_key])
+                assert(len(have) == len(current))
+                for k in have:
+                    assert(k in current)
+                    if k == 'unique_id' or k == 'data_ids' or k == 'multipart_id':
+                        continue
+                    else:
+                        # handles NaN and various typing issues,
+                        # whereas np.array_equal does not
+                        np.testing.assert_array_equal(
+                            have[k], current[k], 'mismatch between duplicate example keys. {}'.format(k))
+            if not allow_duplicates:
+                return None
             if data_key is not None:
                 if isinstance(data_key, str):
                     data_key = [data_key]
@@ -266,7 +294,8 @@ class CorpusBase:
             spacy_tokenizer_model: SpacyLanguage,
             bert_tokenizer: BertTokenizer,
             paths_obj=None,
-            force_cache_miss=False):
+            force_cache_miss=False,
+            max_sequence_length=None):
 
         run_info = self._run_info(index_run)
 
@@ -279,7 +308,7 @@ class CorpusBase:
         if result is not None:
             return result
 
-        example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer)
+        example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer, max_sequence_length)
         result = self._load(run_info, example_manager)
         CorpusBase._populate_default_field_specs(result)
         save_to_cache(self.cache_path(run_info), result, run_info, self._bound_arguments)

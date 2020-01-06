@@ -3,11 +3,12 @@ from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn
+import torch.nn.functional
 from .graph_part import GraphPart
 
 
 __all__ = ['at_most_one_data_id', 'k_data_ids', 'GroupConcatFixedGroupSize', 'GroupPool',
-           'MarkedTokenConcatFixedNumTokens']
+           'MarkedTokenConcatFixedNumTokens', 'GroupMultipart']
 
 
 def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=False):
@@ -104,13 +105,16 @@ class GroupBase(GraphPart):
         self.groupby_prefixes = GroupBase._expand_placeholders(self.groupby_prefixes, placeholder_name_to_fields)
 
     def _get_group_ids(self, batch):
-        groupby_prefixes = [self.groupby_prefixes] if np.ndim(self.groupby_prefixes) == 0 else self.groupby_prefixes
-        all_group_ids = [batch[(groupby_prefix, self.groupby_suffix)] for groupby_prefix in groupby_prefixes]
-        for idx in range(1, len(all_group_ids)):
-            if not torch.equal(all_group_ids[0], all_group_ids[idx]):
-                raise ValueError('Inconsistent group ids cannot be used within the same instance of {}'.format(
-                    type(self)))
-        return all_group_ids[0]
+        if self.groupby_prefixes is not None:
+            groupby_prefixes = [self.groupby_prefixes] if np.ndim(self.groupby_prefixes) == 0 else self.groupby_prefixes
+            all_group_ids = [batch[(groupby_prefix, self.groupby_suffix)] for groupby_prefix in groupby_prefixes]
+            for idx in range(1, len(all_group_ids)):
+                if not torch.equal(all_group_ids[0], all_group_ids[idx]):
+                    raise ValueError('Inconsistent group ids cannot be used within the same instance of {}'.format(
+                        type(self)))
+            return all_group_ids[0]
+        else:
+            return batch[self.groupby_suffix]
 
     def _num_channels(self, name_to_num_channels):
         raise NotImplementedError('{} does not implement _num_channels'.format(type(self)))
@@ -335,3 +339,37 @@ class MarkedTokenConcatFixedNumTokens(GroupBase):
                 [torch.unsqueeze(batch[self.pooled_source_name], dim=1), gathered_outputs], dim=1)
 
         return gathered_outputs, marker_ids, torch.arange(len(marker_ids), device=marker_ids.device)
+
+
+class GroupMultipart(GroupBase):
+
+    def __init__(self, groupby_prefixes, groupby_suffix, output_name, source_name, fill_value=np.nan):
+        super().__init__(groupby_prefixes, groupby_suffix, output_name)
+        self.source_name = source_name
+        self.fill_value = fill_value
+
+    def _num_channels(self, name_to_num_channels):
+        return name_to_num_channels[self.sequence_source_name]
+
+    def _forward(self, batch, group_ids):
+        if len(group_ids.size()) > 1 and group_ids.size()[1] == 1:
+            group_ids = group_ids[:, 0]
+        if len(group_ids.size()) > 1:
+            raise ValueError('group_ids must be 1d')
+        indices_sort = torch.argsort(group_ids)
+        x = batch[self.source_name]
+        x = x[indices_sort]
+        group_ids = group_ids[indices_sort]
+        _, counts = torch.unique_consecutive(group_ids, return_counts=True)
+        x = torch.split(x, counts)
+        max_count = torch.max(counts).detach().cpu().item()
+        padding = [(0, 0)] * len(x[0].size())
+        for i in range(len(x)):
+            if len(x[i]) < max_count:
+                padding[0] = (0, max_count - len(x[i]))
+                # noinspection PyTypeChecker
+                x[i] = torch.unsqueeze(
+                    torch.nn.functional.pad(x[i], padding, mode='constant', value=self.fill_value), dim=0)
+        x = torch.cat(x)
+        # noinspection PyTypeChecker
+        return x, group_ids, torch.arange(len(x), device=x.device)

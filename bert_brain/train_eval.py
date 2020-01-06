@@ -53,6 +53,7 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
                 is_nan = True
             if param_opti.grad is None:
                 param_opti.grad = torch.nn.Parameter(param_opti.data.new().resize_(*param_opti.data.size()))
+            # noinspection PyUnresolvedReferences
             param_opti.grad.data.copy_(param_model.grad.data)
         else:
             param_opti.grad = None
@@ -69,6 +70,7 @@ def restore_model_parameters_and_set_meta_gradient(
         if p.requires_grad:
             if p.grad is None:
                 p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()))
+            # noinspection PyUnresolvedReferences
             p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps)
 
 
@@ -301,12 +303,14 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
                 if default_sequence_head is None:
                     default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(('bert', 'sequence'), True))
                 prediction_head_parts = default_sequence_head
+                # noinspection PyUnresolvedReferences
                 prediction_head_parts['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
             else:
                 if default_pooled_head is None:
                     default_pooled_head = OrderedDict(
                         default_pooled_linear=KeyedLinear(('bert', 'pooled'), False))
                 prediction_head_parts = default_pooled_head
+                # noinspection PyUnresolvedReferences
                 prediction_head_parts['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
 
         for key in prediction_head_parts:
@@ -385,11 +389,14 @@ def _train_step(
 
     if loss is not None:
         if len(losses_to_write) < 4:
+            # noinspection PyUnresolvedReferences
             logger.info('{}: {:<#8.6}, '.format(log_tag, loss.item()) + ', '.join(
                 ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
         else:
+            # noinspection PyUnresolvedReferences
             logger.info('{}: {}'.format(log_tag, loss.item()))
         if n_gpu > 1:  # hmm - not sure how this is supposed to work
+            # noinspection PyUnresolvedReferences
             loss = loss.mean()  # mean() to average on multi-gpu.
         if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
             # rescale loss for fp16 training
@@ -462,8 +469,67 @@ def train(
         if not settings.is_one_task_at_a_time:
             raise ValueError('settings.batch_kind must be a single_task_* variety for meta learning')
 
-    len_train = train_data_set.length(task_filter=settings.meta_learn_gradient_loss_tasks) \
-        if is_meta_learn_active else len(train_data_set)
+    train_sampler = None
+    batch_sampler = None
+    no_gradient_meta_learn_sampler = None
+    gradient_meta_learn_sampler = None
+    if settings.optimization_settings.local_rank == -1:
+        if isinstance(settings.batch_kind, (tuple, list)):
+            if settings.batch_kind[0] != 'single_task_uniform':
+                raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
+            if is_meta_learn_active:
+                if (settings.meta_learn_no_gradient_loss_tasks is not None
+                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
+                    no_gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
+                        train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
+                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
+                gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
+                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
+                    task_filter=settings.meta_learn_gradient_loss_tasks)
+            else:
+                batch_sampler = BatchOneTaskUniformTaskSampler(
+                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1])
+        elif settings.batch_kind == 'single_task_random':
+            if is_meta_learn_active:
+                if (settings.meta_learn_no_gradient_loss_tasks is not None
+                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
+                    no_gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
+                        train_data_set, settings.optimization_settings.train_batch_size,
+                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
+                gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
+                    train_data_set, settings.optimization_settings.train_batch_size,
+                    task_filter=settings.meta_learn_gradient_loss_tasks)
+            else:
+                batch_sampler = BatchOneTaskRandomSampler(
+                    train_data_set, settings.optimization_settings.train_batch_size)
+        elif settings.batch_kind == 'mixed_task_random':
+            assert (not is_meta_learn_active)
+            train_sampler = RandomSampler(train_data_set)
+        else:
+            raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
+    else:
+        raise ValueError('Not supported')
+
+    if is_meta_learn_active:
+        no_gradient_meta_learn_loader = None if no_gradient_meta_learn_sampler is None else TorchDataLoader(
+            train_data_set, batch_sampler=no_gradient_meta_learn_sampler, collate_fn=collate_fn)
+        gradient_meta_learn_loader = TorchDataLoader(
+            train_data_set, batch_sampler=gradient_meta_learn_sampler, collate_fn=collate_fn)
+        len_train = int(np.round(gradient_meta_learn_sampler.true_div_len() * gradient_meta_learn_sampler.batch_size))
+        train_data_loader = None
+    else:
+        no_gradient_meta_learn_loader = None
+        gradient_meta_learn_loader = None
+        if batch_sampler is None:
+            train_data_loader = TorchDataLoader(
+                train_data_set,
+                sampler=train_sampler,
+                batch_size=settings.optimization_settings.train_batch_size,
+                collate_fn=collate_fn)
+        else:
+            train_data_loader = TorchDataLoader(train_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
+        len_train = train_data_set.length(task_filter=settings.meta_learn_gradient_loss_tasks) \
+            if is_meta_learn_active else len(train_data_set)
 
     num_train_steps_per_epoch = int(
         len_train /
@@ -524,6 +590,7 @@ def train(
         for p in non_prediction_head_parameters:
             p.requires_grad = False
 
+    # noinspection PyUnresolvedReferences
     optimizer_grouped_parameters = [
         # weight decay, prediction head
         {'params': [p for n, p in param_optimizer if n not in no_decay and n.startswith('prediction_head.')],
@@ -571,65 +638,6 @@ def train(
     logger.info("  Num split examples = %d", len(train_data_set))
     logger.info("  Batch size = %d", settings.optimization_settings.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps_prediction_heads)
-
-    train_sampler = None
-    batch_sampler = None
-    no_gradient_meta_learn_sampler = None
-    gradient_meta_learn_sampler = None
-    if settings.optimization_settings.local_rank == -1:
-        if isinstance(settings.batch_kind, (tuple, list)):
-            if settings.batch_kind[0] != 'single_task_uniform':
-                raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
-            if is_meta_learn_active:
-                if (settings.meta_learn_no_gradient_loss_tasks is not None
-                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
-                    no_gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
-                        train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
-                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
-                gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
-                    task_filter=settings.meta_learn_gradient_loss_tasks)
-            else:
-                batch_sampler = BatchOneTaskUniformTaskSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1])
-        elif settings.batch_kind == 'single_task_random':
-            if is_meta_learn_active:
-                if (settings.meta_learn_no_gradient_loss_tasks is not None
-                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
-                    no_gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
-                        train_data_set, settings.optimization_settings.train_batch_size,
-                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
-                gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size,
-                    task_filter=settings.meta_learn_gradient_loss_tasks)
-            else:
-                batch_sampler = BatchOneTaskRandomSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size)
-        elif settings.batch_kind == 'mixed_task_random':
-            assert(not is_meta_learn_active)
-            train_sampler = RandomSampler(train_data_set)
-        else:
-            raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
-    else:
-        raise ValueError('Not supported')
-
-    if is_meta_learn_active:
-        no_gradient_meta_learn_loader = None if no_gradient_meta_learn_sampler is None else TorchDataLoader(
-            train_data_set, batch_sampler=no_gradient_meta_learn_sampler, collate_fn=collate_fn)
-        gradient_meta_learn_loader = TorchDataLoader(
-            train_data_set, batch_sampler=gradient_meta_learn_sampler, collate_fn=collate_fn)
-        train_data_loader = None
-    else:
-        no_gradient_meta_learn_loader = None
-        gradient_meta_learn_loader = None
-        if batch_sampler is None:
-            train_data_loader = TorchDataLoader(
-                train_data_set,
-                sampler=train_sampler,
-                batch_size=settings.optimization_settings.train_batch_size,
-                collate_fn=collate_fn)
-        else:
-            train_data_loader = TorchDataLoader(train_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
 
     if settings.show_epoch_progress:
         epoch_range = trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch")

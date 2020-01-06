@@ -146,6 +146,7 @@ class Settings:
         [str, KindData, PreprocessorTypeUnion], Tuple[Optional[str], Optional[PreprocessorTypeUnion]]] = None
 
     bert_model: str = 'bert-base-uncased'
+    max_sequence_length: Optional[int] = None
     optimization_settings: OptimizationSettings = OptimizationSettings()
 
     # fields which should be concatenated with the output of BERT before the prediction heads are applied

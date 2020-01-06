@@ -12,7 +12,7 @@ from pytorch_pretrained_bert import BertTokenizer
 from .input_features import InputFeatures
 
 __all__ = ['make_tokenizer_model', 'group_by_cum_lengths', 'get_data_token_index',
-           'bert_tokenize_with_spacy_meta']
+           'bert_tokenize_with_spacy_meta', 'ChineseCharDetected']
 
 # word’s class was determined from its PoS tag, where nouns, verbs
 # (including modal verbs), adjectives, and adverbs were considered
@@ -149,7 +149,21 @@ def align_spacy_meta(spacy_tokens, bert_tokens, word, bert_tokenizer):
             for c in t:
                 if c not in punctuation:
                     all_punctuation = False
-                spacy_idx = char_to_spacy_token[char]
+                try:
+                    spacy_idx = char_to_spacy_token[char]
+                except:
+                    for x in spacy_tokens:
+                        for z in x.text:
+                            print(ord(z))
+                    print(spacy_tokens[0].is_alpha)
+                    print(spacy_tokens[0].is_ascii)
+                    print(spacy_tokens[0].is_digit)
+                    print(spacy_tokens[0].pos_)
+                    print(spacy_tokens[0].tag_)
+                    print(spacy_tokens[0].dep_)
+                    print(spacy_tokens[0].lang_)
+                    print(spacy_tokens, char, bert_group)
+                    raise
                 if spacy_idx in counts:
                     counts[spacy_idx] += 1
                 else:
@@ -187,6 +201,34 @@ def _get_syntactic_head_group(spacy_token, bert_token_groups):
     return None
 
 
+class ChineseCharDetected(Exception):
+    def __init__(self, msg):
+        super().__init__(msg)
+
+
+def is_chinese_character(cp):
+    # copied from https://huggingface.co/transformers/_modules/transformers/tokenization_bert.html#BertTokenizer
+    # and modified to include Hangul, Hiragana, and Katakana
+    if ((0x4E00 <= cp <= 0x9FFF) or
+            (0x3400 <= cp <= 0x4DBF) or
+            (0x20000 <= cp <= 0x2A6DF) or
+            (0x2A700 <= cp <= 0x2B73F) or
+            (0x2B740 <= cp <= 0x2B81F) or
+            (0x2B820 <= cp <= 0x2CEAF) or
+            (0xF900 <= cp <= 0xFAFF) or
+            (0x2F800 <= cp <= 0x2FA1F) or
+            (0xAC00 <= cp <= 0xD7AF) or  # Hangul
+            (0x3040 <= cp <= 0x309F) or  # Hiragana
+            (0x30A0 <= cp <= 0x30FF) or  # Katakana
+            (0x31F0 <= cp <= 0x31FF) or  # Katakana Phonetic Extensions
+            (0x3200 <= cp <= 0x32FF) or  # Enclosed CJK Letters and Months
+            (0xFF00 <= cp <= 0xFFEF) or  # Halfwidth and Fullwidth Forms
+            (0x1B000 <= cp <= 0x1B0FF) or  # Kana Supplement
+            (0x1B130 <= cp <= 0x1B16F)):  # Small Kana Extension
+        return True
+    return False
+
+
 def bert_tokenize_with_spacy_meta(
         spacy_model: SpacyLanguage,
         bert_tokenizer: BertTokenizer,
@@ -203,7 +245,8 @@ def bert_tokenize_with_spacy_meta(
         stop_sequence_3: Optional[int] = None,
         multipart_id: Optional[int] = None,
         span_ids: Optional[Sequence[int]] = None,
-        is_apply_data_offset_entire_group: bool = False) -> Tuple[InputFeatures, np.array]:
+        is_apply_data_offset_entire_group: bool = False,
+        max_sequence_length: Optional[int] = None) -> Tuple[InputFeatures, np.array]:
     """
     Uses spacy to get information such as part of speech, probability of word, etc. and aligns the tokenization from
     spacy with the bert tokenization.
@@ -243,6 +286,7 @@ def bert_tokenize_with_spacy_meta(
             parameter is set to True, then all of the multiple tokens corresponding to a word are assigned the same
             data_id, and none are set to -1. This can be a better option for fMRI where the predictions are not at
             the word level, but rather at the level of an image containing multiple words.
+        max_sequence_length: If specified, each sub-sequence will be truncated to this length
     Returns:
         An InputFeatures instance
     """
@@ -252,6 +296,11 @@ def bert_tokenize_with_spacy_meta(
 
     bert_token_groups = list()
     for w in words:
+
+        for c in w:
+            # noinspection PyProtectedMember
+            if is_chinese_character(ord(c)):
+                raise ChineseCharDetected(w)
 
         if len(sent) > 0:
             sent += ' '
@@ -342,6 +391,7 @@ def bert_tokenize_with_spacy_meta(
         sequences.append((start_sequence_3, stop_sequence_3))
 
     idx_sequence = 0
+    current_sequence_length = 0
     for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
         if last_sentence_id is None or sentence_ids[idx_group] != last_sentence_id:
             index_token_in_sentence = -1
@@ -349,6 +399,7 @@ def bert_tokenize_with_spacy_meta(
         if idx_group >= sequences[idx_sequence][1]:
             if idx_sequence + 1 < len(sequences):
                 idx_sequence += 1
+                current_sequence_length = 0
             else:
                 break
         if idx_group < sequences[idx_sequence][0]:
@@ -357,34 +408,36 @@ def bert_tokenize_with_spacy_meta(
         included_indices.append(idx_group)
         index_word_in_example += 1
         idx_data = get_data_token_index(bert_tokens_with_spacy)
-        for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
-            index_token_in_sentence += 1
-            idx_head_group = _get_syntactic_head_group(spacy_token, bert_token_groups_with_spacy)
-            head_token = '[PAD]'
-            head_location = np.nan
-            if idx_head_group is not None:
-                idx_head_data_token = get_data_token_index(bert_token_groups_with_spacy[idx_head_group])
-                head_token = bert_token_groups_with_spacy[idx_head_group][idx_head_data_token][0]
-                head_location = idx_head_group - idx_group
-            example_tokens.append(t)
-            example_mask.append(1)
-            example_is_stop.append(_is_stop(spacy_token))
-            example_lengths.append(length)
-            example_probs.append(-20. if spacy_token is None else spacy_token.prob)
-            example_head_location.append(head_location)
-            example_token_head.append(head_token)
-            is_continue_word_piece = t.startswith('##')
-            example_is_begin_word_pieces.append(not is_continue_word_piece)
-            example_type_ids.append(type_id)
-            if span_ids is not None:
-                example_span_ids.append(span_ids[idx_group])
-            example_index_word_in_example.append(index_word_in_example)
-            example_index_token_in_sentence.append(index_token_in_sentence)
-            # we follow the BERT paper and always use the first word-piece as the labeled one
-            data_id = -1
-            if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
-                data_id = data_ids[idx_group]
-            example_data_ids.append(data_id)
+        if max_sequence_length is None or len(bert_tokens_with_spacy) + current_sequence_length < max_sequence_length:
+            for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
+                index_token_in_sentence += 1
+                current_sequence_length += 1
+                idx_head_group = _get_syntactic_head_group(spacy_token, bert_token_groups_with_spacy)
+                head_token = '[PAD]'
+                head_location = np.nan
+                if idx_head_group is not None:
+                    idx_head_data_token = get_data_token_index(bert_token_groups_with_spacy[idx_head_group])
+                    head_token = bert_token_groups_with_spacy[idx_head_group][idx_head_data_token][0]
+                    head_location = idx_head_group - idx_group
+                example_tokens.append(t)
+                example_mask.append(1)
+                example_is_stop.append(_is_stop(spacy_token))
+                example_lengths.append(length)
+                example_probs.append(-20. if spacy_token is None else spacy_token.prob)
+                example_head_location.append(head_location)
+                example_token_head.append(head_token)
+                is_continue_word_piece = t.startswith('##')
+                example_is_begin_word_pieces.append(not is_continue_word_piece)
+                example_type_ids.append(type_id)
+                if span_ids is not None:
+                    example_span_ids.append(span_ids[idx_group])
+                example_index_word_in_example.append(index_word_in_example)
+                example_index_token_in_sentence.append(index_token_in_sentence)
+                # we follow the BERT paper and always use the first word-piece as the labeled one
+                data_id = -1
+                if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
+                    data_id = data_ids[idx_group]
+                example_data_ids.append(data_id)
         if idx_group == sequences[idx_sequence][1]:
             _append_special_token('[SEP]', index_word_in_example + 1, index_token_in_sentence + 1, type_id)
             index_word_in_example += 1

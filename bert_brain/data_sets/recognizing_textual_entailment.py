@@ -14,7 +14,7 @@ class RecognizingTextualEntailment(CorpusBase):
 
     @classmethod
     def _path_attributes(cls):
-        return dict(path='rte_path')
+        return dict(path='recognizing_textual_entailment_path')
 
     def __init__(self, path=None):
         self.path = path
@@ -31,13 +31,16 @@ class RecognizingTextualEntailment(CorpusBase):
                 fields = json.loads(line.strip('\n'))
                 premise = fields['premise'].split()
                 hypothesis = fields['hypothesis'].split()
-                if fields['label'] not in classes:
-                    raise ValueError('Unknown label: {}'.format(fields['label']))
-                label = classes[fields['label']]
+                if 'label' in fields:
+                    if fields['label'] not in classes:
+                        raise ValueError('Unknown label: {}'.format(fields['label']))
+                    label = classes[fields['label']]
+                else:
+                    label = classes['not_entailment']
                 data_ids = -1 * np.ones(len(premise) + len(hypothesis), dtype=np.int64)
                 # doesn't matter which word we attach the label to since we specify below that is_sequence=False
                 data_ids[0] = len(labels)
-                examples.append(example_manager.add_example(
+                ex = example_manager.add_example(
                     example_key=None,
                     words=premise + hypothesis,
                     sentence_ids=[0] * len(premise) + [1] * len(hypothesis),
@@ -46,9 +49,17 @@ class RecognizingTextualEntailment(CorpusBase):
                     start=0,
                     stop=len(premise),
                     start_sequence_2=len(premise),
-                    stop_sequence_2=len(premise) + len(hypothesis)))
-                labels.append(label)
+                    stop_sequence_2=len(premise) + len(hypothesis),
+                    auto_high_frequency_on_collision=True,
+                    allow_duplicates=False)
+                if ex is not None:
+                    examples.append(ex)
+                    labels.append(label)
         return examples
+
+    @classmethod
+    def response_key(cls):
+        return 'rte'
 
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         labels = list()
@@ -64,6 +75,6 @@ class RecognizingTextualEntailment(CorpusBase):
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
-            response_data={'rte': KindData(ResponseKind.generic, labels)},
+            response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
-            field_specs={'rte': FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

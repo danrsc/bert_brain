@@ -1060,6 +1060,7 @@ class PreprocessRandomPair:
                         else:
                             raise ValueError('Invalid data_id_pair: {}'.format(data_id_pair))
                     assert(len(new_data_ids) == len(pair.data_ids[response_k]))
+                    # noinspection PyUnresolvedReferences
                     pair.data_ids[response_k] = np.array(new_data_ids)
             loaded_data_tuple = replace(loaded_data_tuple, **{split_name: paired})
         loaded_data_tuple = replace(loaded_data_tuple, data=type(loaded_data_tuple.data)(

@@ -5,6 +5,7 @@ from collections import OrderedDict
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset
+# noinspection PyUnresolvedReferences
 from torch.utils.data.dataloader import default_collate
 
 from ..common import SwitchRemember
@@ -372,6 +373,7 @@ class PreparedDataDataset(torch.utils.data.Dataset):
             raise KeyError('Field is not a response data field: {}'.format(field))
         data_ids = np.asarray(data_ids)
         data = torch.tensor(self._response_data[field][data_ids], dtype=self._field_specs[field].tensor_dtype)
+        # noinspection PyTypeChecker
         word_ids = self._word_ids[field][data_ids] if field in self._word_ids else None
         return data, word_ids
 

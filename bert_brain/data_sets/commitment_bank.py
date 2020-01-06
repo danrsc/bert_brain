@@ -25,16 +25,18 @@ class CommitmentBank(CorpusBase):
         classes = {
             'unknown': 0,
             'entailment': 1,
-            'contradiction': 2
+            'contradiction': 2,
+            'neutral': 3
         }
         with open(path, 'rt') as f:
             for line in f:
                 fields = json.loads(line.strip('\n'))
                 premise = fields['premise'].split()
                 hypothesis = fields['hypothesis'].split()
-                if fields['label'] not in classes:
-                    raise ValueError('Unknown label: {}'.format(fields['label']))
-                label = classes[fields['label']]
+                label = fields['label'] if 'label' in fields else 'unknown'
+                if label not in classes:
+                    raise ValueError('Unknown label: {}'.format(label))
+                label = classes[label]
                 data_ids = -1 * np.ones(len(premise) + len(hypothesis), dtype=np.int64)
                 # doesn't matter which word we attach the label to since we specify below that is_sequence=False
                 data_ids[0] = len(labels)
@@ -51,6 +53,10 @@ class CommitmentBank(CorpusBase):
                 labels.append(label)
         return examples
 
+    @classmethod
+    def response_key(cls):
+        return 'cb'
+
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         labels = list()
         train = CommitmentBank._read_examples(
@@ -65,6 +71,6 @@ class CommitmentBank(CorpusBase):
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
-            response_data={'cb': KindData(ResponseKind.generic, labels)},
+            response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
-            field_specs={'cb': FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

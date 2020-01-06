@@ -118,6 +118,10 @@ class ColorlessGreenCorpus(CorpusBase):
     def __init__(self, path=None):
         self.path = path
 
+    @classmethod
+    def response_key(cls):
+        return 'colorless'
+
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         english_web_paths = [
             os.path.join(self.path, 'en_ewt-ud-train.conllu'),
@@ -125,17 +129,19 @@ class ColorlessGreenCorpus(CorpusBase):
             os.path.join(self.path, 'en_ewt-ud-test.conllu')]
 
         classes = _agreement_data(
-            example_manager, generate_examples(english_web_paths, example_manager.bert_tokenizer), 'colorless')
+            example_manager, generate_examples(english_web_paths, example_manager.bert_tokenizer),
+            type(self).response_key())
 
         def _readonly(arr):
             arr.setflags(write=False)
             return arr
 
-        classes = {'colorless': KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float64)))}
+        classes = {
+            type(self).response_key(): KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float64)))}
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,
-            validation_proportion_of_train=0.1, field_specs={'colorless': FieldSpec(is_sequence=False)})
+            validation_proportion_of_train=0.1, field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
 
 
 class LinzenAgreementCorpus(CorpusBase):
@@ -147,16 +153,21 @@ class LinzenAgreementCorpus(CorpusBase):
     def __init__(self, path=None):
         self.path = path
 
+    @classmethod
+    def response_key(cls):
+        return 'linzen_agree'
+
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
 
-        classes = _agreement_data(example_manager, _iterate_linzen(self.path), 'linzen_agree')
+        classes = _agreement_data(example_manager, _iterate_linzen(self.path), type(self).response_key())
 
         def _readonly(arr):
             arr.setflags(write=False)
             return arr
 
-        classes = {'linzen_agree': KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float)))}
+        classes = {
+            type(self).response_key(): KindData(ResponseKind.generic, _readonly(np.array(classes, dtype=np.float)))}
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,
-            validation_proportion_of_train=0.1, field_specs={'linzen_agree': FieldSpec(is_sequence=False)})
+            validation_proportion_of_train=0.1, field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

@@ -47,6 +47,10 @@ class StanfordSentimentTreebank(CorpusBase):
                 label_list.append(label)
         return examples
 
+    @classmethod
+    def response_key(cls):
+        return 'sentiment'
+
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         label_list = list()
         train_examples = StanfordSentimentTreebank._read_labels(
@@ -59,7 +63,7 @@ class StanfordSentimentTreebank(CorpusBase):
 
         return RawData(
             train_examples,
-            {'sentiment': KindData(ResponseKind.generic, labels)},
+            response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             validation_input_examples=validation_examples,
             is_pre_split=True,
-            field_specs={'sentiment': FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

@@ -5,6 +5,7 @@ import numpy as np
 
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
 from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .spacy_token_meta import ChineseCharDetected
 
 
 __all__ = ['BooleanQuestions']
@@ -27,22 +28,43 @@ class BooleanQuestions(CorpusBase):
                 fields = json.loads(line.strip('\n'))
                 passage = fields['passage'].split()
                 question = fields['question'].split()
-                label = fields['label']
+                label = fields['label'] if 'label' in fields else True
+                question_ = list()
+                for w in question:
+                    if w == 'fitness(as':
+                        question_.extend(['fitness', '(as'])
+                    else:
+                        question_.append(w)
+                question = question_
                 data_ids = -1 * np.ones(len(passage) + len(question), dtype=np.int64)
                 # doesn't matter which word we attach the label to since we specify below that is_sequence=False
                 data_ids[0] = len(labels)
-                examples.append(example_manager.add_example(
-                    example_key=None,
-                    words=passage + question,
-                    sentence_ids=[0] * len(passage) + [1] * len(question),
-                    data_key='boolq',
-                    data_ids=data_ids,
-                    start=0,
-                    stop=len(passage),
-                    start_sequence_2=len(passage),
-                    stop_sequence_2=len(passage) + len(question)))
-                labels.append(label)
+                try:
+                    ex = example_manager.add_example(
+                        example_key=None,
+                        words=passage + question,
+                        sentence_ids=[0] * len(passage) + [1] * len(question),
+                        data_key='boolq',
+                        data_ids=data_ids,
+                        start=0,
+                        stop=len(passage),
+                        start_sequence_2=len(passage),
+                        stop_sequence_2=len(passage) + len(question),
+                        allow_duplicates=False)
+
+                    if ex is not None:
+                        examples.append(ex)
+                        labels.append(label)
+
+                except ChineseCharDetected:
+                    # 64 of 9363 training examples eliminated (0.7%)
+                    pass
+
         return examples
+
+    @classmethod
+    def response_key(cls):
+        return 'boolq'
 
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         labels = list()
@@ -58,6 +80,6 @@ class BooleanQuestions(CorpusBase):
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
-            response_data={'boolq': KindData(ResponseKind.generic, labels)},
+            response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
-            field_specs={'boolq': FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

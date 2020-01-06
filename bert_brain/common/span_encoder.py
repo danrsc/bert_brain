@@ -9,10 +9,12 @@ __all__ = ['NamedSpanEncoder']
 class NamedSpanEncoder:
 
     def __init__(self, names_in_order=None, frozen_names=False):
-        if frozen_names and names_in_order is None or len(names_in_order) == 0:
+        if frozen_names and (names_in_order is None or len(names_in_order) == 0):
             raise ValueError('frozen_names is True, but no names given')
         if names_in_order is not None:
             self.names = OrderedDict((n, i) for i, n in enumerate(names_in_order))
+        else:
+            self.names = OrderedDict()
         self.frozen_names = frozen_names
 
     def encode(self, active_names):

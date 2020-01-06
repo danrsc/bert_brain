@@ -29,6 +29,7 @@ def cuda_auto_empty_cache_context(device):
     if device.type == 'cpu':
         yield device
     else:
+        # noinspection PyUnresolvedReferences
         with torch.cuda.device(device) as device_context:
             yield device_context
             gc.collect()
@@ -509,6 +510,7 @@ def _local_thread_cuda_memory_info():
     try:
         result = list()
         for i in range(len(numba.cuda.gpus)):
+            # noinspection PyUnresolvedReferences
             try:
                 numba.cuda.select_device(i)
                 context = numba.cuda.current_context()

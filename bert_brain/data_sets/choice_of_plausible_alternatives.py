@@ -14,7 +14,7 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
 
     @classmethod
     def _path_attributes(cls):
-        return dict(path='copa_path')
+        return dict(path='choice_of_plausible_alternatives_path')
 
     def __init__(self, path=None):
         self.path = path
@@ -39,7 +39,7 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
                 if fields['question'] not in question_expansions:
                     raise ValueError('Uknown question type: {}'.format(fields['question']))
                 question = question_expansions[fields['question']].split()
-                label = fields['label']
+                label = fields['label'] if 'label' in fields else 1
                 for index_choice, choice in enumerate(choices):
                     data_ids = -1 * np.ones(len(premise) + len(question) + len(choice), dtype=np.int64)
                     # doesn't matter which word we attach the label to since we specify below that is_sequence=False
@@ -61,6 +61,10 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
                     labels.append(choice_label)
         return examples
 
+    @classmethod
+    def response_key(cls):
+        return 'copa'
+
     def _load(self, run_info, example_manager: CorpusExampleUnifier):
         labels = list()
         train = ChoiceOfPlausibleAlternatives._read_examples(
@@ -75,6 +79,6 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
-            response_data={'copa': KindData(ResponseKind.generic, labels)},
+            response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
-            field_specs={'copa': FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

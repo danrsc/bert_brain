@@ -163,6 +163,9 @@ def read_predictions(output_dir, keys=None):
             sequence_type = npz['sequence_type'].item()
             word_ids = npz['word_ids']
 
+            if word_ids.ndim == 0:
+                word_ids = None
+
             critic_kwarg_prefix = 'critic_kwarg'
             critic_kwargs = dict()
             for npz_key in npz.keys():

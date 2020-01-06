@@ -53,9 +53,11 @@ def _reconcile_view_examples(
     is_modified = False
     for ex in prepared_data_examples:
         if ex.unique_id not in view_examples:
+            # noinspection PyUnresolvedReferences
             ex.data_ids[response_key] = -1 * np.ones_like(ex.data_ids[response_key])
         else:
             is_modified = is_modified or not np.array_equal(ex.data_ids[response_key], view_examples[ex.unique_id])
+            # noinspection PyUnresolvedReferences
             ex.data_ids[response_key] = view_examples[ex.unique_id]
     return is_modified
 
@@ -63,6 +65,7 @@ def _reconcile_view_examples(
 def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, response_key: str):
     if view.data is None:
         for ex in chain(prepared_data.train, prepared_data.validation, prepared_data.test):
+            # noinspection PyUnresolvedReferences
             del ex.data_ids[response_key]
         del prepared_data.data[response_key]
     else:
@@ -184,6 +187,7 @@ class DataPreparer(object):
                     if forked_preprocessor is not None:
                         self._preprocess_dict[forked_name] = forked_preprocessor
                     for ex in chain(result[k].train, result[k].validation, result[k].test):
+                        # noinspection PyUnresolvedReferences
                         ex.data_ids[forked_name] = np.copy(ex.data_ids[response_k])
 
             for response_k in result[k].data:
@@ -241,12 +245,13 @@ class DataPreparer(object):
             for index_phase in range(len(phases) + 1):
                 current_response_keys = list(result[k].data)
                 for response_k in current_response_keys:
-                    for step in phase_steps[response_k][index_phase]:
-                        if hasattr(step, 'set_model_path'):
-                            step.set_model_path(self._output_model_path, response_k)
-                        processed = step(
-                            _make_prepared_data_view(result[k], response_k), metadata[k], self._random_state[k])
-                        _reconcile_view(result[k], processed, response_k)
+                    if phase_steps[response_k] is not None:
+                        for step in phase_steps[response_k][index_phase]:
+                            if hasattr(step, 'set_model_path'):
+                                step.set_model_path(self._output_model_path, response_k)
+                            processed = step(
+                                _make_prepared_data_view(result[k], response_k), metadata[k], self._random_state[k])
+                            _reconcile_view(result[k], processed, response_k)
                 if index_phase < len(phases):
                     phase_change_step = phase_change_steps[phases[index_phase]]
                     if hasattr(phase_change_step, 'set_model_path'):

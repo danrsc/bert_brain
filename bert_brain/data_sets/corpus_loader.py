@@ -23,8 +23,9 @@ class CorpusLoader(object):
             index_run,
             corpora,
             data_preparer=None,
-            force_cache_miss=False,
-            paths_obj=None):
+            force_cache_miss_set=None,
+            paths_obj=None,
+            max_sequence_length=None):
 
         bert_tokenizer = self.make_bert_tokenizer()
         spacy_tokenizer_model = make_tokenizer_model()
@@ -41,8 +42,14 @@ class CorpusLoader(object):
             if key in result:
                 raise ValueError('Corpus can only be loaded once')
 
+            force_cache_miss = False
+            if force_cache_miss_set is not None and key in force_cache_miss_set:
+                force_cache_miss = True
+
             print('Loading {}...'.format(key), end='', flush=True)
-            result[key] = corpus.load(index_run, spacy_tokenizer_model, bert_tokenizer, paths_obj, force_cache_miss)
+            result[key] = corpus.load(
+                index_run, spacy_tokenizer_model, bert_tokenizer, paths_obj, force_cache_miss,
+                max_sequence_length=max_sequence_length)
             print('done')
 
         if data_preparer is not None:

@@ -4,6 +4,7 @@ from . import choice_of_plausible_alternatives
 from . import colorless_green
 from . import commitment_bank
 from . import corpus_base
+from . import corpus_cache
 from . import corpus_loader
 from . import data_preparer
 from . import dataset

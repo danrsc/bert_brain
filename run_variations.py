@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 from dataclasses import replace
+from typing import Optional
 from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
 
@@ -45,7 +46,7 @@ def progress_iterate(iterable, progress_bar):
 def run_variation(
             set_name: str,
             settings: Settings,
-            force_cache_miss: bool,
+            force_cache_miss_set: Optional[set],
             device: torch.device,
             n_gpu: int,
             progress_bar=None):
@@ -94,7 +95,9 @@ def run_variation(
 
         seed = set_random_seeds(settings.seed, index_run, n_gpu)
 
-        data = corpus_loader.load(index_run, settings.corpora, force_cache_miss=force_cache_miss, paths_obj=paths)
+        data = corpus_loader.load(
+            index_run, settings.corpora, force_cache_miss_set=force_cache_miss_set, paths_obj=paths,
+            max_sequence_length=settings.max_sequence_length)
 
         data_preparer = DataPreparer(
             seed, settings.preprocessors, settings.get_split_functions(index_run), settings.preprocess_fork_fn,
@@ -132,8 +135,8 @@ def main():
                         help='DANGER: If specified, the current results will'
                              ' be removed and we will start from scratch')
 
-    parser.add_argument('--force_cache_miss', action='store_true', required=False,
-                        help='If specified, data will be loaded from raw files and then recached. '
+    parser.add_argument('--force_cache_miss', action='store', required=False,
+                        help='Data from the specified corpus will be loaded from raw files and then recached. '
                              'Useful if loading logic has changed')
 
     parser.add_argument('--log_level', action='store', required=False, default='WARNING',
@@ -145,6 +148,10 @@ def main():
         '--name', action='store', required=False, default='erp', help='Which set to run')
 
     args = parser.parse_args()
+
+    force_cache_miss_set = None
+    if args.force_cache_miss is not None:
+        force_cache_miss_set = set(k for k in args.force_cache_miss.split(','))
 
     logging.getLogger().setLevel(level=args.log_level.upper())
 
@@ -196,6 +203,7 @@ def main():
             device = torch.device('cuda', settings_.local_rank)
             n_gpu = 1
             # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+            # noinspection PyUnresolvedReferences
             torch.distributed.init_process_group(backend='nccl')
             if settings_.optimization_settings.fp16:
                 logger.info("16-bits training currently not supported in distributed training")
@@ -207,7 +215,7 @@ def main():
             settings_.optimization_settings.fp16))
 
         with cuda_auto_empty_cache_context(device):
-            run_variation(variation, settings_, args.force_cache_miss, device, n_gpu, progress_bar=progress_bar)
+            run_variation(variation, settings_, force_cache_miss_set, device, n_gpu, progress_bar=progress_bar)
 
     progress_bar.close()
 

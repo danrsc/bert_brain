@@ -303,8 +303,10 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
             self.conv_hidden = torch.nn.ModuleList()
             for _ in range(self.num_spans):
                 if self.conv_hidden_kernel == 1:  # special case, use linear to avoid transpose
+                    # noinspection PyUnresolvedReferences
                     self.conv_hidden.append(torch.nn.Linear(in_sequence_channels, self.conv_hidden_channels))
                 else:
+                    # noinspection PyUnresolvedReferences
                     self.conv_hidden.append(torch.nn.Conv1d(
                         in_sequence_channels,
                         self.conv_hidden_channels,
@@ -316,6 +318,7 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
         attention_input_channels = self.conv_hidden_channels if self.conv_hidden is not None else in_sequence_channels
         self.attention_logits = torch.nn.ModuleList()
         for _ in range(self.num_spans):
+            # noinspection PyUnresolvedReferences
             self.attention_logits.append(torch.nn.Linear(attention_input_channels, 1))
 
         pooled_channels = name_to_num_channels[self.pooled_source_name] if self.pooled_source_name is not None else 0
