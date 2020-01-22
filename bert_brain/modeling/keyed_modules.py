@@ -1,11 +1,11 @@
 from collections import OrderedDict
-import itertools
 
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional
-from pytorch_pretrained_bert.modeling import gelu, BertLayerNorm
+
+from transformers.modeling_bert import gelu_new as gelu
 
 from ..common import NamedSpanEncoder
 from .graph_part import GraphPart
@@ -101,41 +101,6 @@ class KeyedBase(GraphPart):
     def _instantiate(self, name_to_num_channels):
         raise NotImplementedError('{} does not implement instantiate'.format(type(self)))
 
-    def update_state_dict(self, prefix, state_dict, old_prediction_key_to_shape):
-        old_splits = np.cumsum([int(np.prod(old_prediction_key_to_shape[k])) for k in old_prediction_key_to_shape])
-        old_splits = dict((k, (0 if i == 0 else old_splits[i - 1], old_splits[i]))
-                          for i, k in enumerate(old_prediction_key_to_shape))
-        ranges = [old_splits[k] if k in old_splits else None for k in self.output_key_to_shape]
-        for idx, k in enumerate(self.output_key_to_shape):
-            if ranges[idx] is not None and \
-                    int(np.prod(self.output_key_to_shape[k])) != ranges[idx][1] - ranges[idx][0]:
-                raise ValueError('Inconsistent number of targets for prediction key: {}'.format(k))
-        current_splits = [0] + np.cumsum(self.splits).tolist()
-        total = current_splits[-1]
-        current_splits = current_splits[:-1]
-
-        def update(module, prefix_=''):
-            for name, tensor in itertools.chain(
-                    module.named_buffers(prefix_[:-1], False), module.named_parameters(prefix_[:-1], False)):
-                if name in state_dict:
-                    state = state_dict[name]
-                    updated_state = tensor.clone()
-                    for idx_split in range(len(current_splits)):
-                        if ranges[idx_split] is not None:
-                            end = current_splits[idx_split + 1] if idx_split + 1 < len(current_splits) else total
-                            if len(state.size()) < 3:
-                                updated_state[current_splits[idx_split]:end] = \
-                                    state[ranges[idx_split][0]:ranges[idx_split][1]]
-                            else:
-                                raise ValueError('Unexpected state size: {}'.format(len(state.size())))
-                    state_dict[name] = updated_state
-
-            for name, child in module.named_children():
-                if child is not None:
-                    update(child, prefix_ + name + '.')
-
-        update(self, prefix)
-
 
 class _HiddenLayer(torch.nn.Module):
 
@@ -143,7 +108,7 @@ class _HiddenLayer(torch.nn.Module):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels)
         self.activation_function = activation_function
-        self.layer_norm = BertLayerNorm(out_channels, eps=1e-12) if should_norm else None
+        self.layer_norm = torch.nn.LayerNorm(out_channels, eps=1e-12) if should_norm else None
 
     def forward(self, x):
         x = self.linear(x)
@@ -194,7 +159,8 @@ class KeyedLinear(KeyedBase):
         for key in self.output_key_to_shape:
             result[key] = int(np.prod(self.output_key_to_shape[key]))
         if self.should_norm:
-            self.norm_layers = torch.nn.ModuleList(modules=list(BertLayerNorm(result[k], eps=1e-12) for k in result))
+            self.norm_layers = torch.nn.ModuleList(
+                modules=list(torch.nn.LayerNorm(result[k], eps=1e-12) for k in result))
         for key in name_to_num_channels:
             if isinstance(key, tuple) and key[0] == self.source_name:
                 for result_key in self.output_key_to_shape:

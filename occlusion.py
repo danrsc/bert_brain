@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 
-from bert_brain import cuda_most_free_device, DataPreparer, Settings, task_hash, set_random_seeds, named_variations, \
-    collate_fn, setup_prediction_heads_and_losses, make_datasets, CorpusLoader, make_prediction_handler
+from bert_brain import cuda_most_free_device, Settings, task_hash, set_random_seeds, named_variations, \
+    collate_fn, setup_prediction_heads_and_losses, CorpusDatasetFactory, DataIdMultiDataset, make_prediction_handler
 from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
 from bert_brain_paths import Paths
 
@@ -44,10 +44,10 @@ def _num_tokens(tokens):
 
 
 def _run_occlusion_for_variation(
-        paths, corpus_loader, tokenizer, settings: Settings, index_run: int, device, n_gpu):
+        paths, corpus_dataset_factory: CorpusDatasetFactory, settings: Settings, index_run: int, device, n_gpu):
 
     occlusion_token = '[UNK]'
-    occluded_token_id = tokenizer.convert_tokens_to_ids([occlusion_token])[0]
+    occluded_token_id = corpus_dataset_factory.model_tokenizer.convert_tokens_to_ids([occlusion_token])[0]
 
     all_results = OrderedDict()
 
@@ -61,15 +61,24 @@ def _run_occlusion_for_variation(
 
     seed = set_random_seeds(settings.seed, index_run, n_gpu)
 
-    data = corpus_loader.load(index_run, settings.corpora, paths_obj=paths)
+    output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
+    data_set_paths = list()
+    for corpus in settings.corpora:
+        data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
+            seed,
+            index_run,
+            corpus,
+            settings.preprocessors,
+            output_model_path,
+            settings.get_split_function(corpus.corpus_key, index_run),
+            settings.preprocess_fork_fn,
+            False,
+            paths,
+            settings.max_sequence_length))
 
-    # noinspection PyTypeChecker
-    data_preparer = DataPreparer(
-        seed, settings.preprocessors,
-        settings.get_split_functions(index_run), settings.preprocess_fork_fn, paths.model_path)
-
-    _, validation_data, _ = make_datasets(
-        data_preparer.prepare(data),
+    validation_data = DataIdMultiDataset(
+        'validation',
+        data_set_paths,
         settings.all_loss_tasks,
         data_id_in_batch_keys=settings.data_id_in_batch_keys,
         filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
@@ -155,14 +164,14 @@ def run_occlusion(variation_set_name, index_run=None):
         paths_.model_path_ = os.path.join(paths_.model_path, variation_, hash_)
         paths_.result_path_ = os.path.join(paths_.result_path, variation_, hash_)
 
-        corpus_loader_ = CorpusLoader(paths_.cache_path)
+        corpus_dataset_factory_ = CorpusDatasetFactory(paths_.cache_path)
 
         if not os.path.exists(paths_.model_path_):
             os.makedirs(paths_.model_path_)
         if not os.path.exists(paths_.result_path_):
             os.makedirs(paths_.result_path_)
 
-        return corpus_loader_, paths_
+        return corpus_dataset_factory_, paths_
 
     named_settings = named_variations(variation_set_name)
     for variation, training_variation in named_settings:
@@ -188,9 +197,7 @@ def run_occlusion(variation_set_name, index_run=None):
 
         print('Running on variation: {}'.format(training_variation))
 
-        corpus_loader, paths = io_setup(variation, settings)
-
-        tokenizer = corpus_loader.make_bert_tokenizer()
+        corpus_dataset_factory, paths = io_setup(variation, settings)
 
         run_iterator = trange(settings.num_runs, desc='Runs')
         if index_run is not None:
@@ -198,7 +205,7 @@ def run_occlusion(variation_set_name, index_run=None):
 
         for index_run in run_iterator:
             run_results = _run_occlusion_for_variation(
-                paths, corpus_loader, tokenizer, settings, index_run, device, n_gpu)
+                paths, corpus_dataset_factory, settings, index_run, device, n_gpu)
             write_occlusion_predictions(
                 os.path.join(paths.result_path, 'run_{}'.format(index_run), 'output_validation_occlusion.npz'),
                 run_results)

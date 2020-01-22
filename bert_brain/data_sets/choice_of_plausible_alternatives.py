@@ -1,23 +1,19 @@
 import os
 import json
+from dataclasses import dataclass
 
 import numpy as np
 
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 
 
 __all__ = ['ChoiceOfPlausibleAlternatives']
 
 
+@dataclass(frozen=True)
 class ChoiceOfPlausibleAlternatives(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='choice_of_plausible_alternatives_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('choice_of_plausible_alternatives_path')
 
     @staticmethod
     def _read_examples(path, example_manager: CorpusExampleUnifier, labels):
@@ -65,7 +61,7 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
     def response_key(cls):
         return 'copa'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = ChoiceOfPlausibleAlternatives._read_examples(
             os.path.join(self.path, 'train.jsonl'), example_manager, labels)

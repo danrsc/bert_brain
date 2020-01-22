@@ -1,9 +1,8 @@
 import os
 from collections import OrderedDict
 from itertools import combinations
-from dataclasses import dataclass, replace as dataclass_replace
-from typing import Mapping, Sequence, Optional, Union
-from functools import partial
+import dataclasses
+from typing import Mapping, Sequence, Optional, Union, ClassVar, Tuple
 
 import numpy as np
 from scipy.spatial.distance import cdist
@@ -15,16 +14,16 @@ import nibabel
 import cortex
 
 from ..common import MultiReplace
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample, PairFMRIExample
 from .input_features import RawData, KindData, ResponseKind
 
 
-__all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'harry_potter_leave_out_fmri_run',
+__all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'HarryPotterLeaveOutFmriRun',
            'HarryPotterMakeLeaveOutFmriRun', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
 
 
-@dataclass
+@dataclasses.dataclass
 class _HarryPotterWordFMRI:
     word: str
     index_in_all_words: int
@@ -35,103 +34,103 @@ class _HarryPotterWordFMRI:
     story_features: Mapping
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class _DataKindProperties:
     file_name: str
     is_preprocessed: bool = False
 
 
+@dataclasses.dataclass(frozen=True)
 class HarryPotterCorpus(CorpusBase):
+    """
+    Loader for Harry Potter data
+    path: The path to the directory where the data is stored
+    meg_subjects: Which subjects' data to load for MEG. None will cause all subjects' data to load. An
+        empty list can be provided to cause MEG loading to be skipped.
+    meg_kind: One of ('pca_label', 'mean_label', 'pca_sensor')
+        pca_label is source localized and uses the pca within an ROI label for the label with
+            100ms slices of time
+        mean_label is similar to pca_label, but using the mean within an ROI label
+        pca_sensor uses a PCA on the sensor space to produce 10 latent components and time is averaged over
+        the whole word
+    separate_meg_axes: None, True, or one or more of ('subject', 'roi', 'time'). If not provided (the default),
+        then when MEG data has not been preprocessed, a dictionary with a single key ('hp_meg') that maps to
+        an array of shape (word, subject, roi, 100ms slice) [Note that this shape may be modified by
+        preprocessing] is returned. 'subject', 'roi', and 'time' only apply to non-preprocessed data.
+        If 'subject' is provided, then the dictionary is keyed by 'hp_meg.<subject-id>', e.g. 'hp_meg.A",
+        and the shape of each value is (word, roi, 100ms slice). Similarly each separate axis that is
+        provided causes the data array to be further split and each resulting data array can be found under a
+        more complex key. The keys are generated in the order <subject-id>.<roi>.<time> all of which are
+        optional. When time is in the key, it is a multiple of 100 giving the ms start time of the window. If
+        the meg_kind is a preprocessed_kind, then only True is supported for this argument. If True, the
+        data is split such that each component gets a separate key. For example, 'hp_meg_A.0', 'hp_meg_A.1', ...
+        which is a scalar value for each word.
+    group_meg_sentences_like_fmri: If False, examples for MEG are one sentence each. If True, then examples
+        are created as they would be for fMRI, i.e. including sentences as required by the
+        fmri_window_size_features parameter
+    fmri_subjects: Which subjects' data to load for fMRI. None will cause all subjects' data to load. An
+        empty list can be provided to cause fMRI loading to be skipped.
+    fmri_smooth_factor: The sigma parameter of the gaussian blur function
+        applied to blur the fMRI data spatially, or None to skip blurring.
+    fmri_skip_start_trs: The number of TRs to remove from the beginning of each fMRI run, since the first few
+        TRs can be problematic
+    fmri_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
+        problematic
+    fmri_window_duration: The duration of the window of time preceding a TR from which to
+        choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
+        which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
+    fmri_minimum_duration_required: The minimum duration of the time between the earliest word used to
+        predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
+        target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
+        window_duration before the TR be min_word_time, if tr_time - min_word_time <
+        minimum_duration_required, the TR is not is not used to build any examples.
+    fmri_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
+        combination of sentences as described above. If 'single', changes the behavior of the function so that
+        the feature window is truncated by the start of a sentence, thus resulting in examples with one
+        sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
+        without consideration of the sentence boundaries
+    """
+    path: str = path_attribute_field('harry_potter_path')
+    fmri_subjects: Optional[Sequence[str]] = None
+    meg_subjects: Optional[Sequence[str]] = None
+    meg_kind: str = 'leila'
+    separate_meg_axes: Optional[Union[str, Sequence[str]]] = None
+    group_meg_sentences_like_fmri: bool = False
+    fmri_smooth_factor: Optional[float] = 1.
+    fmri_skip_start_trs: int = 20
+    fmri_skip_end_trs: int = 15
+    fmri_kind: str = 'raw'
+    fmri_window_duration: float = 8.
+    fmri_minimum_duration_required: float = 7.8
+    fmri_sentence_mode: str = 'multiple'
+    fmri_example_builder: FMRICombinedSentenceExamples = dataclasses.field(init=False, repr=False, compare=False)
 
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='harry_potter_path')
+    def __post_init__(self, index_run: Optional[int]):
+        def _as_tuple(name):
+            val = getattr(self, name)
+            if val is None or isinstance(val, tuple):
+                return
+            if np.isscalar(val):
+                # noinspection PyCallByClass
+                object.__setattr__(self, name, (val,))
+            else:
+                # noinspection PyCallByClass
+                object.__setattr__(self, name, tuple(val))
+        _as_tuple('fmri_subjects')
+        _as_tuple('meg_subjects')
+        _as_tuple('separate_meg_axes')
+        object.__setattr__(self, 'fmri_example_builder', FMRICombinedSentenceExamples(
+            window_duration=self.fmri_window_duration,
+            minimum_duration_required=self.fmri_minimum_duration_required,
+            use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
+            sentence_mode=self.fmri_sentence_mode))
+        super().__post_init__(index_run)
 
     # we need to use these so we can have run information even when we
     # don't read in fmri data; i.e. as a way to do train-test splits the
     # same for MEG as for fMRI. We will assert that the run lengths we
     # get are equal to these when we read fMRI
-    static_run_lengths = (340, 352, 279, 380)
-
-    def __init__(
-            self,
-            path: Optional[str] = None,
-            meg_subjects: Optional[Sequence[str]] = None,
-            meg_kind: str = 'leila',
-            separate_meg_axes: Optional[Union[str, Sequence[str]]] = None,
-            group_meg_sentences_like_fmri: bool = False,
-            fmri_subjects: Optional[Sequence[str]] = None,
-            fmri_smooth_factor: Optional[float] = 1.,
-            fmri_skip_start_trs: int = 20,
-            fmri_skip_end_trs: int = 15,
-            fmri_window_duration: float = 8.,
-            fmri_minimum_duration_required: float = 7.8,
-            fmri_sentence_mode: str = 'multiple',
-            fmri_kind: str = 'raw'):
-        """
-        Loader for Harry Potter data
-        Args:
-            path: The path to the directory where the data is stored
-            meg_subjects: Which subjects' data to load for MEG. None will cause all subjects' data to load. An
-                empty list can be provided to cause MEG loading to be skipped.
-            meg_kind: One of ('pca_label', 'mean_label', 'pca_sensor')
-                pca_label is source localized and uses the pca within an ROI label for the label with
-                    100ms slices of time
-                mean_label is similar to pca_label, but using the mean within an ROI label
-                pca_sensor uses a PCA on the sensor space to produce 10 latent components and time is averaged over
-                the whole word
-            separate_meg_axes: None, True, or one or more of ('subject', 'roi', 'time'). If not provided (the default),
-                then when MEG data has not been preprocessed, a dictionary with a single key ('hp_meg') that maps to
-                an array of shape (word, subject, roi, 100ms slice) [Note that this shape may be modified by
-                preprocessing] is returned. 'subject', 'roi', and 'time' only apply to non-preprocessed data.
-                If 'subject' is provided, then the dictionary is keyed by 'hp_meg.<subject-id>', e.g. 'hp_meg.A",
-                and the shape of each value is (word, roi, 100ms slice). Similarly each separate axis that is
-                provided causes the data array to be further split and each resulting data array can be found under a
-                more complex key. The keys are generated in the order <subject-id>.<roi>.<time> all of which are
-                optional. When time is in the key, it is a multiple of 100 giving the ms start time of the window. If
-                the meg_kind is a preprocessed_kind, then only True is supported for this argument. If True, the
-                data is split such that each component gets a separate key. For example, 'hp_meg_A.0', 'hp_meg_A.1', ...
-                which is a scalar value for each word.
-            group_meg_sentences_like_fmri: If False, examples for MEG are one sentence each. If True, then examples
-                are created as they would be for fMRI, i.e. including sentences as required by the
-                fmri_window_size_features parameter
-            fmri_subjects: Which subjects' data to load for fMRI. None will cause all subjects' data to load. An
-                empty list can be provided to cause fMRI loading to be skipped.
-            fmri_smooth_factor: The sigma parameter of the gaussian blur function
-                applied to blur the fMRI data spatially, or None to skip blurring.
-            fmri_skip_start_trs: The number of TRs to remove from the beginning of each fMRI run, since the first few
-                TRs can be problematic
-            fmri_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
-                problematic
-            fmri_window_duration: The duration of the window of time preceding a TR from which to
-                choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
-                which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
-            fmri_minimum_duration_required: The minimum duration of the time between the earliest word used to
-                predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
-                target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
-                window_duration before the TR be min_word_time, if tr_time - min_word_time <
-                minimum_duration_required, the TR is not is not used to build any examples.
-            fmri_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
-                combination of sentences as described above. If 'single', changes the behavior of the function so that
-                the feature window is truncated by the start of a sentence, thus resulting in examples with one
-                sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
-                without consideration of the sentence boundaries
-        """
-        self.path = path
-        self.fmri_subjects = fmri_subjects
-        self.meg_subjects = meg_subjects
-        self.meg_kind = meg_kind
-        self.separate_meg_axes = separate_meg_axes
-        self.group_meg_sentences_like_fmri = group_meg_sentences_like_fmri
-        self.fmri_smooth_factor = fmri_smooth_factor
-        self.fmri_skip_start_trs = fmri_skip_start_trs
-        self.fmri_skip_end_trs = fmri_skip_end_trs
-        self.fmri_example_builder = FMRICombinedSentenceExamples(
-            window_duration=fmri_window_duration,
-            minimum_duration_required=fmri_minimum_duration_required,
-            use_word_unit_durations=False,  # since the word-spacing is constant in Harry Potter, not needed
-            sentence_mode=fmri_sentence_mode)
-        self.fmri_kind = fmri_kind
+    static_run_lengths: ClassVar[Tuple[int]] = (340, 352, 279, 380)
 
     @staticmethod
     def _add_fmri_example(
@@ -163,11 +162,7 @@ class HarryPotterCorpus(CorpusBase):
         assert (all(w.run == example.words[0].run for w in example.words[1:]))
         return features, included_indices
 
-    def story_features_per_fmri_example(self, paths_obj):
-        if paths_obj is not None:
-            self.set_paths_from_path_object(path_obj=paths_obj)
-        else:
-            self.check_paths()
+    def story_features_per_fmri_example(self):
         fmri_examples = self._compute_examples_for_fmri()
         unique_ids = dict()
         words = dict()
@@ -246,7 +241,7 @@ class HarryPotterCorpus(CorpusBase):
             return index_run % 4
         return -1
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
 
         if (HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed
                 != HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed
@@ -300,14 +295,13 @@ class HarryPotterCorpus(CorpusBase):
 
         indicator_validation = None
         if self.meg_subjects is None or len(self.meg_subjects) > 0:
-            meg, block_metadata, indicator_validation, word_ids = self._read_meg(
-                run_info, example_manager, meg_examples)
+            meg, block_metadata, indicator_validation, word_ids = self._read_meg(example_manager, meg_examples)
             for k in meg:
                 data[k] = KindData(ResponseKind.hp_meg, meg[k], word_ids)
             if block_metadata is not None:
                 metadata['meg_blocks'] = block_metadata
         if self.fmri_subjects is None or len(self.fmri_subjects) > 0:
-            fmri, word_ids = self._read_fmri(run_info, example_manager, fmri_examples)
+            fmri, word_ids = self._read_fmri(example_manager, fmri_examples)
             for k in fmri:
                 data[k] = KindData(ResponseKind.hp_fmri, fmri[k], word_ids)
 
@@ -339,7 +333,7 @@ class HarryPotterCorpus(CorpusBase):
             validation_proportion_of_train=0.1,
             test_proportion=0.)
 
-    def _read_preprocessed_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
+    def _read_preprocessed_meg(self, example_manager: CorpusExampleUnifier, examples):
         # see make_harry_potter.ipynb for how these are constructed
 
         with np.load(self.meg_path, allow_pickle=True) as loaded:
@@ -348,8 +342,8 @@ class HarryPotterCorpus(CorpusBase):
             assert (stimuli[2364] == '..."')
             stimuli[2364] = '...."'  # this was an ellipsis followed by a ., but the period got dropped somehow
 
-            assert (run_info >= 0)
-            held_out_block = np.unique(blocks)[run_info]
+            assert (self.run_info >= 0)
+            held_out_block = np.unique(blocks)[self.run_info]
             not_fixation = np.logical_not(stimuli == '+')
             word_ids = np.expand_dims(np.arange(len(stimuli)), 1)
             new_indices = np.full(len(not_fixation), -1, dtype=np.int64)
@@ -413,10 +407,10 @@ class HarryPotterCorpus(CorpusBase):
 
         return data, block_metadata, block_metadata == held_out_block, word_ids
 
-    def _read_meg(self, run_info, example_manager: CorpusExampleUnifier, examples):
+    def _read_meg(self, example_manager: CorpusExampleUnifier, examples):
 
         if HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed:
-            return self._read_preprocessed_meg(run_info, example_manager, examples)
+            return self._read_preprocessed_meg(example_manager, examples)
 
         # separate_task_axes should be a tuple of strings in 'roi', 'subject', 'time'
         separate_task_axes = self.separate_meg_axes
@@ -567,9 +561,9 @@ class HarryPotterCorpus(CorpusBase):
 
         return data, block_metadata, None, word_ids
 
-    def _read_preprocessed_fmri_files(self, run_info):
+    def _read_preprocessed_fmri_files(self):
         with np.load(self.fmri_path, allow_pickle=True) as loaded:
-            assert (run_info >= 0)
+            assert (self.run_info >= 0)
             subjects = set()
             blocks = set()
             for key in loaded:
@@ -582,7 +576,7 @@ class HarryPotterCorpus(CorpusBase):
                     blocks.add(block)
             subjects = list(sorted(subjects))
             blocks = list(sorted(blocks))
-            held_out_block = blocks[run_info]
+            held_out_block = blocks[self.run_info]
 
             if self.fmri_subjects is not None:
                 subjects = [s for s in subjects if s in self.fmri_subjects]
@@ -598,9 +592,9 @@ class HarryPotterCorpus(CorpusBase):
                 masks[subject] = get_mask_for_subject(subject)
             return data, masks
 
-    def _read_harry_potter_fmri_files(self, run_info):
+    def _read_harry_potter_fmri_files(self):
         if HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed:
-            return self._read_preprocessed_fmri_files(run_info)
+            return self._read_preprocessed_fmri_files()
 
         # noinspection PyPep8
         subject_runs = dict(
@@ -718,10 +712,9 @@ class HarryPotterCorpus(CorpusBase):
             tr_offset += offset_increment
         return examples
 
-    def _read_fmri(self, run_info, example_manager: CorpusExampleUnifier, fmri_examples):
+    def _read_fmri(self, example_manager: CorpusExampleUnifier, fmri_examples):
 
-        data, spatial_masks = self._read_harry_potter_fmri_files(run_info)
-
+        data, spatial_masks = self._read_harry_potter_fmri_files()
         # we assume that the runs are the same across subjects below. assert it here
         run_lengths = None
         for subject in data:
@@ -738,7 +731,7 @@ class HarryPotterCorpus(CorpusBase):
             if self.fmri_smooth_factor is not None:
                 for idx in range(len(subject_data)):
                     # for each example, apply a gaussian filter spatially
-                    if np.ndim(subject_data[idx] != 4):
+                    if np.ndim(subject_data[idx]) != 4:
                         raise ValueError('Expected raw data for application of spatial smoothing')
                     for ax_idx in range(len(subject_data[idx])):
                         subject_data[idx][ax_idx] = gaussian_filter(
@@ -758,7 +751,7 @@ class HarryPotterCorpus(CorpusBase):
                     data_ids[i + ex_.offset] = len(active_list_)
                     active_list_.append(t[0])
             assert(any(d >= 0 for d in data_ids))
-            return dataclass_replace(ex_, tr_target=data_ids)
+            return dataclasses.replace(ex_, tr_target=data_ids)
 
         # filter unused images
         local_examples = [_replace_tr(ex, active_image_indices) for ex in fmri_examples]
@@ -879,60 +872,61 @@ def _clean_word(w):
     return _replacer.replace(w)
 
 
+@dataclasses.dataclass(frozen=True)
 class HarryPotterMakeLeaveOutFmriRun:
-
-    def __init__(self, shuffle=True, make_test=False):
-        self.shuffle = shuffle
-        self.make_test = make_test
+    shuffle: bool = True
+    make_test: bool = False
 
     def __call__(self, index_variation_run):
-        return partial(
-            harry_potter_leave_out_fmri_run,
-            index_variation_run=index_variation_run,
-            shuffle=self.shuffle,
-            make_test=self.make_test)
+        return HarryPotterLeaveOutFmriRun(index_variation_run, self.shuffle, self.make_test)
 
 
-def harry_potter_leave_out_fmri_run(raw_data, index_variation_run, random_state=None, shuffle=True, make_test=False):
-    if raw_data.is_pre_split:
-        raise ValueError(
-            'Misconfiguration. The data has already been split, but harry_potter_leave_out_fmri_run is active')
+@dataclasses.dataclass(frozen=True)
+class HarryPotterLeaveOutFmriRun:
+    index_variation_run: int
+    shuffle: bool = True
+    make_test: bool = False
 
-    runs = raw_data.metadata['fmri_runs']
-    unique_runs = np.unique(runs)
-    if make_test:
-        folds = list(combinations(unique_runs, 2))
-        index_validation, index_test = folds[index_variation_run % len(folds)]
-        if index_variation_run % (len(folds) * 2) >= len(folds):
-            index_test, index_validation = index_validation, index_test
-        validation_run = unique_runs[index_validation]
-        test_run = unique_runs[index_test]
-    else:
-        test_run = None
-        index_validation = index_variation_run % len(unique_runs)
-        validation_run = unique_runs[index_validation]
+    def __call__(self, raw_data, random_state=None):
+        if raw_data.is_pre_split:
+            raise ValueError(
+                'Misconfiguration. The data has already been split, but harry_potter_leave_out_fmri_run is active')
 
-    train_examples = list()
-    validation_examples = list()
-    test_examples = list()
-
-    for example in raw_data.input_examples:
-        if runs[example.unique_id] == validation_run:
-            validation_examples.append(example)
-        elif runs[example.unique_id] == test_run:
-            test_examples.append(example)
+        runs = raw_data.metadata['fmri_runs']
+        unique_runs = np.unique(runs)
+        if self.make_test:
+            folds = list(combinations(unique_runs, 2))
+            index_validation, index_test = folds[self.index_variation_run % len(folds)]
+            if self.index_variation_run % (len(folds) * 2) >= len(folds):
+                index_test, index_validation = index_validation, index_test
+            validation_run = unique_runs[index_validation]
+            test_run = unique_runs[index_test]
         else:
-            train_examples.append(example)
-    if shuffle:
-        if random_state is not None:
-            random_state.shuffle(train_examples)
-            random_state.shuffle(validation_examples)
-            random_state.shuffle(test_examples)
-        else:
-            np.random.shuffle(train_examples)
-            np.random.shuffle(validation_examples)
-            np.random.shuffle(test_examples)
-    return train_examples, validation_examples, test_examples
+            test_run = None
+            index_validation = self.index_variation_run % len(unique_runs)
+            validation_run = unique_runs[index_validation]
+
+        train_examples = list()
+        validation_examples = list()
+        test_examples = list()
+
+        for example in raw_data.input_examples:
+            if runs[example.unique_id] == validation_run:
+                validation_examples.append(example)
+            elif runs[example.unique_id] == test_run:
+                test_examples.append(example)
+            else:
+                train_examples.append(example)
+        if self.shuffle:
+            if random_state is not None:
+                random_state.shuffle(train_examples)
+                random_state.shuffle(validation_examples)
+                random_state.shuffle(test_examples)
+            else:
+                np.random.shuffle(train_examples)
+                np.random.shuffle(validation_examples)
+                np.random.shuffle(test_examples)
+        return train_examples, validation_examples, test_examples
 
 
 def get_mask_for_subject(subject):

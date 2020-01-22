@@ -3,8 +3,8 @@ import warnings
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from itertools import chain
-from dataclasses import replace, asdict
-from typing import Optional
+from dataclasses import replace, asdict, dataclass
+from typing import Optional, Callable, Union, Sequence, Tuple, Any, Mapping
 import numpy as np
 from scipy.stats import boxcox
 from scipy.ndimage.filters import gaussian_filter1d
@@ -37,7 +37,7 @@ __all__ = [
     'PreprocessKMeans',
     'PreprocessMiniBatchKMeans',
     'PreprocessRandomPair',
-    'preprocess_fork_no_cluster_to_disk']
+    'PreprocessForkNoClusterToDisk']
 
 
 def _fit_boxcox(item):
@@ -94,6 +94,7 @@ def _parallel_column_map(fit_fn, apply_fn, data, indicator_fit=None):
     return np.reshape(data, shape)
 
 
+@dataclass(frozen=True)
 class PreprocessBoxcox:
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
@@ -101,10 +102,9 @@ class PreprocessBoxcox:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessLog:
-
-    def __init__(self, min_value: float = -20.):
-        self.min_value = min_value
+    min_value: float = -20.
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         isnan = np.isnan(loaded_data_tuple.data)
@@ -143,16 +143,11 @@ def _remove_lin_regress(data, p):
     return data - lines
 
 
+@dataclass(frozen=True)
 class PreprocessDetrend:
-
-    def __init__(
-            self,
-            stop_mode: Optional[str] = None,
-            metadata_example_group_by: str = None,
-            train_on_all: bool = False):
-        self.stop_mode = stop_mode
-        self.metadata_example_group_by = metadata_example_group_by
-        self.train_on_all = train_on_all
+    stop_mode: Optional[str] = None
+    metadata_example_group_by: str = None
+    train_on_all: bool = None
 
     @staticmethod
     def _detrend(arr, indicator_train):
@@ -185,21 +180,14 @@ class PreprocessDetrend:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessKMeans:
+    num_clusters: int
+    stop_mode: Optional[str] = None
+    transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    n_init: int = 10
 
-    def __init__(self, num_clusters, stop_mode=None, transform_fn=None, n_init=10):
-        self.num_clusters = num_clusters
-        self.n_init = n_init
-        self.stop_mode = stop_mode
-        self.transform_fn = transform_fn
-        self.output_model_path = None
-        self.data_key = None
-
-    def set_model_path(self, output_model_path, data_key):
-        self.output_model_path = output_model_path
-        self.data_key = data_key
-
-    def __call__(self, loaded_data_tuple, metadata, random_state):
+    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
         from sklearn.cluster import KMeans
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
@@ -217,30 +205,23 @@ class PreprocessKMeans:
             cluster_means[:, index_cluster] = np.mean(data[:, indicator_cluster], axis=1)
 
         clusters = np.reshape(clusters, valid_train_values.shape[1:])
-        if not os.path.exists(self.output_model_path):
-            os.makedirs(self.output_model_path)
-        np.save(os.path.join(self.output_model_path, 'kmeans_clusters_{}.npy'.format(self.data_key)), clusters)
+        if not os.path.exists(output_model_path):
+            os.makedirs(output_model_path)
+        np.save(os.path.join(output_model_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
         print('done')
 
         return replace(loaded_data_tuple, data=cluster_means)
 
 
+@dataclass(frozen=True)
 class PreprocessMiniBatchKMeans:
+    num_clusters: int
+    stop_mode: Optional[str] = None
+    transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    n_init: int = 10
+    batch_size: int = 100
 
-    def __init__(self, num_clusters, stop_mode=None, transform_fn=None, n_init=10, batch_size=100):
-        self.num_clusters = num_clusters
-        self.n_init = n_init
-        self.batch_size = batch_size
-        self.stop_mode = stop_mode
-        self.transform_fn = transform_fn
-        self.output_model_path = None
-        self.data_key = None
-
-    def set_model_path(self, output_model_path, data_key):
-        self.output_model_path = output_model_path
-        self.data_key = data_key
-
-    def __call__(self, loaded_data_tuple, metadata, random_state):
+    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
         from sklearn.cluster import MiniBatchKMeans
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
@@ -259,33 +240,30 @@ class PreprocessMiniBatchKMeans:
             cluster_means[:, index_cluster] = np.mean(data[:, indicator_cluster], axis=1)
 
         clusters = np.reshape(clusters, valid_train_values.shape[1:])
-        if not os.path.exists(self.output_model_path):
-            os.makedirs(self.output_model_path)
-        np.save(os.path.join(self.output_model_path, 'kmeans_clusters_{}.npy'.format(self.data_key)), clusters)
+        if not os.path.exists(output_model_path):
+            os.makedirs(output_model_path)
+        np.save(os.path.join(output_model_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
         print('done')
 
         return replace(loaded_data_tuple, data=cluster_means)
 
 
+@dataclass(frozen=True)
 class PreprocessHistogramBinEdgesDigitize:
+    bins: Union[int, str, Sequence[Union[int, float]]] = 10
+    range: Optional[Tuple[float, float]] = None
+    use_one_hot: bool = True
 
-    # noinspection PyShadowingBuiltins
-    def __init__(self, bins=10, range=None, use_one_hot=True):
-        self.bins = bins
-        self.range = range
-        self.use_one_hot = use_one_hot
-
-    # noinspection PyShadowingBuiltins
     def __call__(self, loaded_data_tuple, metadata, random_state):
-        bin_edges = np.histogram_bin_edges(loaded_data_tuple.data, self.bins, range)
+        bin_edges = np.histogram_bin_edges(loaded_data_tuple.data, self.bins, self.range)
         if np.isscalar(self.bins):
             bin_edges = bin_edges[1:]
         data = np.digitize(loaded_data_tuple.data, bin_edges, right=True)
         if self.use_one_hot:
             one_hot = np.zeros(data.shape + (len(bin_edges) + 1,), data.dtype)
             one_hot = np.reshape(one_hot, (-1, one_hot.shape[-1]))
-            for idx, bin in enumerate(np.reshape(data, -1)):
-                one_hot[idx, bin] = 1
+            for idx, bin_ in enumerate(np.reshape(data, -1)):
+                one_hot[idx, bin_] = 1
             data = np.reshape(one_hot, data.shape + (one_hot.shape[-1],))
         return replace(loaded_data_tuple, data=data)
 
@@ -306,23 +284,14 @@ def _quantile_digitize_column(item):
         raise ValueError('Unknown nan_policy: {}'.format(nan_policy))
 
 
+@dataclass(frozen=True)
 class PreprocessQuantileDigitize:
-
-    # noinspection PyShadowingBuiltins
-    def __init__(
-            self,
-            quantiles=10,
-            use_one_hot=True,
-            stop_mode: Optional[str] = None,
-            metadata_example_group_by: Optional[str] = None,
-            train_on_all: Optional[bool] = False,
-            nan_policy: str = 'propagate'):
-        self.quantiles = quantiles
-        self.use_one_hot = use_one_hot
-        self.stop_mode = stop_mode
-        self.metadata_example_group_by = metadata_example_group_by
-        self.train_on_all = train_on_all
-        self.nan_policy = nan_policy
+    quantiles: Union[np.ndarray, Sequence[float], int] = 10
+    use_one_hot: bool = True
+    stop_mode: Optional[str] = None
+    metadata_example_group_by: Optional[str] = None
+    train_on_all: Optional[bool] = False
+    nan_policy: str = 'propagate'
 
     def _quantile_digitize(self, data, indicator_train, quantiles):
         shape = data.shape
@@ -379,15 +348,14 @@ class PreprocessQuantileDigitize:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessBaseline:
-
-    def __init__(self, num_baseline):
-        """
-        Computes a running mean using a window of num_baseline values and subtracts this running mean
-        from the data. This completely ignores example boundaries. Validation/test examples are removed if the baselines
-        from those examples would overlap with train examples
-        """
-        self.num_baseline = num_baseline
+    """
+    Computes a running mean using a window of num_baseline values and subtracts this running mean
+    from the data. This completely ignores example boundaries. Validation/test examples are removed if the baselines
+    from those examples would overlap with train examples
+    """
+    num_baseline: int
 
     def _find_max_mins(self, examples, keep_if_greater_than=None):
         if examples is None:
@@ -439,22 +407,16 @@ class PreprocessBaseline:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessFeatureStandardize:
-
-    def __init__(self):
-        pass
-
     def __call__(self, loaded_data_tuple, metadata, random_state):
         d = np.reshape(loaded_data_tuple.data, (loaded_data_tuple.data.shape[0], -1))
         d = (d - np.nanmean(d, axis=1, keepdims=True)) / np.nanstd(d, axis=1, keepdims=True)
         return replace(loaded_data_tuple, data=np.reshape(d, loaded_data_tuple.data.shape))
 
 
+@dataclass(frozen=True)
 class PreprocessFeatureNormalize:
-
-    def __init__(self):
-        pass
-
     def __call__(self, loaded_data_tuple, metadata, random_state):
         d = np.reshape(loaded_data_tuple.data, (loaded_data_tuple.data.shape[0], -1))
         n = np.nansum(np.abs(d), axis=1, keepdims=True)
@@ -462,10 +424,9 @@ class PreprocessFeatureNormalize:
         return replace(loaded_data_tuple, data=np.reshape(d, loaded_data_tuple.data.shape))
 
 
+@dataclass(frozen=True)
 class PreprocessSequenceStandardize:
-
-    def __init__(self, stop_mode):
-        self.stop_mode = stop_mode
+    stop_mode: Optional[str] = None
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
 
@@ -493,10 +454,9 @@ class PreprocessSequenceStandardize:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessDiff:
-
-    def __init__(self, fill_value=0):
-        self.fill_value = fill_value
+    fill_value: Any = 0
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         data = loaded_data_tuple.data
@@ -504,14 +464,10 @@ class PreprocessDiff:
         return replace(loaded_data_tuple, data=np.concatenate([padding, np.diff(data, axis=0)]))
 
 
+@dataclass(frozen=True)
 class PreprocessPCA:
-
-    def __init__(
-            self,
-            feature_axis: int = 1,  # features with respect to PCA, e.g. subjects
-            stop_mode: Optional[str] = None):
-        self.feature_axis = feature_axis
-        self.stop_mode = stop_mode
+    feature_axis: int = 1  # features with respect to PCA, e.g. subjects
+    stop_mode: Optional[str] = None
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
 
@@ -544,20 +500,13 @@ class PreprocessPCA:
         return replace(loaded_data_tuple, data=result)
 
 
+@dataclass(frozen=True)
 class PreprocessStandardize:
-
-    def __init__(
-            self,
-            average_axis: Optional[int] = 1,
-            stop_mode: Optional[str] = None,
-            metadata_example_group_by: Optional[str] = None,
-            train_on_all: Optional[bool] = False,
-            use_absolute: Optional[bool] = False):
-        self.stop_mode = stop_mode
-        self.average_axis = average_axis
-        self.metadata_example_group_by = metadata_example_group_by
-        self.train_on_all = train_on_all
-        self.use_absolute = use_absolute
+    average_axis: Optional[int] = 1
+    stop_mode: Optional[str] = None
+    metadata_example_group_by: Optional[str] = None
+    train_on_all: Optional[bool] = False
+    use_absolute: Optional[bool] = False
 
     def _standardize(self, data, indicator_train):
 
@@ -634,19 +583,19 @@ class PreprocessStandardize:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessMakeBinary:
+    threshold: Any
+    dtype: Any = None
+    policy_equal: str = 'random'
+    policy_nan: str = 'propagate'
 
-    def __init__(self, threshold, dtype=None, policy_equal='random', policy_nan='propagate'):
-        self.threshold = threshold
-        if dtype is None:
-            if policy_nan == 'propagate':
-                self.dtype = np.float32
+    def __post_init__(self):
+        if self.dtype is None:
+            if self.policy_nan == 'propagate':
+                object.__setattr__(self, 'dtype', np.float32)
             else:
-                self.dtype = np.int32
-        else:
-            self.dtype = dtype
-        self.policy_equal = policy_equal
-        self.policy_nan = policy_nan
+                object.__setattr__(self, 'dtype', np.int32)
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         data = loaded_data_tuple.data
@@ -678,10 +627,9 @@ class PreprocessMakeBinary:
         return replace(loaded_data_tuple, data=indicator.astype(self.dtype))
 
 
+@dataclass(frozen=True)
 class PreprocessNanMean:
-
-    def __init__(self, axis: int = 1):
-        self.axis = axis
+    axis: int = 1
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         with warnings.catch_warnings():
@@ -691,45 +639,41 @@ class PreprocessNanMean:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessSqueeze:
-
-    def __init__(self, axis: int = 1):
-        self.axis = axis
+    axis: int = 1
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         return replace(loaded_data_tuple, data=np.squeeze(loaded_data_tuple.data, self.axis))
 
 
+@dataclass(frozen=True)
 class PreprocessClip:
-
-    def __init__(
-            self, minimum=None, maximum=None, value_beyond_min=None, value_beyond_max=None):
-        self.value_beyond_min = value_beyond_min
-        self.value_beyond_max = value_beyond_max
-        self.min = minimum
-        self.max = maximum
+    minimum: Optional[Any] = None
+    maximum: Optional[Any] = None
+    value_beyond_min: Optional[Any] = None
+    value_beyond_max: Optional[Any] = None
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         data = loaded_data_tuple.data
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', category=RuntimeWarning)
-            if self.min is not None:
+            if self.minimum is not None:
                 if self.value_beyond_min is not None:
-                    data = np.where(data < self.min, self.value_beyond_min, data)
+                    data = np.where(data < self.minimum, self.value_beyond_min, data)
                 else:
-                    data = np.maximum(self.min, data)
-            if self.max is not None:
+                    data = np.maximum(self.minimum, data)
+            if self.maximum is not None:
                 if self.value_beyond_max is not None:
-                    data = np.where(data > self.max, self.value_beyond_max, data)
+                    data = np.where(data > self.maximum, self.value_beyond_max, data)
                 else:
-                    data = np.minimum(self.max, data)
+                    data = np.minimum(self.maximum, data)
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessNanGeometricMean:
-
-    def __init__(self, axis=1):
-        self.axis = axis
+    axis: int = 1
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         with warnings.catch_warnings():
@@ -739,14 +683,17 @@ class PreprocessNanGeometricMean:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessGaussianBlur:
-
-    def __init__(self, sigma=1, axis=1, order=0, mode='reflect', cval=0.0, truncate=4.0):
-        """
-        This is meant to blue over a non-example axis, e.g. spatially in fMRI
-        """
-        self.sigma, self.axis, self.order, self.mode, self.cval, self.truncate = \
-            sigma, axis, order, mode, cval, truncate
+    """
+    This is meant to blue over a non-example axis, e.g. spatially in fMRI
+    """
+    sigma: float = 1.
+    axis: int = 1
+    order: int = 0
+    mode: str = 'reflect'
+    cval: float = 0.0
+    truncate: float = 4.0
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         data = gaussian_filter1d(
@@ -756,10 +703,10 @@ class PreprocessGaussianBlur:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessCompress:
-
-    def __init__(self, metadata_condition_name, compress_axis=1):
-        self.metadata_condition_name, self.compress_axis = metadata_condition_name, compress_axis
+    metadata_condition_name: str
+    compress_axis: int = 1
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         if metadata is None or self.metadata_condition_name not in metadata:
@@ -769,42 +716,43 @@ class PreprocessCompress:
         return replace(loaded_data_tuple, data=data)
 
 
+@dataclass(frozen=True)
 class PreprocessSoSFilter:
-
-    def __init__(self, sos, axis=0):
-        """
-        Apply scipy.signal.sosfilt to data
-        Args:
-            sos: iirfilter created with output='sos',
-                e.g.
-                    A high-pass butterworth filter for a sampling rate of 0.5 Hz
-                    and cutoff 0.2 Hz
-                signal.butter(10, 0.2, 'hp', fs=0.5, output='sos')
-            axis: Which axis to apply along
-        """
-        self.sos = sos
-        self.axis = axis
+    """
+    Apply scipy.signal.sosfilt to data
+    sos: iirfilter created with output='sos',
+        e.g.
+            A high-pass butterworth filter for a sampling rate of 0.5 Hz
+            and cutoff 0.2 Hz
+        signal.butter(10, 0.2, 'hp', fs=0.5, output='sos')
+    axis: Which axis to apply along
+    """
+    sos: Any
+    axis: int = 0
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
         return replace(loaded_data_tuple, data=sosfilt(self.sos, loaded_data_tuple.data, axis=self.axis))
 
 
-class PreprocessRandomPair:
+DataIdPairFnT = Callable[
+    [Sequence[int],   # data_ids1
+     Sequence[int],   # data_ids2
+     Sequence[bool],  # is_stop1
+     Sequence[bool],  # is_stop2
+     Any,             # random_state
+     bool,            # emit_both
+     str],            # stop_mode
+    Sequence[Tuple[int, int]]]  # data_id_pairs
 
-    def __init__(
-            self,
-            num_samples_per_group,
-            metadata_example_group_by,
-            data_id_pair_fn_map,
-            combine_fn=None,
-            emit_both=False,
-            stop_mode=None):
-        self.num_samples_per_group = num_samples_per_group
-        self.metadata_example_group_by = metadata_example_group_by
-        self.data_id_pair_fn_per_response_data = data_id_pair_fn_map
-        self.combine_fn = combine_fn
-        self.emit_both = emit_both
-        self.stop_mode = stop_mode
+
+@dataclass(frozen=True)
+class PreprocessRandomPair:
+    num_samples_per_group: int
+    metadata_example_group_by: str
+    data_id_pair_fn_per_response_data: Union[DataIdPairFnT, Mapping[str, DataIdPairFnT]]
+    combine_fn: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None
+    emit_both: bool = False
+    stop_mode: Optional[str] = None
 
     @staticmethod
     def pair_from_end(data_ids1, data_ids2, is_stop1, is_stop2, random_state, emit_both, stop_mode):
@@ -1074,21 +1022,14 @@ class PreprocessRandomPair:
         return loaded_data_tuple, metadata
 
 
+@dataclass(frozen=True)
 class PreprocessToDisk:
+    delete: bool = True
 
-    def __init__(self, delete=True):
-        self.output_model_path = None
-        self.data_key = None
-        self.delete = delete
-
-    def set_model_path(self, output_model_path, data_key):
-        self.output_model_path = output_model_path
-        self.data_key = data_key
-
-    def __call__(self, loaded_data_tuple, metadata, random_state):
-        if not os.path.exists(self.output_model_path):
-            os.makedirs(self.output_model_path)
-        print('saving {} to disk...'.format(self.data_key), end='', flush=True)
+    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
+        if not os.path.exists(output_model_path):
+            os.makedirs(output_model_path)
+        print('saving {} to disk...'.format(data_key), end='', flush=True)
         unique_ids = list()
         lengths = list()
         data_ids = list()
@@ -1098,7 +1039,7 @@ class PreprocessToDisk:
             lengths.append(len(ex.data_ids))
             data_ids.extend(ex.data_ids)
         np.savez(
-            os.path.join(self.output_model_path, '{}.npz'.format(self.data_key)),
+            os.path.join(output_model_path, '{}.npz'.format(data_key)),
             unique_ids=np.array(unique_ids),
             lengths=np.array(lengths),
             data_ids=np.array(data_ids),
@@ -1110,23 +1051,26 @@ class PreprocessToDisk:
         return loaded_data_tuple
 
 
-def preprocess_fork_no_cluster_to_disk(name, kind, preprocessor):
-    if preprocessor is None or isinstance(preprocessor, str):
-        return None, None
-    if callable(preprocessor):
-        if isinstance(preprocessor, PreprocessKMeans):
-            return name + '_no_cluster_to_disk', PreprocessToDisk()
-        else:
+@dataclass(frozen=True)
+class PreprocessForkNoClusterToDisk:
+
+    def __call__(self, name, kind, preprocessor):
+        if preprocessor is None or isinstance(preprocessor, str):
             return None, None
-    else:
-        new_preprocess = list()
-        has_kmeans = False
-        for step in preprocessor:
-            if isinstance(step, PreprocessKMeans):
-                has_kmeans = True
+        if callable(preprocessor):
+            if isinstance(preprocessor, PreprocessKMeans):
+                return name + '_no_cluster_to_disk', PreprocessToDisk()
             else:
-                new_preprocess.append(step)
-        if not has_kmeans:
-            return None, None
-        new_preprocess.append(PreprocessToDisk())
-        return name + '_no_cluster_to_disk', new_preprocess
+                return None, None
+        else:
+            new_preprocess = list()
+            has_kmeans = False
+            for step in preprocessor:
+                if isinstance(step, PreprocessKMeans):
+                    has_kmeans = True
+                else:
+                    new_preprocess.append(step)
+            if not has_kmeans:
+                return None, None
+            new_preprocess.append(PreprocessToDisk())
+            return name + '_no_cluster_to_disk', new_preprocess

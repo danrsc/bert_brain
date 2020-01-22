@@ -1,24 +1,20 @@
 import os
 import json
+from dataclasses import dataclass
 
 import numpy as np
 
 from ..common import split_with_indices
 from .input_features import RawData, KindData, ResponseKind
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 
 
 __all__ = ['WordInContext']
 
 
+@dataclass(frozen=True)
 class WordInContext(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='word_in_context_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('word_in_context_path')
 
     @staticmethod
     def sentence_and_keyword_index(sentence, keyword, character_index):
@@ -63,7 +59,7 @@ class WordInContext(CorpusBase):
     def response_key(cls):
         return 'wic'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = WordInContext._read_examples(
             os.path.join(self.path, 'train.jsonl'), example_manager, labels)

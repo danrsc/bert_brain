@@ -10,12 +10,12 @@ import torch
 import torch.cuda
 
 from .common import SwitchRemember
-from .data_sets import ResponseKind, CorpusTypes, PreprocessDetrend, PreprocessStandardize, \
-    PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, preprocess_fork_no_cluster_to_disk, \
-    PreprocessQuantileDigitize
+from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
+    PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, PreprocessForkNoClusterToDisk, \
+    PreprocessQuantileDigitize, corpus_types
 from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration, PooledFromSequence, \
     MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention
-from .settings import Settings, OptimizationSettings, CriticSettings
+from .settings import Settings, OptimizationSettings, CriticSettings, LearningRateSchedule
 
 
 __all__ = ['task_hash', 'set_random_seeds', 'iterate_powerset', 'named_variations', 'singleton_variation']
@@ -32,18 +32,18 @@ def superglue_heads(corpus, sequence_key=None, pooled_key=None):
 
     head = OrderedDict()
     critic = OrderedDict()
-    if isinstance(corpus, CorpusTypes.CommitmentBank):
+    if isinstance(corpus, corpus_types.CommitmentBank):
         head['{}_linear'.format(response_key)] = KeyedLinear(
             pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
         critic[response_key] = CriticSettings(
             critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=4))
         return head, critic
-    if isinstance(corpus, (CorpusTypes.BooleanQuestions, CorpusTypes.RecognizingTextualEntailment)):
+    if isinstance(corpus, (corpus_types.BooleanQuestions, corpus_types.RecognizingTextualEntailment)):
         head['{}_linear'.format(response_key)] = KeyedLinear(
             pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
         critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         return head, critic
-    elif isinstance(corpus, CorpusTypes.WordInContext):
+    elif isinstance(corpus, corpus_types.WordInContext):
         head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokens(
             2,
             response_key, 'data_ids',
@@ -56,9 +56,9 @@ def superglue_heads(corpus, sequence_key=None, pooled_key=None):
         return head, critic
     elif isinstance(
             corpus,
-            (CorpusTypes.ChoiceOfPlausibleAlternatives,
-             CorpusTypes.ReadingComprehensionWithCommonSenseReasoning,
-             CorpusTypes.MultiSentenceReadingComprehension)):
+            (corpus_types.ChoiceOfPlausibleAlternatives,
+             corpus_types.ReadingComprehensionWithCommonSenseReasoning,
+             corpus_types.MultiSentenceReadingComprehension)):
         head['{}_linear'.format(response_key)] = KeyedLinear(
             pooled_key, is_sequence=False, output_key_to_shape={
                 '{}_choice'.format(response_key): 1}, apply_at_most_one_data_id=True)
@@ -66,7 +66,7 @@ def superglue_heads(corpus, sequence_key=None, pooled_key=None):
             None, 'multipart_id', response_key, '{}_choice'.format(response_key))
         critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
         return head, critic
-    elif isinstance(corpus, CorpusTypes.WinogradSchemaChallenge):
+    elif isinstance(corpus, corpus_types.WinogradSchemaChallenge):
         head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
             2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
             output_key_to_shape={response_key: 1})
@@ -172,19 +172,19 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
 
     if name == 'erp':
         return [
-            Settings(corpora=(CorpusTypes.UclCorpus(),), num_runs=100, loss_tasks=set(t))
+            Settings(corpora=(corpus_types.UclCorpus(),), num_runs=100, loss_tasks=set(t))
             for t in iterate_powerset(erp_tasks)]
     elif name == 'erp_joint':
-        return Settings(corpora=(CorpusTypes.UclCorpus(),), loss_tasks=set(erp_tasks), num_runs=100)
+        return Settings(corpora=(corpus_types.UclCorpus(),), loss_tasks=set(erp_tasks), num_runs=100)
     elif name == 'nat_stories':
         settings = Settings(
             corpora=(
-                CorpusTypes.NaturalStoriesCorpus(
+                corpus_types.NaturalStoriesCorpus(
                     froi_window_duration=10.,
                     froi_minimum_duration_required=9.5,
                     froi_use_word_unit_durations=False,
                     froi_sentence_mode='ignore'),
-                CorpusTypes.UclCorpus()),
+                corpus_types.UclCorpus()),
             optimization_settings=OptimizationSettings(num_train_epochs=50),
             num_runs=10)
         settings.head_graph_parts[ResponseKind.ns_froi] = OrderedDict(
@@ -200,7 +200,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
     elif name == 'ns_froi':
         settings = Settings(
             corpora=(
-                CorpusTypes.NaturalStoriesCorpus(
+                corpus_types.NaturalStoriesCorpus(
                     froi_sentence_mode='ignore',
                     froi_window_duration=10.,
                     froi_minimum_duration_required=9.5,
@@ -218,13 +218,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
     elif name == 'number_agreement':
         agr = ('colorless', 'linzen_agree')
         return [Settings(
-            corpora=(CorpusTypes.ColorlessGreenCorpus(), CorpusTypes.LinzenAgreementCorpus(), CorpusTypes.UclCorpus()),
+            corpora=(
+                corpus_types.ColorlessGreenCorpus(), corpus_types.LinzenAgreementCorpus(), corpus_types.UclCorpus()),
             optimization_settings=OptimizationSettings(num_train_epochs=50),
             num_runs=10,
             loss_tasks=set(t)) for t in [agr, erp_tasks + agr, erp_tasks]]
     elif name == 'hp_fmri_I_20':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=['I'],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -247,7 +248,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_fmri_I_reptile':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=['I'],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -273,7 +274,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_fmri_meg_joint':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=hp_fmri_subjects,
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -306,7 +307,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
     elif name in ['hp_fmri_simple_{}'.format(s) for s in hp_fmri_subjects]:
         subject_ = name[name.var.rindex('_') + 1:]
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects='hp_fmri_{}'.format(subject_),
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -333,10 +334,10 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return OrderedDict(
             ('hp_fmri_simple_{}'.format(s), _named_variations('hp_fmri_simple_{}'.format(s))) for s in hp_fmri_subjects)
     elif name == 'sst':
-        return Settings(corpora=(CorpusTypes.StanfordSentimentTreebank(),), loss_tasks={'sentiment'}, num_runs=1)
+        return Settings(corpora=(corpus_types.StanfordSentimentTreebank(),), loss_tasks={'sentiment'}, num_runs=1)
     elif name == 'hp_from_I':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=hp_fmri_subjects,
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -366,7 +367,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return training_variations
     elif name == 'hp_fmri_diff_cluster':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=hp_fmri_subjects,
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -388,9 +389,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             ('diff', PreprocessRandomPair(
                 num_samples_per_group=5000,
                 metadata_example_group_by='fmri_runs',
-                data_id_pair_fn_map=PreprocessRandomPair.pair_from_end)),
+                data_id_pair_fn_per_response_data=PreprocessRandomPair.pair_from_end)),
             PreprocessMakeBinary(threshold=0)]
-        settings.preprocess_fork_fn = preprocess_fork_no_cluster_to_disk
+        settings.preprocess_fork_fn = PreprocessForkNoClusterToDisk()
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
             untransformed_pooled_linear=KeyedLinear(
                 ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
@@ -399,7 +400,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_meg_diff_drc_25':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=[],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -427,7 +428,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_meg_diff_drc_25_one':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=[],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -457,7 +458,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_meg_p75_drc_one':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=[],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -491,7 +492,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_meg_cpg':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=[],
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -532,7 +533,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_fmri_reptile':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=None,  # None means all
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -541,7 +542,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 fmri_smooth_factor=None,
                 group_meg_sentences_like_fmri=True,
                 meg_subjects=[],
-                meg_kind='direct_rank_clustered_percentile_75_25_ms')),
+                meg_kind='direct_rank_clustered_percentile_75_25_ms'),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=2,
                 num_epochs_train_prediction_heads_only=0,
@@ -568,7 +569,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     elif name == 'hp_fmri_meg_meta':
         settings = Settings(
-            corpora=(CorpusTypes.HarryPotterCorpus(
+            corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=None,  # None means all
                 fmri_sentence_mode='ignore',
                 fmri_window_duration=10.1,
@@ -577,7 +578,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 fmri_smooth_factor=None,
                 group_meg_sentences_like_fmri=True,
                 meg_subjects=None,  # None means all
-                meg_kind='direct_rank_clustered_percentile_75_25_ms')),
+                meg_kind='direct_rank_clustered_percentile_75_25_ms'),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
                 num_epochs_train_prediction_heads_only=0,
@@ -634,27 +635,92 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
     elif name == 'superglue':
         settings = Settings(
             corpora=(
-                CorpusTypes.BooleanQuestions(),
-                CorpusTypes.CommitmentBank(),
-                CorpusTypes.ChoiceOfPlausibleAlternatives(),
-                # CorpusTypes.MultiSentenceReadingComprehension(),
-                # CorpusTypes.ReadingComprehensionWithCommonSenseReasoning(),
-                CorpusTypes.RecognizingTextualEntailment(),
-                CorpusTypes.WinogradSchemaChallenge(),
-                CorpusTypes.WordInContext()),
+                corpus_types.BooleanQuestions(),
+                corpus_types.CommitmentBank(),
+                corpus_types.ChoiceOfPlausibleAlternatives(),
+                # corpus_types.MultiSentenceReadingComprehension(),
+                # corpus_types.ReadingComprehensionWithCommonSenseReasoning(),
+                corpus_types.RecognizingTextualEntailment(),
+                corpus_types.WinogradSchemaChallenge(),
+                corpus_types.WordInContext()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=2,
+                num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0),
+                num_final_epochs_train_prediction_heads_only=0,
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                train_batch_size=8,
+                predict_batch_size=8),
             loss_tasks=set(),
-            # loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects),
-            # meta_learn_gradient_loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects).union(
-            #     'hp_meg_{}'.format(s) for s in hp_meg_subjects),
-            # num_meta_learn_gradient_samples=10,
-            # num_meta_learn_no_gradient_samples=0,
             weight_losses_by_inverse_example_counts=False,
-            batch_kind=('single_task_uniform', 100),
-            num_runs=4)
+            batch_kind=('single_task_uniform', 5000),
+            num_runs=1)
+        for corpus in settings.corpora:
+            heads, critics = superglue_heads(
+                corpus, sequence_key=('bert', 'sequence'), pooled_key=('bert', 'pooled'))
+            settings.head_graph_parts.update(heads)
+            settings.critics.update(critics)
+            for k in critics:
+                settings.loss_tasks.add(k)
+        return settings
+    elif name == 'superglue_meta_cpg':
+        settings = Settings(
+            corpora=(
+                corpus_types.BooleanQuestions(),
+                corpus_types.CommitmentBank(),
+                corpus_types.ChoiceOfPlausibleAlternatives(),
+                # corpus_types.MultiSentenceReadingComprehension(),
+                # corpus_types.ReadingComprehensionWithCommonSenseReasoning(),
+                corpus_types.RecognizingTextualEntailment(),
+                corpus_types.WinogradSchemaChallenge(),
+                corpus_types.WordInContext()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0,
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                train_batch_size=8,
+                predict_batch_size=8),
+            loss_tasks=set(),
+            weight_losses_by_inverse_example_counts=False,
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            batch_kind=('single_task_uniform', 5000),
+            num_runs=1)
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 3,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'), is_sequence=True,
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                        should_norm=True))),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+        for corpus in settings.corpora:
+            heads, critics = superglue_heads(
+                corpus, sequence_key='sequence_all_bottleneck', pooled_key='pooled_all_bottleneck')
+            settings.head_graph_parts.update(heads)
+            settings.critics.update(critics)
+            for k in critics:
+                settings.meta_learn_gradient_loss_tasks.add(k)
+        return settings
+    elif name == 'boolq':
+        settings = Settings(
+            corpora=(
+                corpus_types.BooleanQuestions(),),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0,
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                train_batch_size=8,
+                predict_batch_size=8),
+            loss_tasks=set(),
+            weight_losses_by_inverse_example_counts=False,
+            # batch_kind=('single_task_uniform', 100),
+            num_runs=1)
         for corpus in settings.corpora:
             heads, critics = superglue_heads(
                 corpus, sequence_key=('bert', 'sequence'), pooled_key=('bert', 'pooled'))

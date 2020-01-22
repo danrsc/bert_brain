@@ -5,21 +5,20 @@ import csv
 from dataclasses import dataclass
 from collections import OrderedDict
 import dataclasses
-from functools import partial
 from typing import Sequence, Optional
 
 import numpy as np
 from scipy.io import loadmat
 
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample
 from .spacy_token_meta import make_tokenizer_model
 from .input_features import RawData, KindData, ResponseKind
 from .praat_textgrid import TextGrid
 
 
-__all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus', 'natural_stories_leave_stories_out',
-           'natural_stories_make_leave_stories_out']
+__all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus', 'NaturalStoriesLeaveStoriesOut',
+           'NaturalStoriesMakeLeaveStoriesOut']
 
 
 logger = logging.getLogger(__name__)
@@ -262,7 +261,6 @@ def _read_coding(path, story_name):
 
 
 def _read_codings(directory_path):
-
     result = dict()
     for coding_file_name in [
             'aqua.txt', 'boar.txt', 'elvis.txt', 'high_school.txt', 'king_of_birds.txt', 'matchstick.txt',
@@ -273,71 +271,71 @@ def _read_codings(directory_path):
     return result
 
 
+@dataclasses.dataclass(frozen=True)
 class NaturalStoriesCorpus(CorpusBase):
+    """
+    path: The path to the directory where the data is stored
+    include_reaction_times: Whether to include self-paced reading times
+    group_reaction_time_sentences_like_froi: If False, examples for reaction times are one sentence each.
+        If True, then examples are created as they would be for fROIs, i.e. including sentences as required by
+        the froi_window_size_features parameter
+    froi_subjects: Which subjects' data to load for fROIs. None will cause all subjects' data to load. An
+        empty list can be provided to cause fROI loading to be skipped.
+    froi_skip_start_trs: The number of TRs to remove from the beginning of each fMRI run, since the first few
+        TRs can be problematic
+    froi_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
+        problematic
+    froi_window_duration: The duration of the window of time preceding a TR from which to
+        choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
+        which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
+    froi_minimum_duration_required: The minimum duration of the time between the earliest word used to
+        predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
+        target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
+        window_duration before the TR be min_word_time, if tr_time - min_word_time <
+        minimum_duration_required, the TR is not is not used to build any examples.
+    froi_use_word_unit_durations: If True, then window_duration and minimum_duration_required are in number
+        of words rather than time_units. window_duration = 8. would select the 8 previous words.
+    froi_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
+        combination of sentences as described above. If 'single', changes the behavior of the function so that
+        the feature window is truncated by the start of a sentence, thus resulting in examples with one
+        sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
+        without consideration of the sentence boundaries
+    froi_minimum_story_count: A participant must have heard at least this many stories in the scanner to be
+        included
+    """
+    path: str = path_attribute_field('natural_stories_path')
+    include_reaction_times: bool = True
+    group_reaction_time_sentences_like_froi: bool = False
+    froi_subjects: Optional[Sequence[str]] = None
+    froi_skip_start_trs: int = 0
+    froi_skip_end_trs: int = 0
+    froi_window_duration: float = 8.
+    froi_minimum_duration_required: float = 7.8
+    froi_use_word_unit_durations: bool = False
+    froi_sentence_mode: str = 'multiple'
+    froi_minimum_story_count: int = 1
+    froi_example_builder: FMRICombinedSentenceExamples = dataclasses.field(init=False, repr=False, compare=False)
 
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='natural_stories_path')
+    def __post_init__(self, index_run: Optional[int]):
+        def _as_tuple(name):
+            val = getattr(self, name)
+            if val is None or isinstance(val, tuple):
+                return
+            if np.isscalar(val):
+                # noinspection PyCallByClass
+                object.__setattr__(self, name, (val,))
+            else:
+                # noinspection PyCallByClass
+                object.__setattr__(self, name, tuple(val))
+        _as_tuple('froi_subjects')
+        object.__setattr__(self, 'froi_example_builder', FMRICombinedSentenceExamples(
+            window_duration=self.froi_window_duration,
+            minimum_duration_required=self.froi_minimum_duration_required,
+            use_word_unit_durations=self.froi_use_word_unit_durations,
+            sentence_mode=self.froi_sentence_mode))
+        super().__post_init__(index_run)
 
-    def __init__(
-            self,
-            path: Optional[str] = None,
-            include_reaction_times: bool = True,
-            group_reaction_time_sentences_like_froi: bool = False,
-            froi_subjects: Optional[Sequence[str]] = None,
-            froi_skip_start_trs: int = 0,
-            froi_skip_end_trs: int = 0,
-            froi_window_duration: float = 8.,
-            froi_minimum_duration_required: float = 7.8,
-            froi_use_word_unit_durations: bool = False,
-            froi_sentence_mode: str = 'multiple',
-            froi_minimum_story_count: int = 1):
-        """
-
-        Args:
-            path: The path to the directory where the data is stored
-            include_reaction_times: Whether to include self-paced reading times
-            group_reaction_time_sentences_like_froi: If False, examples for reaction times are one sentence each.
-                If True, then examples are created as they would be for fROIs, i.e. including sentences as required by
-                the froi_window_size_features parameter
-            froi_subjects: Which subjects' data to load for fROIs. None will cause all subjects' data to load. An
-                empty list can be provided to cause fROI loading to be skipped.
-            froi_skip_start_trs: The number of TRs to remove from the beginning of each fMRI run, since the first few
-                TRs can be problematic
-            froi_skip_end_trs: The number of TRs to remove from the end of each fMRI run, since the last few TRs can be
-                problematic
-            froi_window_duration: The duration of the window of time preceding a TR from which to
-                choose the words that will be involved in predicting that TR. For example, if this is 8, then all words
-                which occurred with tr_time > word_time >= tr_time - 8 will be used to build the example for the TR.
-            froi_minimum_duration_required: The minimum duration of the time between the earliest word used to
-                predict a TR and the occurrence of the TR. This much time is required for the TR to be a legitimate
-                target. For example, if this is set to 7.5, then letting the time of the earliest word occurring in the
-                window_duration before the TR be min_word_time, if tr_time - min_word_time <
-                minimum_duration_required, the TR is not is not used to build any examples.
-            froi_use_word_unit_durations: If True, then window_duration and minimum_duration_required are in number
-                of words rather than time_units. window_duration = 8. would select the 8 previous words.
-            froi_sentence_mode: One of ['multiple', 'single', 'ignore']. When 'multiple', an example consists of the
-                combination of sentences as described above. If 'single', changes the behavior of the function so that
-                the feature window is truncated by the start of a sentence, thus resulting in examples with one
-                sentence at a time. If 'ignore', then each example consists of exactly the words in the feature window
-                without consideration of the sentence boundaries
-            froi_minimum_story_count: A participant must have heard at least this many stories in the scanner to be
-                included
-        """
-        self.path = path
-        self.include_reaction_times = include_reaction_times
-        self.group_reaction_time_sentences_like_froi = group_reaction_time_sentences_like_froi
-        self.froi_subjects = froi_subjects
-        self.froi_skip_start_trs = froi_skip_start_trs
-        self.froi_skip_end_trs = froi_skip_end_trs
-        self.froi_example_builder = FMRICombinedSentenceExamples(
-            window_duration=froi_window_duration,
-            minimum_duration_required=froi_minimum_duration_required,
-            use_word_unit_durations=froi_use_word_unit_durations,
-            sentence_mode=froi_sentence_mode)
-        self.froi_minimum_story_count = froi_minimum_story_count
-
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
 
         data = OrderedDict()
         story_ids = list()
@@ -640,6 +638,7 @@ class NaturalStoriesCorpus(CorpusBase):
 
         return data, item_to_num_images, subjects, subject_stories
 
+    # noinspection PyMethodMayBeStatic
     def _add_froi_targets(
             self, example_manager: CorpusExampleUnifier, examples, froi_response_data, item_to_num_images):
 
@@ -696,67 +695,76 @@ def read_natural_story_codings(directory_path, corpus_loader):
     return result
 
 
-def natural_stories_make_leave_stories_out(index_variation_run):
-    return partial(natural_stories_leave_stories_out, index_variation_run=index_variation_run)
+@dataclasses.dataclass(frozen=True)
+class NaturalStoriesMakeLeaveStoriesOut:
+    shuffle: bool = True
+
+    def __call__(self, index_variation_run):
+        return NaturalStoriesLeaveStoriesOut(index_variation_run, self.shuffle)
 
 
-def natural_stories_leave_stories_out(raw_data, index_variation_run, random_state=None, shuffle=True):
-    story_ids = raw_data.metadata['story_ids']
-    stories_with_froi = set()
-    stories_without_froi = set()
-    froi_response_keys = set(
-        k for k in raw_data.response_data if raw_data.response_data[k].kind == ResponseKind.ns_froi)
-    for example in raw_data.input_examples:
-        for k in raw_data.response_data:
-            if np.any(example.data_ids[k] >= 0):
-                if k in froi_response_keys:
-                    stories_with_froi.add(story_ids[example.unique_id])
-                else:
-                    stories_without_froi.add(story_ids[example.unique_id])
+@dataclasses.dataclass(frozen=True)
+class NaturalStoriesLeaveStoriesOut:
+    index_variation_run: int
+    shuffle: bool = True
 
-    stories_without_froi = list(sorted(stories_without_froi))
-    stories_with_froi = list(sorted(stories_with_froi))
+    def __call__(self, raw_data, random_state=None):
+        story_ids = raw_data.metadata['story_ids']
+        stories_with_froi = set()
+        stories_without_froi = set()
+        froi_response_keys = set(
+            k for k in raw_data.response_data if raw_data.response_data[k].kind == ResponseKind.ns_froi)
+        for example in raw_data.input_examples:
+            for k in raw_data.response_data:
+                if np.any(example.data_ids[k] >= 0):
+                    if k in froi_response_keys:
+                        stories_with_froi.add(story_ids[example.unique_id])
+                    else:
+                        stories_without_froi.add(story_ids[example.unique_id])
 
-    item_to_story = dict(
-        (i + 1, s) for i, s in enumerate(
-            ['Boar', 'Aqua', 'MatchstickSeller', 'KingOfBirds', 'Elvis',
-             'MrSticky', 'HighSchool', 'Roswell', 'Tulips', 'Tourette']))
+        stories_without_froi = list(sorted(stories_without_froi))
+        stories_with_froi = list(sorted(stories_with_froi))
 
-    if len(stories_with_froi) == 0:
-        folds = stories_without_froi
-    elif len(stories_without_froi) == 0:
-        folds = stories_with_froi
-    else:
-        folds = list(itertools.product(stories_without_froi, stories_with_froi))
+        item_to_story = dict(
+            (i + 1, s) for i, s in enumerate(
+                ['Boar', 'Aqua', 'MatchstickSeller', 'KingOfBirds', 'Elvis',
+                 'MrSticky', 'HighSchool', 'Roswell', 'Tulips', 'Tourette']))
 
-    validation_stories = folds[index_variation_run % len(folds)]
-    if np.isscalar(validation_stories):
-        validation_stories = {validation_stories}
-    else:
-        validation_stories = set(validation_stories)
-
-    # noinspection PyTypeChecker
-    validation_story_names = [item_to_story[s] for s in sorted(validation_stories)]
-    logger.info('Validation stories: {}'.format(validation_story_names))
-
-    train_examples = list()
-    validation_examples = list()
-    for example in raw_data.input_examples:
-        if story_ids[example.unique_id] in validation_stories:
-            validation_examples.append(example)
+        if len(stories_with_froi) == 0:
+            folds = stories_without_froi
+        elif len(stories_without_froi) == 0:
+            folds = stories_with_froi
         else:
-            train_examples.append(example)
+            folds = list(itertools.product(stories_without_froi, stories_with_froi))
 
-    if shuffle:
-        if random_state is not None:
-            random_state.shuffle(train_examples)
-            random_state.shuffle(validation_examples)
+        validation_stories = folds[self.index_variation_run % len(folds)]
+        if np.isscalar(validation_stories):
+            validation_stories = {validation_stories}
         else:
-            np.random.shuffle(train_examples)
-            np.random.shuffle(validation_examples)
+            validation_stories = set(validation_stories)
 
-    test_examples = list()
-    return train_examples, validation_examples, test_examples
+        # noinspection PyTypeChecker
+        validation_story_names = [item_to_story[s] for s in sorted(validation_stories)]
+        logger.info('Validation stories: {}'.format(validation_story_names))
+
+        train_examples = list()
+        validation_examples = list()
+        for example in raw_data.input_examples:
+            if story_ids[example.unique_id] in validation_stories:
+                validation_examples.append(example)
+            else:
+                train_examples.append(example)
+
+        if self.shuffle:
+            if random_state is not None:
+                random_state.shuffle(train_examples)
+                random_state.shuffle(validation_examples)
+            else:
+                np.random.shuffle(train_examples)
+                np.random.shuffle(validation_examples)
+
+        test_examples = list()
+        return train_examples, validation_examples, test_examples
 
 
 # library(plyr)

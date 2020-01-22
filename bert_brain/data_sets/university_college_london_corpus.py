@@ -1,36 +1,28 @@
 import csv
 import os
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.io import loadmat
 
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['UclCorpus']
 
 
+@dataclass(frozen=True)
 class UclCorpus(CorpusBase):
+    frank_2013_eye_path: str = path_attribute_field('frank_2013_eye_path')
+    frank_2015_erp_path: str = path_attribute_field('frank_2015_erp_path')
+    subtract_erp_baseline: bool = False
+    include_erp: bool = True
+    include_eye: bool = True
+    self_paced_inclusion: str = 'all'
 
-    @classmethod
-    def _path_attributes(cls):
-        return dict(
-            frank_2013_eye_path='frank_2013_eye_path',
-            frank_2015_erp_path='frank_2015_erp_path')
-
-    def __init__(
-            self, frank_2013_eye_path=None, frank_2015_erp_path=None,
-            subtract_erp_baseline=False, include_erp=True, include_eye=True, self_paced_inclusion='all'):
-        self.frank_2013_eye_path = frank_2013_eye_path
-        self.frank_2015_erp_path = frank_2015_erp_path
-        self.subtract_erp_baseline = subtract_erp_baseline
-        self.include_erp = include_erp
-        self.include_eye = include_eye
-        self.self_paced_inclusion = self_paced_inclusion
-
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         data = OrderedDict()
         if self.include_erp:
             erp = self._read_erp(example_manager)

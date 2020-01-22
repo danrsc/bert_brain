@@ -7,7 +7,7 @@ import spacy
 from spacy.language import Language as SpacyLanguage
 from spacy.symbols import ORTH
 
-from pytorch_pretrained_bert import BertTokenizer
+from transformers import BertTokenizer
 
 from .input_features import InputFeatures
 
@@ -47,7 +47,7 @@ def _is_stop(spacy_token):
     return spacy_token.pos_ not in content_pos
 
 
-def make_tokenizer_model(model='en_core_web_md'):
+def make_tokenizer_model(model: str = 'en_core_web_md') -> SpacyLanguage:
     model = spacy.load(model)
     # work around for bug in stop words
     for word in model.Defaults.stop_words:

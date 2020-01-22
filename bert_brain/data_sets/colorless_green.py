@@ -10,7 +10,7 @@ from .syntactic_dependency import preprocess_english_morphology, collect_paradig
     make_ltm_to_word, GeneratedExample
 
 from .input_features import RawData, FieldSpec, KindData, ResponseKind
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 
 
 __all__ = ['ColorlessGreenCorpus', 'LinzenAgreementCorpus']
@@ -109,20 +109,15 @@ def _agreement_data(example_manager: CorpusExampleUnifier, examples, data_key):
     return classes
 
 
+@dataclass(frozen=True)
 class ColorlessGreenCorpus(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='english_web_universal_dependencies_v_2_3_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('english_web_universal_dependencies_v_2_3_path')
 
     @classmethod
     def response_key(cls):
         return 'colorless'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         english_web_paths = [
             os.path.join(self.path, 'en_ewt-ud-train.conllu'),
             os.path.join(self.path, 'en_ewt-ud-dev.conllu'),
@@ -144,20 +139,15 @@ class ColorlessGreenCorpus(CorpusBase):
             validation_proportion_of_train=0.1, field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
 
 
+@dataclass(frozen=True)
 class LinzenAgreementCorpus(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='linzen_agreement_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('linzen_agreement_path')
 
     @classmethod
     def response_key(cls):
         return 'linzen_agree'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
 
         classes = _agreement_data(example_manager, _iterate_linzen(self.path), type(self).response_key())
 

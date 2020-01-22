@@ -1,28 +1,29 @@
 import os
-from inspect import signature
-import hashlib
 from collections import OrderedDict
 import itertools
 import dataclasses
-from typing import Sequence, Union, Optional, Hashable, Mapping, Tuple
+from typing import Sequence, Union, Optional, Hashable, Tuple, Any
 
 import numpy as np
 import torch
 
 from spacy.language import Language as SpacyLanguage
-from pytorch_pretrained_bert import BertTokenizer
+from transformers import BertTokenizer
 
 from .spacy_token_meta import bert_tokenize_with_spacy_meta
-from .input_features import InputFeatures, FieldSpec
-from .corpus_cache import save_to_cache, load_from_cache
+from .input_features import InputFeatures, FieldSpec, RawData
 
 
-__all__ = ['CorpusBase', 'CorpusExampleUnifier']
+__all__ = ['CorpusBase', 'CorpusExampleUnifier', 'path_attribute_field']
 
 
 class CorpusExampleUnifier:
 
-    def __init__(self, spacy_tokenize_model: SpacyLanguage, bert_tokenizer: BertTokenizer, max_sequence_length=None):
+    def __init__(
+            self,
+            spacy_tokenize_model: SpacyLanguage,
+            bert_tokenizer: BertTokenizer,
+            max_sequence_length: Optional[int] = None):
         self.spacy_tokenize_model = spacy_tokenize_model
         self.bert_tokenizer = bert_tokenizer
         self._examples = OrderedDict()
@@ -184,70 +185,38 @@ class CorpusExampleUnifier:
         return len(self._examples)
 
 
+def path_attribute_field(attribute: str) -> dataclasses.Field:
+    return dataclasses.field(default=None, metadata=dict(path_attribute=attribute))
+
+
+@dataclasses.dataclass(frozen=True)
 class CorpusBase:
+    run_info: Any = None
+    cache_base_path: str = None
+    index_run: dataclasses.InitVar[Optional[int]] = None
 
-    @classmethod
-    def _path_attributes(cls) -> Optional[Mapping[str, str]]:
-        """
-        A corpus declares a mapping from the paths object to its own path attributes
-        by defining this function. E.g.:
-            def _path_attributes(cls):
-                return dict(path='harry_potter_path')
-        """
-        raise NotImplementedError('{} does not implement _path_attributes'.format(cls))
-
-    @classmethod
-    def _hash_arguments(cls, kwargs):
-        hash_ = hashlib.sha256()
-        for key in kwargs:
-            s = '{}={}'.format(key, kwargs[key])
-            hash_.update(s.encode())
-        return hash_.hexdigest()
-
-    def __new__(cls, *args, **kwargs):
-        obj = object.__new__(cls)
-        sig = signature(cls.__init__)
-        bound_arguments = sig.bind_partial(*args, **kwargs)
-        bound_arguments.apply_defaults()
-        obj._bound_arguments = bound_arguments.arguments
-        obj._argument_hash = cls._hash_arguments(obj._bound_arguments)
-        obj._cache_base_path = None
-        return obj
+    def __post_init__(self, index_run: Optional[int]):
+        if index_run is not None:
+            object.__setattr__(self, 'run_info', self._run_info(index_run))
 
     @property
-    def argument_hash(self):
-        return self._argument_hash
+    def corpus_key(self):
+        return type(self).__name__
 
-    def set_paths_from_path_object(self, path_obj):
-        #   A corpus declares a mapping from the paths object to its own path attributes
-        #   by defining this function. E.g.:
-        #       def _path_attributes(cls):
-        #           return dict(path='harry_potter_path')
-        path_attribute_mapping = type(self)._path_attributes()
-        for path_attribute in path_attribute_mapping:
-            current_value = getattr(self, path_attribute)
-            if current_value is None:
-                if not hasattr(path_obj, path_attribute_mapping[path_attribute]):
-                    raise ValueError(
-                        'Paths instance has no attribute {}'.format(path_attribute_mapping[path_attribute]))
-                paths_value = getattr(path_obj, path_attribute_mapping[path_attribute])
-                setattr(self, path_attribute, paths_value)
-        # special case for cache_path
-        if self._cache_base_path is None:
-            # noinspection PyAttributeOutsideInit
-            self._cache_base_path = os.path.join(path_obj.cache_path, type(self).__name__)
-
-    def cache_path(self, run_info):
-        arg_hash = type(self)._hash_arguments({'argument_hash': self._argument_hash, 'run_info': run_info})
-        return os.path.join(self._cache_base_path, '{}.npz'.format(arg_hash))
-
-    def check_paths(self):
-        path_attribute_mapping = type(self)._path_attributes()
-        for path_attribute in path_attribute_mapping:
-            current_value = getattr(self, path_attribute)
-            if current_value is None:
-                raise ValueError('{} is not populated. Either call load with a Paths instance or set the path manually '
-                                 'before calling load'.format(path_attribute))
+    @staticmethod
+    def replace_paths(corpus: 'CorpusBase', path_object, **additional_changes) -> 'CorpusBase':
+        path_kwargs = dict(additional_changes)
+        for field in dataclasses.fields(corpus):
+            val = getattr(corpus, field.name)
+            if val is None:
+                if 'path_attribute' in field.metadata:
+                    path_attribute = field.metadata['path_attribute']
+                    if not hasattr(path_object, path_attribute):
+                        raise ValueError('path_object does not have an attribute called {}'.format(path_attribute))
+                    path_kwargs[field.name] = getattr(path_object, path_attribute)
+                elif field.name == 'cache_base_path':
+                    path_kwargs[field.name] = os.path.join(path_object.cache_path, corpus.corpus_key)
+        return dataclasses.replace(corpus, **path_kwargs)
 
     @staticmethod
     def _populate_default_field_specs(raw_data):
@@ -290,32 +259,16 @@ class CorpusBase:
 
     def load(
             self,
-            index_run,
             spacy_tokenizer_model: SpacyLanguage,
             bert_tokenizer: BertTokenizer,
-            paths_obj=None,
-            force_cache_miss=False,
-            max_sequence_length=None):
-
-        run_info = self._run_info(index_run)
-
-        if paths_obj is not None:
-            self.set_paths_from_path_object(paths_obj)
-        else:
-            self.check_paths()
-
-        result = load_from_cache(self.cache_path(run_info), run_info, self._bound_arguments, force_cache_miss)
-        if result is not None:
-            return result
-
+            max_sequence_length: Optional[int] = None):
         example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer, max_sequence_length)
-        result = self._load(run_info, example_manager)
+        result = self._load(example_manager)
         CorpusBase._populate_default_field_specs(result)
-        save_to_cache(self.cache_path(run_info), result, run_info, self._bound_arguments)
         return result
 
     def _run_info(self, index_run):
         return -1
 
-    def _load(self, run_load_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
         raise NotImplementedError('{} does not implement _load'.format(type(self)))

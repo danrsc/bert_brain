@@ -5,8 +5,6 @@ import torch
 from torch import nn
 import torch.nn.functional
 
-from pytorch_pretrained_bert.modeling import BertLayerNorm
-
 from .graph_part import GraphPart
 
 
@@ -94,7 +92,7 @@ class LinearContextualParameterGeneration(GraphPart):
             if len(module_result) > 0:
                 if type(module_) is nn.Linear:
                     replacement_module = ContextualizedLinear(module_)
-                elif type(module_) is BertLayerNorm:
+                elif type(module_) is torch.nn.LayerNorm:
                     replacement_module = ContextualizedBertLayerNorm(module_)
                 else:
                     raise ValueError('Unsupported module type: {}'.format(type(module_)))

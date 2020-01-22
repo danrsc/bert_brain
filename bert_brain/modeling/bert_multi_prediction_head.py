@@ -1,20 +1,12 @@
-import inspect
 import logging
-import os
-import pickle
-import shutil
-import tarfile
-import tempfile
 from collections import OrderedDict
-from copy import deepcopy
-from inspect import signature
 
 import numpy as np
 import torch
 import torch.nn
-from pytorch_pretrained_bert import BertModel, BertConfig, cached_path, load_tf_weights_in_bert
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, WEIGHTS_NAME, CONFIG_NAME, \
-    PRETRAINED_MODEL_ARCHIVE_MAP, TF_WEIGHTS_NAME
+from transformers import BertPreTrainedModel, BertModel
+
+from .multi_head_config import BertMultiPredictionHeadConfig
 
 __all__ = ['MultiPredictionHead', 'BertMultiPredictionHead', 'BertOutputSupplement', 'LazyBertOutputBatch',
            'LazyBertOutputNumChannels']
@@ -24,14 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 class MultiPredictionHead(torch.nn.Module):
-
-    def __new__(cls, *args, **kwargs):
-        obj = object.__new__(cls)
-        sig = signature(cls.__init__)
-        bound_arguments = sig.bind_partial(*args, **kwargs)
-        bound_arguments.apply_defaults()
-        obj._bound_arguments = deepcopy(bound_arguments.arguments)
-        return obj
 
     def __init__(
             self,
@@ -111,27 +95,6 @@ class MultiPredictionHead(torch.nn.Module):
 
         return batch
 
-    def save_kwargs(self, output_model_path):
-        with open(os.path.join(output_model_path, 'kwargs.pkl'), 'wb') as f:
-            pickle.dump(self._bound_arguments, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    @staticmethod
-    def load_kwargs(model_path):
-        with open(os.path.join(model_path, 'kwargs.pkl'), 'rb') as f:
-            result = pickle.load(f)
-            if 'supplemental_dropout_prob' in result:  # backwards compatible for now
-                result['dropout_prob'] = result['supplemental_dropout_prob']
-                del result['supplemental_dropout_prob']
-            return result
-
-    def update_state_dict(self, prefix, state_dict, saved_kwargs):
-        saved_prediction_head_settings = dict((s[0].key, s[1]) for s in saved_kwargs['prediction_head_settings'])
-        for name in self.prediction_heads:
-            if name in saved_prediction_head_settings:
-                self.prediction_heads[name].update_state_dict(
-                    prefix + 'prediction_heads.' + name + '.', state_dict, saved_prediction_head_settings[name])
-        return state_dict
-
 
 class BertOutputSupplement(torch.nn.Module):
 
@@ -171,15 +134,10 @@ class BertOutputSupplement(torch.nn.Module):
 
 class BertMultiPredictionHead(BertPreTrainedModel):
 
-    def __init__(
-            self,
-            config,
-            head_graph_parts,
-            token_supplemental_key_to_shape=None,
-            token_supplemental_skip_dropout_keys=None,
-            pooled_supplemental_key_to_shape=None,
-            pooled_supplemental_skip_dropout_keys=None):
+    config_class = BertMultiPredictionHeadConfig
 
+    def __init__(self, config: BertMultiPredictionHeadConfig):
+        config.output_hidden_states = True
         super(BertMultiPredictionHead, self).__init__(config)
         self.bert = BertModel(config)
         # noinspection PyUnresolvedReferences
@@ -187,191 +145,20 @@ class BertMultiPredictionHead(BertPreTrainedModel):
             config.hidden_size,
             len(self.bert.encoder.layer),
             config.hidden_dropout_prob,
-            head_graph_parts,
-            token_supplemental_key_to_shape,
-            token_supplemental_skip_dropout_keys,
-            pooled_supplemental_key_to_shape,
-            pooled_supplemental_skip_dropout_keys)
-        self.apply(self.init_bert_weights)
-
-    def save(self, output_model_path):
-        output_model_file = os.path.join(output_model_path, WEIGHTS_NAME)
-        torch.save(self.state_dict(), output_model_file)
-        output_config_file = os.path.join(output_model_path, CONFIG_NAME)
-        with open(output_config_file, 'w') as f:
-            f.write(self.config.to_json_string())
-        # noinspection PyUnresolvedReferences
-        self.prediction_head.save_kwargs(output_model_path)
-
-    @classmethod
-    def load(cls, model_path, map_location='default_map_location'):
-        config = BertConfig(os.path.join(model_path, CONFIG_NAME))
-        kwargs = MultiPredictionHead.load_kwargs(model_path)
-        sig = inspect.signature(cls.__init__)
-        bad_keys = [k for k in kwargs if k not in sig.parameters]
-        for k in bad_keys:
-            del kwargs[k]
-        bound = sig.bind_partial(**kwargs)
-        model = cls(config, **bound.kwargs)
-
-        if map_location == 'default_map_location':
-            map_location = 'cpu' if not torch.cuda.is_available() else None
-
-        state_dict = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location)
-
-        model.load_state_dict(state_dict)
-
-        return model
-
-    @classmethod
-    def from_fine_tuned(cls, model_path, map_location='default_map_location', *inputs, **kwargs):
-        config = BertConfig(os.path.join(model_path, CONFIG_NAME))
-        model = cls(config, *inputs, **kwargs)
-        saved_kwargs = MultiPredictionHead.load_kwargs(model_path)
-        if map_location == 'default_map_location':
-            map_location = 'cpu' if not torch.cuda.is_available() else None
-        state_dict = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location=map_location)
-        # noinspection PyUnresolvedReferences
-        model.prediction_head.update_state_dict('prediction_head.', state_dict, saved_kwargs)
-        model.load_state_dict(state_dict, strict=False)
-        return model
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, state_dict=None, cache_dir=None,
-                        from_tf=False, map_location='default_map_location', *inputs, **kwargs):
-        """
-        Copied from pytorch_pretrained_bert modeling.py so we can pass a map_location argument
-        Instantiate a BertPreTrainedModel from a pre-trained model file or a pytorch state dict.
-        Download and cache the pre-trained model file if needed.
-
-        Params:
-            pretrained_model_name_or_path: either:
-                - a str with the name of a pre-trained model to load selected in the list of:
-                    . `bert-base-uncased`
-                    . `bert-large-uncased`
-                    . `bert-base-cased`
-                    . `bert-large-cased`
-                    . `bert-base-multilingual-uncased`
-                    . `bert-base-multilingual-cased`
-                    . `bert-base-chinese`
-                - a path or url to a pre-trained model archive containing:
-                    . `bert_config.json` a configuration file for the model
-                    . `pytorch_model.bin` a PyTorch dump of a BertForPreTraining instance
-                - a path or url to a pre-trained model archive containing:
-                    . `bert_config.json` a configuration file for the model
-                    . `model.chkpt` a TensorFlow checkpoint
-            from_tf: should we load the weights from a locally saved TensorFlow checkpoint
-            cache_dir: an optional path to a folder in which the pre-trained models will be cached.
-            state_dict: an optional state dictionary (collections.OrderedDict object) to use instead of Google
-                pre-trained models
-            *inputs, **kwargs: additional input for the specific Bert class
-                (ex: num_labels for BertForSequenceClassification)
-        """
-        if pretrained_model_name_or_path in PRETRAINED_MODEL_ARCHIVE_MAP:
-            archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[pretrained_model_name_or_path]
-        else:
-            archive_file = pretrained_model_name_or_path
-        # redirect to the cache, if necessary
-        try:
-            resolved_archive_file = cached_path(archive_file, cache_dir=cache_dir)
-        except EnvironmentError:
-            logger.error(
-                "Model name '{}' was not found in model name list ({}). "
-                "We assumed '{}' was a path or url but couldn't find any file "
-                "associated to this path or url.".format(
-                    pretrained_model_name_or_path,
-                    ', '.join(PRETRAINED_MODEL_ARCHIVE_MAP.keys()),
-                    archive_file))
-            return None
-        if resolved_archive_file == archive_file:
-            logger.info("loading archive file {}".format(archive_file))
-        else:
-            logger.info("loading archive file {} from cache at {}".format(
-                archive_file, resolved_archive_file))
-        tempdir = None
-        if os.path.isdir(resolved_archive_file) or from_tf:
-            serialization_dir = resolved_archive_file
-        else:
-            # Extract archive to temp dir
-            tempdir = tempfile.mkdtemp()
-            logger.info("extracting archive file {} to temp dir {}".format(
-                resolved_archive_file, tempdir))
-            with tarfile.open(resolved_archive_file, 'r:gz') as archive:
-                archive.extractall(tempdir)
-            serialization_dir = tempdir
-        # Load config
-        config_file = os.path.join(serialization_dir, CONFIG_NAME)
-        config = BertConfig.from_json_file(config_file)
-        logger.info("Model config {}".format(config))
-        # Instantiate model.
-        model = cls(config, *inputs, **kwargs)
-        if state_dict is None and not from_tf:
-            weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)
-            if map_location == 'default_map_location':
-                map_location = 'cpu' if not torch.cuda.is_available() else None
-            state_dict = torch.load(weights_path, map_location)
-        if tempdir:
-            # Clean up temp dir
-            shutil.rmtree(tempdir)
-        if from_tf:
-            # Directly load from a TensorFlow checkpoint
-            weights_path = os.path.join(serialization_dir, TF_WEIGHTS_NAME)
-            return load_tf_weights_in_bert(model, weights_path)
-        # Load from a PyTorch state_dict
-        old_keys = []
-        new_keys = []
-        for key in state_dict.keys():
-            new_key = None
-            if 'gamma' in key:
-                new_key = key.replace('gamma', 'weight')
-            if 'beta' in key:
-                new_key = key.replace('beta', 'bias')
-            if new_key:
-                old_keys.append(key)
-                new_keys.append(new_key)
-        for old_key, new_key in zip(old_keys, new_keys):
-            state_dict[new_key] = state_dict.pop(old_key)
-
-        missing_keys = []
-        unexpected_keys = []
-        error_msgs = []
-        # copy state_dict so _load_from_state_dict can modify it
-        metadata = getattr(state_dict, '_metadata', None)
-        state_dict = state_dict.copy()
-        if metadata is not None:
-            state_dict._metadata = metadata
-
-        def load(module, prefix=''):
-            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
-            # noinspection PyProtectedMember
-            module._load_from_state_dict(
-                state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
-            # noinspection PyProtectedMember
-            for name, child in module._modules.items():
-                if child is not None:
-                    load(child, prefix + name + '.')
-
-        start_prefix = ''
-        if not hasattr(model, 'bert') and any(s.startswith('bert.') for s in state_dict.keys()):
-            start_prefix = 'bert.'
-        load(model, prefix=start_prefix)
-        if len(missing_keys) > 0:
-            logger.info("Weights of {} not initialized from pretrained model: {}".format(
-                model.__class__.__name__, missing_keys))
-        if len(unexpected_keys) > 0:
-            logger.info("Weights from pretrained model not used in {}: {}".format(
-                model.__class__.__name__, unexpected_keys))
-        if len(error_msgs) > 0:
-            raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
-                model.__class__.__name__, "\n\t".join(error_msgs)))
-        return model
+            config.head_graph_parts,
+            config.token_supplemental_key_to_shape,
+            config.token_supplemental_skip_dropout_keys,
+            config.pooled_supplemental_key_to_shape,
+            config.pooled_supplemental_skip_dropout_keys)
+        self.init_weights()
 
     def forward(self, batch, dataset):
-        sequence_output, pooled_output = self.bert(
+        bert_outputs = self.bert(
             batch['token_ids'],
             token_type_ids=batch['type_ids'] if 'type_ids' in batch else None,
-            attention_mask=batch['mask'] if 'mask' in batch else None,
-            output_all_encoded_layers=True)
+            attention_mask=batch['mask'] if 'mask' in batch else None)
+        pooled_output = bert_outputs[1]
+        sequence_output = bert_outputs[2]
         # noinspection PyCallingNonCallable
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)
 

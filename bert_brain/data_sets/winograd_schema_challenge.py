@@ -1,12 +1,13 @@
 import os
 import json
 import string
+from dataclasses import dataclass
 
 import numpy as np
 
 from ..common import NamedSpanEncoder
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 
 
 __all__ = ['WinogradSchemaChallenge']
@@ -28,14 +29,9 @@ def _strip_punctuation_apostrophe(s):
     return s
 
 
+@dataclass(frozen=True)
 class WinogradSchemaChallenge(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='winograd_schema_challenge_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('winograd_schema_challenge_path')
 
     @staticmethod
     def _read_examples(path, example_manager: CorpusExampleUnifier, labels, named_span_encoder):
@@ -109,7 +105,7 @@ class WinogradSchemaChallenge(CorpusBase):
     def response_key(cls):
         return 'wsc'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         named_span_encoder = NamedSpanEncoder()
         train = WinogradSchemaChallenge._read_examples(

@@ -1,22 +1,18 @@
 import os
+from dataclasses import dataclass
 
 import numpy as np
 
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
 
 
 __all__ = ['StanfordSentimentTreebank']
 
 
+@dataclass(frozen=True)
 class StanfordSentimentTreebank(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='stanford_sentiment_treebank_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('stanford_sentiment_treebank_path')
 
     @staticmethod
     def _read_labels(label_list, example_manager: CorpusExampleUnifier, path: str):
@@ -51,7 +47,7 @@ class StanfordSentimentTreebank(CorpusBase):
     def response_key(cls):
         return 'sentiment'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         label_list = list()
         train_examples = StanfordSentimentTreebank._read_labels(
             label_list, example_manager, os.path.join(self.path, 'train.tsv'))

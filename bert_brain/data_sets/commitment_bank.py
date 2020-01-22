@@ -1,23 +1,19 @@
 import os
 import json
+from dataclasses import dataclass
 
 import numpy as np
 
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 
 
 __all__ = ['CommitmentBank']
 
 
+@dataclass(frozen=True)
 class CommitmentBank(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='commitment_bank_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('commitment_bank_path')
 
     @staticmethod
     def _read_examples(path, example_manager: CorpusExampleUnifier, labels):
@@ -57,7 +53,7 @@ class CommitmentBank(CorpusBase):
     def response_key(cls):
         return 'cb'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = CommitmentBank._read_examples(
             os.path.join(self.path, 'train.jsonl'), example_manager, labels)

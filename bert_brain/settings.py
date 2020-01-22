@@ -1,15 +1,86 @@
 from dataclasses import dataclass, field
 from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT
 
+import math
 import numpy as np
+from torch.optim.lr_scheduler import LambdaLR
+
 from .data_sets import PreprocessStandardize, PreprocessLog, \
-    PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, PreparedDataView, \
-    ResponseKind, InputFeatures, RawData, natural_stories_make_leave_stories_out, KindData, CorpusKeys, CorpusBase, \
-    UclCorpus
+    PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, \
+    ResponseKind, NaturalStoriesMakeLeaveStoriesOut, corpus_types, CorpusBase, \
+    UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT
+from .common import SwitchRemember
 from .modeling import CriticKeys, GraphPart
 
 
-__all__ = ['OptimizationSettings', 'CriticSettings', 'Settings']
+__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'CriticSettings', 'Settings']
+
+
+@dataclass
+class LearningRateSchedule:
+    schedule: str = 'linear_with_warmup'
+    num_warmup_steps: Optional[Union[int, float]] = 0.1
+    num_cycles: Optional[Union[int, float]] = None
+
+    def _get_schedule_fn(self, num_training_steps):
+        # all schedules other than linear_warmup_rsqrt_decay are copied from
+        # https://github.com/huggingface/transformers/ \
+        # blob/dc17f2a1110aed8d1729e77b0619601e3d96b84e/src/transformers/optimization.py
+        # We copy these here so we can have different num_training_steps for different parts of the model
+        num_warmup_steps = self.num_warmup_steps
+        if isinstance(num_warmup_steps, float) and 0 < num_warmup_steps <= 1.0:
+            num_warmup_steps = int(np.floor(num_warmup_steps * num_training_steps))
+        schedule = SwitchRemember(self.schedule)
+        if schedule == 'constant':
+            def lr_lambda(current_step):
+                return 1.0
+            return lr_lambda
+        elif schedule == 'constant_with_warmup':
+            def lr_lambda(current_step):
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1.0, num_warmup_steps))
+                return 1.0
+            return lr_lambda
+        elif schedule == 'linear_with_warmup':
+            def lr_lambda(current_step):
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1, num_warmup_steps))
+                return max(
+                    0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
+                )
+            return lr_lambda
+        elif schedule == 'cosine_with_warmup':
+            def lr_lambda(current_step):
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1, num_warmup_steps))
+                progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
+            return lr_lambda
+        elif schedule == 'cosine_with_hard_restarts_with_warmup':
+            def lr_lambda(current_step):
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1, num_warmup_steps))
+                progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                if progress >= 1.0:
+                    return 0.0
+                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(self.num_cycles) * progress) % 1.0))))
+            return lr_lambda
+        elif schedule == 'linear_warmup_rsqrt_decay':
+            def lr_lambda(current_step: int) -> float:
+                if current_step == 0:
+                    return 0
+                return min(current_step ** -0.5, current_step * num_warmup_steps ** -1.5) / num_warmup_steps ** -0.5
+
+            return lr_lambda
+        else:
+            raise ValueError('Unrecognized schedule: {}. Choices are: {}'.format(
+                schedule.var, ', '.join(schedule.tests)))
+
+    def get_schedule(self, optimizer, optimizer_grouped_parameters, last_epoch=-1):
+        functions = list()
+        for group in optimizer_grouped_parameters:
+            functions.append(self._get_schedule_fn(group['t_total']))
+        return LambdaLR(optimizer, functions, last_epoch)
 
 
 @dataclass
@@ -18,8 +89,7 @@ class OptimizationSettings:
     num_train_epochs: int = 3
     # initial learning rate for Adam
     learning_rate: float = 5e-5
-    # Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10% of training.
-    warmup_proportion: float = 0.1
+    learning_rate_schedule: LearningRateSchedule = LearningRateSchedule()
     train_batch_size: int = 32
     predict_batch_size: int = 8
     # When splitting up a long document into chunks, how much stride to take between chunks.
@@ -49,8 +119,8 @@ class CriticSettings:
 def _default_split_functions():
 
     return {
-        CorpusKeys.HarryPotterCorpus: HarryPotterMakeLeaveOutFmriRun(),
-        CorpusKeys.NaturalStoriesCorpus: natural_stories_make_leave_stories_out
+        corpus_types.HarryPotterCorpus.__name__: HarryPotterMakeLeaveOutFmriRun(),
+        corpus_types.NaturalStoriesCorpus.__name__: NaturalStoriesMakeLeaveStoriesOut()
     }
 
 
@@ -96,26 +166,16 @@ def _default_supplemental_fields():
 def _default_critics():
 
     return {
-        CorpusKeys.UclCorpus: CriticSettings(critic_type=CriticKeys.mse),
+        corpus_types.UclCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.ns_froi: CriticSettings(critic_type=CriticKeys.single_mse),
-        CorpusKeys.NaturalStoriesCorpus: CriticSettings(critic_type=CriticKeys.mse),
+        corpus_types.NaturalStoriesCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
-        CorpusKeys.HarryPotterCorpus: CriticSettings(critic_type=CriticKeys.mse),
-        CorpusKeys.ColorlessGreenCorpus: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.LinzenAgreementCorpus: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        CorpusKeys.StanfordSentimentTreebank: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        corpus_types.HarryPotterCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
+        corpus_types.ColorlessGreenCorpus.__name__: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        corpus_types.LinzenAgreementCorpus.__name__: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
+        corpus_types.StanfordSentimentTreebank.__name__: CriticSettings(
+            critic_type=CriticKeys.single_binary_cross_entropy)
     }
-
-
-_PreprocessorTypeUnion = Union[
-    Callable[[PreparedDataView, Optional[Mapping[str, np.ndarray]]], PreparedDataView],
-    Tuple[
-        str,
-        Callable[
-            [PreparedDataView, Optional[Mapping[str, np.ndarray]]],
-            Tuple[PreparedDataView, Optional[Mapping[str, np.ndarray]]]]],
-    str]
-PreprocessorTypeUnion = Union[_PreprocessorTypeUnion, Sequence[_PreprocessorTypeUnion]]
 
 
 @dataclass
@@ -129,21 +189,14 @@ class Settings:
     # if not specified, the data will be randomly split according to the way the fields of the RawData instance are set.
     # I.e. if the RawData instance is pre split, that is respected. Otherwise test_proportion and
     # validation_proportion_of_train fields in the RawData instance govern the split
-    split_functions: MutableMapping[
-        str,
-        Callable[[int], Callable[
-            [RawData, np.random.RandomState],
-            Tuple[
-                Optional[Sequence[InputFeatures]],
-                Optional[Sequence[InputFeatures]],
-                Optional[Sequence[InputFeatures]]]]]] = field(default_factory=_default_split_functions)
+    split_functions: MutableMapping[str, Callable[[int], SplitFunctionT]] = field(
+        default_factory=_default_split_functions)
 
     # Mapping from [response_key, kind, or corpus_key] to a preprocessor. Lookups fall back in that
     # order. This determines how the data will be processed. If not specified, no preprocessing is applied
-    preprocessors: MutableMapping[str, PreprocessorTypeUnion] = field(default_factory=_default_preprocessors)
+    preprocessors: MutableMapping[str, PreprocessorSequenceT] = field(default_factory=_default_preprocessors)
 
-    preprocess_fork_fn: Callable[
-        [str, KindData, PreprocessorTypeUnion], Tuple[Optional[str], Optional[PreprocessorTypeUnion]]] = None
+    preprocess_fork_fn: Optional[PreprocessForkFnT] = None
 
     bert_model: str = 'bert-base-uncased'
     max_sequence_length: Optional[int] = None
@@ -255,14 +308,10 @@ class Settings:
     # Whether not to use CUDA when available
     no_cuda: bool = False
 
-    def get_split_functions(self, index_run):
-        result = dict()
-        for key in self.split_functions:
-            if self.split_functions[key] is not None:
-                result[key] = self.split_functions[key](index_run)
-        if len(result) == 0:
+    def get_split_function(self, key, index_run):
+        if self.split_functions is None or key not in self.split_functions:
             return None
-        return result
+        return self.split_functions[key](index_run)
 
     def _lookup_critic(self, field_name, data_set):
         if field_name in self.critics:

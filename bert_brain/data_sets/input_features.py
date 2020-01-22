@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 
-__all__ = ['InputFeatures', 'RawData', 'FieldSpec', 'KindData', 'ResponseKind', 'split_data']
+__all__ = ['InputFeatures', 'RawData', 'FieldSpec', 'KindData', 'ResponseKind', 'SplitData']
 
 
 @dataclass
@@ -92,23 +92,29 @@ class RawData:
     metadata: Optional[Mapping[str, np.array]] = None
 
 
-def split_data(to_split, test_proportion, validation_of_train_proportion, shuffle=True, random_state=None):
-    from sklearn.model_selection import train_test_split
+@dataclass(frozen=True)
+class SplitData:
+    shuffle: bool = True
 
-    if test_proportion > 0:
-        idx_train, idx_test = train_test_split(
-            np.arange(len(to_split)), test_size=test_proportion, shuffle=shuffle, random_state=random_state)
-    else:
-        idx_train = np.arange(len(to_split))
-        idx_test = []
+    def __call__(self, raw_data, random_state=None):
+        from sklearn.model_selection import train_test_split
 
-    if validation_of_train_proportion > 0:
-        idx_train, idx_validation = train_test_split(
-            idx_train, test_size=validation_of_train_proportion, shuffle=shuffle, random_state=random_state)
-    else:
-        idx_validation = []
+        if raw_data.test_proportion > 0:
+            idx_train, idx_test = train_test_split(
+                np.arange(len(raw_data.input_examples)),
+                test_size=raw_data.test_proportion, shuffle=self.shuffle, random_state=random_state)
+        else:
+            idx_train = np.arange(len(raw_data.input_examples))
+            idx_test = []
 
-    train = [to_split[i] for i in idx_train]
-    validation = [to_split[i] for i in idx_validation]
-    test = [to_split[i] for i in idx_test]
-    return train, validation, test
+        if raw_data.validation_proportion_of_train > 0:
+            idx_train, idx_validation = train_test_split(
+                idx_train,
+                test_size=raw_data.validation_proportion_of_train, shuffle=self.shuffle, random_state=random_state)
+        else:
+            idx_validation = []
+
+        train = [raw_data.input_examples[i] for i in idx_train]
+        validation = [raw_data.input_examples[i] for i in idx_validation]
+        test = [raw_data.input_examples[i] for i in idx_test]
+        return train, validation, test

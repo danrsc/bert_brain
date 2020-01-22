@@ -3,11 +3,12 @@ from collections import OrderedDict
 import json
 import re
 import string
+from dataclasses import dataclass
 
 import numpy as np
 
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
-from .corpus_base import CorpusBase, CorpusExampleUnifier
+from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
 from .spacy_token_meta import ChineseCharDetected
 
 
@@ -17,14 +18,9 @@ __all__ = ['ReadingComprehensionWithCommonSenseReasoning']
 _punctuation_set = set(string.punctuation)
 
 
+@dataclass(frozen=True)
 class ReadingComprehensionWithCommonSenseReasoning(CorpusBase):
-
-    @classmethod
-    def _path_attributes(cls):
-        return dict(path='reading_comprehension_with_common_sense_reasoning_path')
-
-    def __init__(self, path=None):
-        self.path = path
+    path: str = path_attribute_field('reading_comprehension_with_common_sense_reasoning_path')
 
     @staticmethod
     def _normalize_answer(s):
@@ -125,7 +121,7 @@ class ReadingComprehensionWithCommonSenseReasoning(CorpusBase):
     def response_key(cls):
         return 'record'
 
-    def _load(self, run_info, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         f1 = list()
         train = ReadingComprehensionWithCommonSenseReasoning._read_examples(

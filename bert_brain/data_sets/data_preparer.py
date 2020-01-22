@@ -1,14 +1,23 @@
+from inspect import signature
 from collections import OrderedDict
 from itertools import chain
-from dataclasses import dataclass, replace
-from typing import Optional, Sequence, Mapping, Callable, Tuple
+from dataclasses import dataclass, replace, field
+from typing import Optional, Sequence, Mapping, Callable, Tuple, Union, Iterable
 
 import numpy as np
 
-from .input_features import InputFeatures, KindData, FieldSpec, RawData, split_data
+from .input_features import InputFeatures, KindData, FieldSpec, RawData, SplitData
 
 
-__all__ = ['PreparedData', 'PreparedDataView', 'DataPreparer']
+__all__ = [
+    'PreparedData',
+    'PreparedDataView',
+    'ResponseKeyKind',
+    'DataPreparer',
+    'PreprocessorSequenceT',
+    'PhasePreprocessorMappingT',
+    'PreprocessForkFnT',
+    'SplitFunctionT']
 
 
 @dataclass(frozen=True)
@@ -93,169 +102,209 @@ def _copy_examples(examples):
         ex, data_ids=type(ex.data_ids)((k, np.copy(ex.data_ids[k])) for k in ex.data_ids)) for ex in examples]
 
 
-class DataPreparer(object):
+MetadataT = Optional[Mapping[str, np.array]]
+PreprocessorT = Union[
+    Callable[[PreparedDataView, MetadataT, np.random.RandomState], PreparedDataView],
+    Callable[[PreparedDataView, MetadataT, np.random.RandomState, str, str], PreparedDataView]]
+PhasePreprocessorT = Union[PreprocessorT, str, Tuple[str, PreprocessorT]]
+PreprocessorSequenceT = Union[PhasePreprocessorT, Sequence[PhasePreprocessorT]]
+PhasePreprocessorMappingT = Union[Mapping[str, PreprocessorSequenceT], Iterable[Tuple[str, PreprocessorSequenceT]]]
+PreprocessForkFnT = Callable[
+    [str, str, Optional[PhasePreprocessorMappingT]],
+    Tuple[str, Optional[PreprocessorSequenceT]]]
+SplitFunctionT = Callable[
+    [RawData, np.random.RandomState],
+    Tuple[
+        Optional[Sequence[InputFeatures]],
+        Optional[Sequence[InputFeatures]],
+        Optional[Sequence[InputFeatures]]]]
 
-    def __init__(
-            self,
-            seed: int,
-            preprocess_dict: Mapping[str, Callable[[PreparedData, Optional[Mapping[str, np.array]]], PreparedData]],
-            split_function_dict: Mapping[
-                str, Callable[
-                    [RawData, np.random.RandomState],
-                    Tuple[
-                        Optional[Sequence[InputFeatures]],
-                        Optional[Sequence[InputFeatures]],
-                        Optional[Sequence[InputFeatures]]]]],
-            preprocess_fork_fn,
-            output_model_path: str):
-        self._seed = seed
-        self._random_state = dict()
-        self._preprocess_dict = dict(preprocess_dict) if preprocess_dict is not None else None
-        self._preprocess_fork_fn = preprocess_fork_fn
-        self._split_function_dict = dict(split_function_dict) if split_function_dict is not None else None
-        self._output_model_path = output_model_path
 
-    def prepare(self, raw_data_dict: Mapping[str, RawData]) -> Mapping[str, PreparedData]:
-        result = OrderedDict()
-        metadata = OrderedDict()
+@dataclass(frozen=True)
+class ResponseKeyKind:
+    response_key: str
+    kind: str
 
-        for k in raw_data_dict:
 
-            if k not in self._random_state:
-                self._random_state[k] = np.random.RandomState(self._seed)
+@dataclass(frozen=True)
+class DataPreparer:
+    seed: int
+    corpus_key: str
+    response_key_kinds: Sequence[ResponseKeyKind]
+    preprocess_dict: Optional[PhasePreprocessorMappingT]
+    output_model_path: str
+    split_function: Optional[SplitFunctionT] = None
+    preprocess_fork_fn: Optional[PreprocessForkFnT] = None
+    forked_response_keys: Optional[Sequence[Tuple[str, str]]] = field(init=False)
 
-            metadata[k] = raw_data_dict[k].metadata
-            if raw_data_dict[k].is_pre_split:
-                result[k] = PreparedData(
-                    _copy_examples(raw_data_dict[k].input_examples),
-                    _copy_examples(raw_data_dict[k].validation_input_examples),
-                    _copy_examples(raw_data_dict[k].test_input_examples),
-                    OrderedDict(raw_data_dict[k].response_data),
-                    field_specs=raw_data_dict[k].field_specs)
-            elif (self._split_function_dict is not None
-                    and k in self._split_function_dict and self._split_function_dict[k] is not None):
-                train_input_examples, validation_input_examples, test_input_examples = self._split_function_dict[k](
-                    raw_data=raw_data_dict[k], random_state=self._random_state[k])
-
-                result[k] = PreparedData(
-                    _copy_examples(train_input_examples),
-                    _copy_examples(validation_input_examples),
-                    _copy_examples(test_input_examples),
-                    OrderedDict(raw_data_dict[k].response_data),
-                    field_specs=raw_data_dict[k].field_specs)
+    def __post_init__(self):
+        if self.response_key_kinds is not None:
+            if np.ndim(self.response_key_kinds) == 0:
+                object.__setattr__(self, 'response_key_kinds', (self.response_key_kinds,))
             else:
-                train_input_examples, validation_input_examples, test_input_examples = split_data(
-                    raw_data_dict[k].input_examples,
-                    raw_data_dict[k].test_proportion,
-                    raw_data_dict[k].validation_proportion_of_train,
-                    random_state=self._random_state[k])
-
-                result[k] = PreparedData(
-                    _copy_examples(train_input_examples),
-                    _copy_examples(validation_input_examples),
-                    _copy_examples(test_input_examples),
-                    OrderedDict(raw_data_dict[k].response_data),
-                    field_specs=raw_data_dict[k].field_specs)
-
-        def _get_preprocessor(preprocess_dict, corpus_key, response_key, kind):
-            if preprocess_dict is None:
-                return None
-            if response_key in preprocess_dict:
-                return preprocess_dict[response_key]
-            if kind in preprocess_dict:
-                return preprocess_dict[kind]
-            if corpus_key in preprocess_dict:
-                return preprocess_dict[corpus_key]
-            return None
-
-        for k in result:
-            phases = None
-            phase_change_steps = dict()
-            phase_steps = OrderedDict()
-
-            if self._preprocess_fork_fn is not None:
-                current_response_keys = list(result[k].data)
-                for response_k in current_response_keys:
-                    preprocessor = _get_preprocessor(
-                        self._preprocess_dict, k, response_k, result[k].data[response_k].kind)
-                    forked_name, forked_preprocessor = self._preprocess_fork_fn(
-                        response_k, result[k].data[response_k].kind, preprocessor)
-                    if forked_name is not None:
-                        if forked_name in result[k].data:
-                            raise ValueError('Duplicate name: {}'.format(forked_name))
-                        result[k].data[forked_name] = result[k].data[response_k].copy()
-                    if forked_preprocessor is not None:
-                        self._preprocess_dict[forked_name] = forked_preprocessor
-                    for ex in chain(result[k].train, result[k].validation, result[k].test):
-                        # noinspection PyUnresolvedReferences
-                        ex.data_ids[forked_name] = np.copy(ex.data_ids[response_k])
-
-            for response_k in result[k].data:
-                response_phases = None
-                phase_steps[response_k] = None
-                preprocessor = _get_preprocessor(
-                    self._preprocess_dict, k, response_k, result[k].data[response_k].kind)
-                if preprocessor is not None:
-                    phase_steps[response_k] = [list()]
-                    # noinspection PyTypeChecker
-                    if callable(preprocessor) \
-                            or (not isinstance(preprocessor, str)
-                                and len(preprocessor) == 2
-                                and isinstance(preprocessor[0], str)):
-                        preprocessor = [preprocessor]
-                    for step in preprocessor:
-                        name = None
-                        if isinstance(step, str):
-                            name = step
-                            step = None
-                        elif isinstance(step, tuple):
-                            name, step = step
-                        if name is not None:
-                            if response_phases is None:
-                                response_phases = [name]
-                            else:
-                                response_phases.append(name)
-                            if step is not None:
-                                if name in phase_change_steps:
-                                    if id(phase_change_steps[name]) != id(step):
-                                        raise ValueError('Phase change steps must be specified exactly once')
-                                else:
-                                    phase_change_steps[name] = step
-                            phase_steps[response_k].append(list())
+                object.__setattr__(self, 'response_key_kinds', tuple(self.response_key_kinds))
+        # filter preprocess_dict to the relevant entries and make it immutable
+        preprocess_list = list()
+        forked_list = list()
+        for response_key_kind in self.response_key_kinds:
+            preprocessors = DataPreparer._get_preprocessors(
+                self.corpus_key, self.preprocess_dict, response_key_kind.response_key, response_key_kind.kind)
+            if preprocessors is not None:
+                if DataPreparer._is_single_processor(preprocessors):
+                    preprocessors = (preprocessors,)
+                else:
+                    preprocessors = tuple(preprocessors)
+                preprocess_list.append((response_key_kind.response_key, preprocessors))
+            if self.preprocess_fork_fn is not None:
+                forked_name, forked_preprocessors = self.preprocess_fork_fn(
+                    response_key_kind.response_key, response_key_kind.kind, preprocessors)
+                if forked_name is not None:
+                    if forked_preprocessors is not None:
+                        if DataPreparer._is_single_processor(forked_preprocessors):
+                            forked_preprocessors = (forked_preprocessors,)
                         else:
-                            phase_steps[response_k][-1].append(step)
-                    if phases is None:
-                        phases = response_phases
+                            forked_preprocessors = tuple(forked_preprocessors)
+                    preprocess_list.append((forked_name, forked_preprocessors))
+                    forked_list.append((forked_name, response_key_kind.response_key))
+        object.__setattr__(self, 'preprocess_dict', tuple(preprocess_list))
+        object.__setattr__(self, 'forked_response_keys', tuple(forked_list))
+        if self.split_function is None:
+            object.__setattr__(self, 'split_function', SplitData())
+
+    @staticmethod
+    def _is_single_processor(x):
+        return np.ndim(x) == 0 or (len(x) == 2 and isinstance(x[0], str))
+
+    @staticmethod
+    def _get_preprocessors(corpus_key, preprocess_dict, response_key, kind):
+        if preprocess_dict is None:
+            return None
+        if response_key in preprocess_dict:
+            return preprocess_dict[response_key]
+        if kind in preprocess_dict:
+            return preprocess_dict[kind]
+        if corpus_key in preprocess_dict:
+            return preprocess_dict[corpus_key]
+        return None
+
+    def _run_step(self, step, result, metadata, random_state, response_k=None):
+        sig = signature(step.__call__)
+        parameters = OrderedDict(sig.parameters)
+        loaded_data_tuple = _make_prepared_data_view(result, response_k) if response_k is not None else result
+        arguments = OrderedDict(
+            loaded_data_tuple=loaded_data_tuple,
+            metadata=metadata,
+            random_state=random_state,
+            output_model_path=self.output_model_path)
+        if response_k is not None:
+            arguments['data_key'] = response_k
+        step_kwargs = OrderedDict()
+        for k in parameters:
+            if k in arguments:
+                step_kwargs[k] = arguments[k]
+                del arguments[k]
+        for k in step_kwargs:
+            del parameters[k]
+        step_args = [arguments[k] for i, k in enumerate(arguments) if i < len(parameters)]
+        return step(*step_args, **step_kwargs)
+
+    def prepare(self, raw_data: RawData) -> Tuple[PreparedData, Optional[Mapping[str, np.ndarray]]]:
+
+        random_state = np.random.RandomState(self.seed)
+        metadata = raw_data.metadata
+        preprocess_dict = dict(self.preprocess_dict)
+
+        if raw_data.is_pre_split:
+            result = PreparedData(
+                _copy_examples(raw_data.input_examples),
+                _copy_examples(raw_data.validation_input_examples),
+                _copy_examples(raw_data.test_input_examples),
+                OrderedDict(raw_data.response_data),
+                field_specs=raw_data.field_specs)
+        else:
+            train_input_examples, validation_input_examples, test_input_examples = self.split_function(
+                raw_data=raw_data, random_state=random_state)
+
+            result = PreparedData(
+                _copy_examples(train_input_examples),
+                _copy_examples(validation_input_examples),
+                _copy_examples(test_input_examples),
+                OrderedDict(raw_data.response_data),
+                field_specs=raw_data.field_specs)
+
+        phases = None
+        phase_change_steps = dict()
+        phase_steps = OrderedDict()
+
+        for forked_name, response_k in self.forked_response_keys:
+            if forked_name in result.data:
+                raise ValueError('Duplicate name: {}'.format(forked_name))
+            result.data[forked_name] = result.data[response_k].copy()
+            for ex in chain(result.train, result.validation, result.test):
+                # noinspection PyUnresolvedReferences
+                ex.data_ids[forked_name] = np.copy(ex.data_ids[response_k])
+
+        if len(result.data) != len(preprocess_dict):
+            raise ValueError('Inconsistency between response_keys: {} and actual data keys: {}'.format(
+                preprocess_dict, result.data))
+        for k in result.data:
+            if k not in preprocess_dict:
+                raise ValueError('data key {} not found in preprocess_dict'.format(k))
+
+        for response_k in result.data:
+            response_phases = None
+            phase_steps[response_k] = None
+            preprocessors = preprocess_dict[response_k]
+            if preprocessors is not None:
+                phase_steps[response_k] = [list()]
+                for step in preprocessors:
+                    name = None
+                    if isinstance(step, str):
+                        name = step
+                        step = None
+                    elif isinstance(step, tuple):
+                        name, step = step
+                    if name is not None:
+                        if response_phases is None:
+                            response_phases = [name]
+                        else:
+                            response_phases.append(name)
+                        if step is not None:
+                            if name in phase_change_steps:
+                                if id(phase_change_steps[name]) != id(step):
+                                    raise ValueError('Phase change steps must be specified exactly once')
+                            else:
+                                phase_change_steps[name] = step
+                        phase_steps[response_k].append(list())
                     else:
-                        if len(phases) != len(response_phases):
+                        phase_steps[response_k][-1].append(step)
+                if phases is None:
+                    phases = response_phases
+                else:
+                    if len(phases) != len(response_phases):
+                        raise ValueError(
+                            'Unequal phases across response types: {}, {}'.format(phases, response_phases))
+                    for p, r in zip(phases, response_phases):
+                        if p != r:
                             raise ValueError(
                                 'Unequal phases across response types: {}, {}'.format(phases, response_phases))
-                        for p, r in zip(phases, response_phases):
-                            if p != r:
-                                raise ValueError(
-                                    'Unequal phases across response types: {}, {}'.format(phases, response_phases))
 
-            if phases is None:
-                phases = []
+        if phases is None:
+            phases = []
 
-            for phase in phases:
-                if phase_change_steps[phase] is None:
-                    raise ValueError('Phase change step is not specified: {}'.format(phase))
+        for phase in phases:
+            if phase_change_steps[phase] is None:
+                raise ValueError('Phase change step is not specified: {}'.format(phase))
 
-            for index_phase in range(len(phases) + 1):
-                current_response_keys = list(result[k].data)
-                for response_k in current_response_keys:
-                    if phase_steps[response_k] is not None:
-                        for step in phase_steps[response_k][index_phase]:
-                            if hasattr(step, 'set_model_path'):
-                                step.set_model_path(self._output_model_path, response_k)
-                            processed = step(
-                                _make_prepared_data_view(result[k], response_k), metadata[k], self._random_state[k])
-                            _reconcile_view(result[k], processed, response_k)
-                if index_phase < len(phases):
-                    phase_change_step = phase_change_steps[phases[index_phase]]
-                    if hasattr(phase_change_step, 'set_model_path'):
-                        phase_change_step.set_model_path(self._output_model_path)
-                    result[k], metadata[k] = phase_change_step(result[k], metadata[k], self._random_state[k])
+        for index_phase in range(len(phases) + 1):
+            current_response_keys = list(result.data)
+            for response_k in current_response_keys:
+                if phase_steps[response_k] is not None:
+                    for step in phase_steps[response_k][index_phase]:
+                        processed = self._run_step(step, result, metadata, random_state, response_k)
+                        _reconcile_view(result, processed, response_k)
+            if index_phase < len(phases):
+                phase_change_step = phase_change_steps[phases[index_phase]]
+                result, metadata = self._run_step(phase_change_step, result, metadata, random_state)
 
-        return result
+        return result, metadata

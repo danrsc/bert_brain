@@ -25,8 +25,8 @@ from tqdm_logging import replace_root_logger_handler
 
 import torch
 
-from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, DataPreparer, CorpusLoader, \
-    Settings, task_hash, set_random_seeds, named_variations, singleton_variation, train, make_datasets
+from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, CorpusDatasetFactory, \
+    Settings, task_hash, set_random_seeds, named_variations, singleton_variation, train, DataIdMultiDataset
 from bert_brain_paths import Paths
 
 
@@ -65,16 +65,16 @@ def run_variation(
         paths_.model_path = os.path.join(paths_.model_path, set_name, hash_)
         paths_.result_path = os.path.join(paths_.result_path, set_name, hash_)
 
-        corpus_loader_ = CorpusLoader(paths_.cache_path)
+        corpus_dataset_factory_ = CorpusDatasetFactory(cache_path=paths_.cache_path)
 
         if not os.path.exists(paths_.model_path):
             os.makedirs(paths_.model_path)
         if not os.path.exists(paths_.result_path):
             os.makedirs(paths_.result_path)
 
-        return corpus_loader_, paths_
+        return corpus_dataset_factory_, paths_
 
-    corpus_loader, paths = io_setup()
+    corpus_dataset_factory, paths = io_setup()
 
     if progress_bar is None:
         progress_bar = tqdm(total=settings.num_runs, desc='Runs')
@@ -95,20 +95,28 @@ def run_variation(
 
         seed = set_random_seeds(settings.seed, index_run, n_gpu)
 
-        data = corpus_loader.load(
-            index_run, settings.corpora, force_cache_miss_set=force_cache_miss_set, paths_obj=paths,
-            max_sequence_length=settings.max_sequence_length)
+        data_set_paths = list()
+        for corpus in settings.corpora:
+            data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
+                seed,
+                index_run,
+                corpus,
+                settings.preprocessors,
+                output_model_path,
+                settings.get_split_function(corpus.corpus_key, index_run),
+                settings.preprocess_fork_fn,
+                force_cache_miss_set is not None and corpus.corpus_key in force_cache_miss_set,
+                paths,
+                settings.max_sequence_length))
 
-        data_preparer = DataPreparer(
-            seed, settings.preprocessors, settings.get_split_functions(index_run), settings.preprocess_fork_fn,
-            output_model_path)
-
-        train_data, validation_data, test_data = make_datasets(
-            data_preparer.prepare(data),
-            settings.all_loss_tasks,
-            data_id_in_batch_keys=settings.data_id_in_batch_keys,
-            filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
-            is_one_task_at_a_time=settings.is_one_task_at_a_time)
+        train_data, validation_data, test_data = (
+            DataIdMultiDataset(
+                which,
+                data_set_paths,
+                settings.all_loss_tasks,
+                data_id_in_batch_keys=settings.data_id_in_batch_keys,
+                filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
+            for which in ('train', 'validation', 'test'))
 
         load_from_path = None
         if settings.load_from is not None:

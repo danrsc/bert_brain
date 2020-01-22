@@ -2,20 +2,18 @@ import os
 import gc
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Sequence, Union, Optional, Mapping
 from copy import deepcopy
 import logging
 
 import numpy as np
 import torch
 import torch.nn
-from pytorch_pretrained_bert import BertAdam
+from transformers import AdamW
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
 
-from .data_sets import collate_fn, max_example_sequence_length, PreparedDataDataset, \
-    PreparedDataDatasetOneTaskAtATime, PreparedData, BatchOneTaskSequentialSampler, \
-    BatchOneTaskUniformTaskSampler, BatchOneTaskRandomSampler
+from .data_sets import collate_fn, DataIdMultiDataset, \
+    BatchOneTaskRandomSampler, BatchOneTaskUniformTaskSampler, BatchOneTaskSequentialSampler
 from .modeling import make_loss_handler, KeyedLinear
 from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
 from .settings import Settings
@@ -25,7 +23,7 @@ from .result_output import write_predictions, write_loss_curve
 logger = logging.getLogger(__name__)
 
 
-__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'make_datasets', 'setup_prediction_heads_and_losses']
+__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'setup_prediction_heads_and_losses']
 
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -83,12 +81,13 @@ def evaluate(
         global_step,
         eval_results,
         eval_data_set,
+        is_one_task_at_a_time,
         return_detailed=False):
 
     eval_sampler = None
     batch_sampler = None
     if settings.optimization_settings.local_rank == -1:
-        if isinstance(eval_data_set, PreparedDataDatasetOneTaskAtATime):
+        if is_one_task_at_a_time:
             batch_sampler = BatchOneTaskSequentialSampler(
                 eval_data_set, settings.optimization_settings.predict_batch_size)
         else:
@@ -193,36 +192,6 @@ def _loss_weights(loss_count_dict):
     return dict(zip(keys, [w.item() for w in loss_weights]))
 
 
-def make_datasets(
-        data: Mapping[str, PreparedData],
-        loss_tasks,
-        which: Optional[Union[str, Sequence[str]]] = None,
-        data_id_in_batch_keys: Optional[Sequence[str]] = None,
-        filter_when_not_in_loss_keys: Optional[Sequence[str]] = None,
-        is_one_task_at_a_time: bool = False):
-    if which is None:
-        which = ['train', 'validation', 'test']
-    max_sequence_length = max_example_sequence_length(data)
-    is_single = isinstance(which, str)
-    if is_single:
-        which = [which]
-    if is_one_task_at_a_time:
-        result = [
-            PreparedDataDatasetOneTaskAtATime(
-                max_sequence_length, data, loss_tasks, which=w,
-                data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
-            for w in which]
-    else:
-        result = [
-            PreparedDataDataset(
-                max_sequence_length, data, loss_tasks, which=w,
-                data_id_in_batch_keys=data_id_in_batch_keys, filter_when_not_in_loss_keys=filter_when_not_in_loss_keys)
-            for w in which]
-    if is_single:
-        result = result[0]
-    return result
-
-
 def _raise_if_head_settings_inconsistent(head_a, head_b):
     if head_a.head_type != head_b.head_type:
         raise ValueError('Inconsistent types in prediction head settings with same key: {}'.format(head_b.key))
@@ -282,7 +251,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
     if settings.common_graph_parts is not None:
         for k in settings.common_graph_parts:
             settings.common_graph_parts[k].resolve_placeholders(
-                placeholder_name_to_fields, prediction_shapes, data_set.num_response_data_fields)
+                placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
             graph_parts[k] = settings.common_graph_parts[k]
 
     default_sequence_head = None
@@ -317,7 +286,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             if key not in graph_parts:
                 graph_parts[key] = prediction_head_parts[key]
                 graph_parts[key].resolve_placeholders(
-                    placeholder_name_to_fields, prediction_shapes, data_set.num_response_data_fields)
+                    placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
             else:
                 if id(graph_parts[key]) != id(prediction_head_parts[key]):
                     raise ValueError('Duplicate graph_part name: {}'.format(key))
@@ -338,7 +307,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
 def _train_step(
         settings: Settings,
         loss_tasks: set,
-        train_data_set: Union[PreparedDataDataset, PreparedDataDatasetOneTaskAtATime],
+        train_data_set: DataIdMultiDataset,
         n_gpu: int,
         device,
         model,
@@ -350,6 +319,7 @@ def _train_step(
         train_results,
         param_optimizer,
         optimizer,
+        scheduler,
         log_tag='train'):
     if n_gpu == 1:
         for k in batch:
@@ -419,13 +389,15 @@ def _train_step(
                 model.zero_grad()
                 return False
             optimizer.step()
+            scheduler.step()
             copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
         else:
             optimizer.step()
+            scheduler.step()
         model.zero_grad()
 
-        for lr in optimizer.get_lr():
-            assert(lr >= 0)
+        for group in optimizer.param_groups:
+            assert(group['lr'] >= 0)
 
     # we're being super aggressive about releasing memory here because
     # we're right on the edge of fitting in gpu
@@ -441,12 +413,15 @@ def train(
         output_dir: str,
         completion_file_path: str,
         output_model_path: str,
-        train_data_set: Union[PreparedDataDataset, PreparedDataDatasetOneTaskAtATime],
-        validation_data_set: Union[PreparedDataDataset, PreparedDataDatasetOneTaskAtATime],
-        test_data_set: Optional[Union[PreparedDataDataset, PreparedDataDatasetOneTaskAtATime]],
+        train_data_set: DataIdMultiDataset,
+        validation_data_set: DataIdMultiDataset,
+        test_data_set: DataIdMultiDataset,
         n_gpu: int,
         device,
         load_from_path: str = None):
+
+    if len(test_data_set) == 0:
+        test_data_set = None
 
     output_train_curve_path = os.path.join(output_dir, 'train_curve.npz')
     output_validation_curve_path = os.path.join(output_dir, 'validation_curve.npz')
@@ -473,6 +448,7 @@ def train(
     batch_sampler = None
     no_gradient_meta_learn_sampler = None
     gradient_meta_learn_sampler = None
+    is_one_task_at_a_time = True
     if settings.optimization_settings.local_rank == -1:
         if isinstance(settings.batch_kind, (tuple, list)):
             if settings.batch_kind[0] != 'single_task_uniform':
@@ -504,6 +480,7 @@ def train(
                     train_data_set, settings.optimization_settings.train_batch_size)
         elif settings.batch_kind == 'mixed_task_random':
             assert (not is_meta_learn_active)
+            is_one_task_at_a_time = False
             train_sampler = RandomSampler(train_data_set)
         else:
             raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
@@ -531,10 +508,10 @@ def train(
         len_train = train_data_set.length(task_filter=settings.meta_learn_gradient_loss_tasks) \
             if is_meta_learn_active else len(train_data_set)
 
-    num_train_steps_per_epoch = int(
+    num_train_steps_per_epoch = int(np.ceil(
         len_train /
         settings.optimization_settings.train_batch_size /
-        settings.optimization_settings.gradient_accumulation_steps)
+        settings.optimization_settings.gradient_accumulation_steps))
 
     num_train_steps_prediction_heads = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
     num_train_steps_other = num_train_steps_per_epoch * (
@@ -553,11 +530,8 @@ def train(
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
-    model_loader = BertMultiPredictionHead.from_fine_tuned \
-        if load_from_path is not None else BertMultiPredictionHead.from_pretrained
-    model = model_loader(
+    model = BertMultiPredictionHead.from_pretrained(
         load_from_path if load_from_path is not None else settings.bert_model,
-        map_location=lambda storage, loc: None if loc == 'cpu' else storage.cuda(device.index),
         head_graph_parts=graph_parts,
         token_supplemental_key_to_shape=token_supplemental_key_to_shape,
         pooled_supplemental_key_to_shape=pooled_supplemental_key_to_shape)
@@ -614,20 +588,23 @@ def train(
         for g in inner_optimizer_grouped_parameters:
             g['t_total'] *= settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples
 
-    optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr=settings.optimization_settings.learning_rate,
-                         warmup=settings.optimization_settings.warmup_proportion,
-                         t_total=num_train_steps_other)
+    optimizer = AdamW(
+        optimizer_grouped_parameters,
+        lr=settings.optimization_settings.learning_rate,
+        correct_bias=False)
+    scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
+        optimizer, optimizer_grouped_parameters)
+
     inner_meta_learn_optimizer = None
+    inner_meta_learn_scheduler = None
     if is_meta_learn_active:
-        inner_meta_learn_optimizer = BertAdam(
+        inner_meta_learn_optimizer = AdamW(
             inner_optimizer_grouped_parameters,
             lr=settings.optimization_settings.learning_rate,
-            warmup=settings.optimization_settings.warmup_proportion,
-            t_total=(
-                num_train_steps_other
-                * (settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples)),
-            b1=0)
+            betas=(0, optimizer.defaults['betas'][1]),
+            correct_bias=False)
+        inner_meta_learn_scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
+            inner_meta_learn_optimizer, inner_optimizer_grouped_parameters)
 
     global_step = 0
     train_results = TaskResults()
@@ -637,7 +614,8 @@ def train(
     # for now we set max_sequence_length so these are never split
     logger.info("  Num split examples = %d", len(train_data_set))
     logger.info("  Batch size = %d", settings.optimization_settings.train_batch_size)
-    logger.info("  Num steps = %d", num_train_steps_prediction_heads)
+    logger.info("  Num steps (heads) = %d", num_train_steps_prediction_heads)
+    logger.info("  Num steps (all param) = %d", num_train_steps_other)
 
     if settings.show_epoch_progress:
         epoch_range = trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch")
@@ -704,11 +682,13 @@ def train(
                         settings,
                         current_loss_tasks,
                         train_data_set, n_gpu, device, model, inner_batch, step, index_epoch, global_step,
-                        loss_handlers, train_results, param_optimizer, inner_meta_learn_optimizer, log_tag=log_tag)
+                        loss_handlers, train_results, param_optimizer,
+                        inner_meta_learn_optimizer, inner_meta_learn_scheduler, log_tag=log_tag)
                 logger.info('meta epoch {}, step {}'.format(index_epoch, step))
                 restore_model_parameters_and_set_meta_gradient(
                     model, restore_state, gradient_state, settings.num_meta_learn_gradient_samples)
                 optimizer.step()
+                scheduler.step()
                 model.zero_grad()
                 global_step += 1
         else:
@@ -722,13 +702,13 @@ def train(
                         settings,
                         settings.meta_learn_gradient_loss_tasks if is_meta_learn_active else settings.loss_tasks,
                         train_data_set, n_gpu, device, model, batch, step, index_epoch, global_step,
-                        loss_handlers, train_results, param_optimizer, optimizer):
+                        loss_handlers, train_results, param_optimizer, optimizer, scheduler):
                     global_step += 1
 
         write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
-            evaluate(settings, model, loss_handlers, device,
-                     index_epoch, global_step, validation_results, validation_data_set)
+            evaluate(settings, model, loss_handlers, device, index_epoch, global_step,
+                     validation_results, validation_data_set, is_one_task_at_a_time)
             write_loss_curve(output_validation_curve_path, validation_results)
 
     logger.info("***** Running predictions *****")
@@ -737,18 +717,17 @@ def train(
     logger.info("  Batch size = %d", settings.optimization_settings.predict_batch_size)
 
     if len(validation_data_set) > 0:
-
         all_validation = evaluate(
             settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
-            global_step, TaskResults(), validation_data_set,
+            global_step, TaskResults(), validation_data_set, is_one_task_at_a_time,
             return_detailed=True)
     else:
         all_validation = {}
 
-    if len(test_data_set) > 0:
+    if test_data_set is not None and len(test_data_set) > 0:
         all_test = evaluate(
             settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
-            global_step, TaskResults(), test_data_set, return_detailed=True)
+            global_step, TaskResults(), test_data_set, is_one_task_at_a_time, return_detailed=True)
     else:
         all_test = {}
 
@@ -758,7 +737,7 @@ def train(
     # Save a trained model and the associated configuration
     if not os.path.exists(output_model_path):
         os.makedirs(output_model_path)
-    model.save(output_model_path)
+    model.save_pretrained(output_model_path)
 
     with open(completion_file_path, 'wt') as completion_file:
         completion_file.write('We did it!')
