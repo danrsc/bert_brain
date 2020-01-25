@@ -36,6 +36,8 @@ class Paths:
     linzen_agreement_path: Optional[str] = _path_field('linzen_agreement')
     glue_path: Optional[str] = _path_field(os.path.join('GLUE', 'glue_data'))
     stanford_sentiment_treebank_path: Optional[str] = _path_field(os.path.join('GLUE', 'glue_data', 'SST-2'))
+
+    # SuperGLUE
     boolq_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'BoolQ'))
     commitment_bank_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'CB'))
     choice_of_plausible_alternatives_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'COPA'))
@@ -45,6 +47,19 @@ class Paths:
     recognizing_textual_entailment_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'RTE'))
     word_in_context_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'WiC'))
     winograd_schema_challenge_path: Optional[str] = _path_field(os.path.join('SuperGLUE', 'WSC'))
+
+    # What you can cram into a single vector
+    bigram_shift_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'bigram_shift.txt'))
+    coordination_inversion_path: Optional[str] = _path_field(
+        os.path.join('what_you_can_cram', 'coordination_inversion.txt'))
+    object_number_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'obj_number.txt'))
+    semantic_odd_man_out_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'odd_man_out.txt'))
+    sentence_length_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'sentence_length.txt'))
+    subject_number_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'subj_number.txt'))
+    top_constituents_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'top_constituents.txt'))
+    tree_depth_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'tree_depth.txt'))
+    verb_tense_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'past_present.txt'))
+    word_content_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'word_content.txt'))
 
     def __post_init__(self):
         for f in fields(self):

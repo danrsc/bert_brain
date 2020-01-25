@@ -76,6 +76,38 @@ def superglue_heads(corpus, sequence_key=None, pooled_key=None):
         raise ValueError('Unknown corpus type: {}'.format(type(corpus)))
 
 
+def what_you_can_cram_heads(corpus, pooled_key=None):
+
+    if pooled_key is None:
+        pooled_key = ('bert', 'pooled')
+
+    head = OrderedDict()
+    critic = OrderedDict()
+
+    if isinstance(
+            corpus,
+            (corpus_types.BigramShift,
+             corpus_types.CoordinationInversion,
+             corpus_types.ObjectNumber,
+             corpus_types.SemanticOddManOut,
+             corpus_types.SentenceLength,
+             corpus_types.SubjectNumber,
+             corpus_types.TopConstituents,
+             corpus_types.TreeDepth,
+             corpus_types.VerbTense,
+             corpus_types.WordContent)):
+        response_key = type(corpus).response_key()
+        num_classes = type(corpus).num_classes()
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
+        if num_classes > 2:
+            critic[response_key] = CriticSettings(
+                critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=num_classes))
+        else:
+            critic[response_key] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        return head, critic
+
+
 def _internal_hash_update(hash_, settings: Settings):
     hash_.update('standard_losses'.encode())
     for loss_task in sorted(settings.loss_tasks):
@@ -706,10 +738,19 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             for k in critics:
                 settings.meta_learn_gradient_loss_tasks.add(k)
         return settings
-    elif name == 'boolq':
+    elif name == 'cram_cpg':
         settings = Settings(
             corpora=(
-                corpus_types.BooleanQuestions(),),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
@@ -720,15 +761,25 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 predict_batch_size=8),
             loss_tasks=set(),
             weight_losses_by_inverse_example_counts=False,
-            # batch_kind=('single_task_uniform', 100),
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            batch_kind=('single_task_uniform', 500),
             num_runs=1)
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 3,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'), is_sequence=True,
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                        should_norm=True))),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         for corpus in settings.corpora:
-            heads, critics = superglue_heads(
-                corpus, sequence_key=('bert', 'sequence'), pooled_key=('bert', 'pooled'))
+            heads, critics = what_you_can_cram_heads(corpus, pooled_key='pooled_all_bottleneck')
             settings.head_graph_parts.update(heads)
             settings.critics.update(critics)
             for k in critics:
-                settings.loss_tasks.add(k)
+                settings.meta_learn_gradient_loss_tasks.add(k)
         return settings
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

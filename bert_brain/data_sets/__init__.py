@@ -20,6 +20,7 @@ from . import recognizing_textual_entailment
 from . import spacy_token_meta
 from . import stanford_sentiment_treebank
 from . import university_college_london_corpus
+from . import what_you_can_cram
 from . import winograd_schema_challenge
 from . import word_in_context
 
@@ -45,6 +46,7 @@ from .recognizing_textual_entailment import *
 from .spacy_token_meta import *
 from .stanford_sentiment_treebank import *
 from .university_college_london_corpus import *
+from .what_you_can_cram import *
 from .winograd_schema_challenge import *
 from .word_in_context import *
 
@@ -54,7 +56,8 @@ __all__ = [
     'data_id_multidataset', 'data_preparer', 'fmri_example_builders', 'harry_potter', 'input_features',
     'multi_sentence_reading_comprehension', 'natural_stories', 'preprocessors',
     'reading_comprehension_with_common_sense_reasoning', 'recognizing_textual_entailment', 'spacy_token_meta',
-    'stanford_sentiment_treebank', 'university_college_london_corpus', 'winograd_schema_challenge', 'word_in_context']
+    'stanford_sentiment_treebank', 'university_college_london_corpus', 'what_you_can_cram',
+    'winograd_schema_challenge', 'word_in_context']
 __all__.extend(syntactic_dependency.__all__)
 __all__.extend(boolean_questions.__all__)
 __all__.extend(choice_of_plausible_alternatives.__all__)
@@ -76,6 +79,7 @@ __all__.extend(recognizing_textual_entailment.__all__)
 __all__.extend(spacy_token_meta.__all__)
 __all__.extend(stanford_sentiment_treebank.__all__)
 __all__.extend(university_college_london_corpus.__all__)
+__all__.extend(what_you_can_cram.__all__)
 __all__.extend(winograd_schema_challenge.__all__)
 __all__.extend(word_in_context.__all__)
 

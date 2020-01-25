@@ -11,6 +11,9 @@ from .stanford_sentiment_treebank import StanfordSentimentTreebank
 from .university_college_london_corpus import UclCorpus
 from .winograd_schema_challenge import WinogradSchemaChallenge
 from .word_in_context import WordInContext
+from .what_you_can_cram import BigramShift, CoordinationInversion, ObjectNumber, SemanticOddManOut, SentenceLength, \
+    SubjectNumber, TopConstituents, TreeDepth, VerbTense, WordContent
+
 
 __all__ = [
     'BooleanQuestions',
@@ -26,4 +29,14 @@ __all__ = [
     'StanfordSentimentTreebank',
     'UclCorpus',
     'WinogradSchemaChallenge',
-    'WordInContext']
+    'WordInContext',
+    'BigramShift',
+    'CoordinationInversion',
+    'ObjectNumber',
+    'SemanticOddManOut',
+    'SentenceLength',
+    'SubjectNumber',
+    'TopConstituents',
+    'TreeDepth',
+    'VerbTense',
+    'WordContent']
