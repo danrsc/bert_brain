@@ -25,18 +25,16 @@ class ContextualizedLinear(nn.Module):
         return nn.functional.linear(x, self.weight, self.bias)
 
 
-class ContextualizedBertLayerNorm(nn.Module):
-    def __init__(self, bert_layer_norm):
+class ContextualizedLayerNorm(nn.Module):
+    def __init__(self, layer_norm):
         super().__init__()
-        self.weight = bert_layer_norm.weight.detach()
-        self.bias = bert_layer_norm.bias.detach()
-        self.variance_epsilon = bert_layer_norm.variance_epsilon
+        self.weight = layer_norm.weight.detach()
+        self.bias = layer_norm.bias.detach()
+        self.eps = layer_norm.eps
+        self.normalized_shape = layer_norm.normalized_shape
 
     def forward(self, x):
-        u = x.mean(-1, keepdim=True)
-        s = (x - u).pow(2).mean(-1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.variance_epsilon)
-        return self.weight * x + self.bias
+        return nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
 class LinearContextualParameterGeneration(GraphPart):
@@ -92,8 +90,8 @@ class LinearContextualParameterGeneration(GraphPart):
             if len(module_result) > 0:
                 if type(module_) is nn.Linear:
                     replacement_module = ContextualizedLinear(module_)
-                elif type(module_) is torch.nn.LayerNorm:
-                    replacement_module = ContextualizedBertLayerNorm(module_)
+                elif type(module_) is nn.LayerNorm:
+                    replacement_module = ContextualizedLayerNorm(module_)
                 else:
                     raise ValueError('Unsupported module type: {}'.format(type(module_)))
                 for name_ in module_result:

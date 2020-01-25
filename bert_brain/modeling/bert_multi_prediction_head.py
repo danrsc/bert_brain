@@ -269,7 +269,7 @@ class LazyBertOutputNumChannels:
                 layer = item[2] if len(item) > 2 else -1
                 if kind == 'sequence' or kind == 'untransformed_pooled':
                     if layer == 'all':
-                        num_layers = self.num_layers
+                        num_layers = self.num_layers + 1  # output of each layer + the token embeddings
                     elif np.ndim(layer) == 0:
                         num_layers = 1
                     else:
@@ -283,8 +283,8 @@ class LazyBertOutputNumChannels:
                         raise KeyError('Cannot get pooled result from a layer other than the last layer. '
                                        'Requested layer: {}. Did you mean untransformed_pooled?'.format(layer))
                     if layer < 0:
-                        layer += self.num_layers
-                    if layer != self.num_layers - 1:
+                        layer += self.num_layers + 1
+                    if layer != self.num_layers:
                         raise KeyError('Cannot get pooled result from a layer other than the last layer. '
                                        'Requested layer: {}. Did you mean untransformed_pooled?'.format(item[2]))
                     num_layers = 1

@@ -105,7 +105,8 @@ def run_variation(
                 output_model_path,
                 settings.get_split_function(corpus.corpus_key, index_run),
                 settings.preprocess_fork_fn,
-                force_cache_miss_set is not None and corpus.corpus_key in force_cache_miss_set,
+                force_cache_miss_set is not None and (
+                        corpus.corpus_key in force_cache_miss_set or '__all__' in force_cache_miss_set),
                 paths,
                 settings.max_sequence_length))
 

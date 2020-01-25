@@ -2,7 +2,7 @@ import os
 import pickle
 import dataclasses
 from collections import OrderedDict
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Mapping, Tuple
 
 import numpy as np
 import torch
@@ -38,7 +38,7 @@ class DataIdDatasetInit:
     max_sequence_length: int
     field_specs: Mapping[str, FieldSpec]
     value_shapes: Mapping[str, Tuple[int, ...]]
-    multipart_indices: Mapping[str, Optional[Sequence[np.ndarray]]]
+    unique_id_to_multipart_id: Mapping[int, int]
     data_kinds: Mapping[str, str]
     has_word_ids: Mapping[str, bool]
     data_key_to_unique_ids: Mapping[str, Mapping[str, np.ndarray]]
@@ -107,7 +107,8 @@ class DataIdDataset(torch.utils.data.Dataset):
             loss_keys,
             data_id_in_batch_keys=None,
             filter_when_not_in_loss_keys=None,
-            index_responses_separately=True):
+            index_responses_separately=True,
+            ignore_multipart_ids=False):
 
         self._path = path
         self._which = which
@@ -131,14 +132,38 @@ class DataIdDataset(torch.utils.data.Dataset):
                 continue
             self._field_specs[field] = init_data.field_specs[field]
             self._value_shapes[field] = init_data.value_shapes[field]
-        self._multipart_indices = init_data.multipart_indices[self._which]
+        unique_id_to_multipart_id = init_data.unique_id_to_multipart_id if not ignore_multipart_ids else None
         self._response_data_kind = init_data.data_kinds
         self._response_data_has_word_ids = init_data.has_word_ids
-        self._response_data_key_to_unique_keys = init_data.data_key_to_unique_ids[which]
+        self._response_data_key_to_unique_ids = init_data.data_key_to_unique_ids[which]
         all_unique_ids = set()
-        for response_data_key in self._response_data_key_to_unique_keys:
-            all_unique_ids.update(self._response_data_key_to_unique_keys[response_data_key])
+        for response_data_key in self._response_data_key_to_unique_ids:
+            all_unique_ids.update(self._response_data_key_to_unique_ids[response_data_key])
         self._all_unique_ids = np.array(sorted(all_unique_ids))
+
+        self._multipart_indices = None
+        self._all_multipart_indices = None
+        if unique_id_to_multipart_id is not None:
+            self._multipart_indices = dict()
+            for response_key in self._response_data_key_to_unique_ids:
+                multipart_indices = dict()
+                for index_unique_id, unique_id in enumerate(self._response_data_key_to_unique_ids[response_key]):
+                    multipart_id = unique_id_to_multipart_id[unique_id]
+                    if multipart_id not in multipart_indices:
+                        multipart_indices[multipart_id] = set()
+                    multipart_indices[multipart_id].add(index_unique_id)
+                multipart_indices = [sorted(multipart_indices[m]) for m in multipart_indices]
+                self._multipart_indices[response_key] = tuple(
+                    sorted(multipart_indices, key=lambda indices_: indices_[0]))
+            all_multipart_indices = dict()
+            for index_unique_id, unique_id in enumerate(self._all_unique_ids):
+                multipart_id = unique_id_to_multipart_id[unique_id]
+                if multipart_id not in all_multipart_indices:
+                    all_multipart_indices[multipart_id] = set()
+                all_multipart_indices[multipart_id].add(index_unique_id)
+            all_multipart_indices = [sorted(all_multipart_indices[m]) for m in all_multipart_indices]
+            self._all_multipart_indices = tuple(sorted(all_multipart_indices, key=lambda indices_: indices_[0]))
+
         self._data_id_in_batch_keys = set(data_id_in_batch_keys) if data_id_in_batch_keys is not None else set()
 
     @staticmethod
@@ -152,8 +177,8 @@ class DataIdDataset(torch.utils.data.Dataset):
         max_sequence_length = 0
         fields_as_none = set()
         self_field_specs = None
-        self_multipart_indices = dict()
         self_unique_ids = dict()
+        self_unique_id_to_multipart_id = None
         self_data_kinds = OrderedDict()
         self_value_shapes = dict()
         self_has_word_ids = dict()
@@ -192,7 +217,6 @@ class DataIdDataset(torch.utils.data.Dataset):
         for which in ('train', 'test', 'validation'):
             examples = DataIdDataset._get_examples(which, prepared_data)
             self_unique_ids[which] = dict()
-            multipart_indices = None
             for index_example, example in enumerate(examples):
                 example_values = dataclasses.asdict(example)
                 if self_field_specs is None:
@@ -211,7 +235,7 @@ class DataIdDataset(torch.utils.data.Dataset):
                             else:
                                 self_value_shapes[field] = np.shape(example_values[field])
                             if field == DataIdDataset.multipart_id_field:
-                                multipart_indices = list()
+                                self_unique_id_to_multipart_id = dict()
                     for field in self_data_kinds:
                         self_field_specs[field] = prepared_data.field_specs[field] \
                             if prepared_data.field_specs is not None and field in prepared_data.field_specs \
@@ -234,8 +258,6 @@ class DataIdDataset(torch.utils.data.Dataset):
                                 have_shape, current_shape, field))
 
                 max_sequence_length = max(max_sequence_length, len(example.tokens))
-                if multipart_indices is not None:
-                    multipart_indices.append(example.multipart_id)
 
                 file_path = os.path.join(
                     path, DataIdDataset.example_file_format.format(
@@ -249,24 +271,15 @@ class DataIdDataset(torch.utils.data.Dataset):
                         if response_data_key not in self_unique_ids[which]:
                             self_unique_ids[which][response_data_key] = list()
                         self_unique_ids[which][response_data_key].append(example.unique_id)
-
-            for response_data_key in self_unique_ids[which]:
-                self_unique_ids[which][response_data_key] = np.array(self_unique_ids[which][response_data_key])
-
-            if multipart_indices is not None:
-                _, multipart_inverse = np.unique(multipart_indices, return_inverse=True)
-                self_multipart_indices[which] = list()
-                for group in np.unique(multipart_inverse):
-                    self_multipart_indices[which].append(np.where(multipart_inverse == group)[0])
-            else:
-                self_multipart_indices[which] = None
+                        if self_unique_id_to_multipart_id is not None:
+                            self_unique_id_to_multipart_id[example.unique_id] = example.multipart_id
 
         init_data = DataIdDatasetInit(
             data_set_key=data_set_key,
             max_sequence_length=max_sequence_length,
             field_specs=self_field_specs,
             value_shapes=self_value_shapes,
-            multipart_indices=self_multipart_indices,
+            unique_id_to_multipart_id=self_unique_id_to_multipart_id,
             data_kinds=self_data_kinds,
             has_word_ids=self_has_word_ids,
             data_key_to_unique_ids=self_unique_ids)
@@ -345,16 +358,16 @@ class DataIdDataset(torch.utils.data.Dataset):
 
     def _response_key_and_index(self, index):
         for response_id, response_key in enumerate(self._response_data_kind):
-            if index < len(self._response_data_key_to_unique_keys[response_key]):
+            if index < len(self._response_data_key_to_unique_ids[response_key]):
                 return response_id, response_key, index
-            index -= len(self._response_data_key_to_unique_keys[response_key])
+            index -= len(self._response_data_key_to_unique_ids[response_key])
         raise IndexError('Index out of bounds: {}'.format(index))
 
     def __getitem__(self, item):
         if self._index_responses_separately:
             response_id, response_data_key_, item = self._response_key_and_index(item)
             response_data_keys = [response_data_key_]
-            unique_id = self._response_data_key_to_unique_keys[response_data_key_][item]
+            unique_id = self._response_data_key_to_unique_ids[response_data_key_][item]
         else:
             response_id = None
             response_data_keys = self._response_data_kind
@@ -398,7 +411,8 @@ class DataIdDataset(torch.utils.data.Dataset):
                     if word_ids is not None:
                         item_word_ids = self.get_word_ids(response_data_key, data_id)
                 data_items.append(data_item)
-                word_ids.append(item_word_ids)
+                if word_ids is not None:
+                    word_ids.append(item_word_ids)
 
             if self._data_id_in_batch_keys is not None and (
                     response_data_key in self._data_id_in_batch_keys
@@ -483,11 +497,12 @@ class DataIdDataset(torch.utils.data.Dataset):
     def task_indices(self):
         if self._index_responses_separately:
             indices = OrderedDict()
+            offset = 0
             for response_key in self._response_data_kind:
-                num_examples = len(self._response_data_key_to_unique_keys[response_key]) \
-                    if response_key in self._response_data_key_to_unique_keys else 0
+                num_examples = len(self._response_data_key_to_unique_ids[response_key]) \
+                    if response_key in self._response_data_key_to_unique_ids else 0
                 if self._multipart_indices is not None:
-                    task_indices = [np.array(i) for i in self._multipart_indices]
+                    task_indices = [(np.array(i) + offset) for i in self._multipart_indices[response_key]]
                     count = sum(len(i) for i in task_indices)
                     # if this doesn't hold, we need to change the logic in _response_key_and_index
                     assert(count == num_examples)
@@ -495,13 +510,14 @@ class DataIdDataset(torch.utils.data.Dataset):
                     if num_examples == 0:
                         task_indices = []
                     else:
-                        task_indices = np.split(np.arange(num_examples), num_examples)
+                        task_indices = np.split(np.arange(num_examples) + offset, num_examples)
                 indices[response_key] = task_indices
+                offset += num_examples
             return indices
         else:
             num_examples = len(self._all_unique_ids)
-            if self._multipart_indices is not None:
-                task_indices = [np.array(i) for i in self._multipart_indices]
+            if self._all_multipart_indices is not None:
+                task_indices = [np.array(i) for i in self._all_multipart_indices]
                 count = sum(len(i) for i in task_indices)
                 # if this doesn't hold, we need to change the logic in __get_item__
                 assert (count == num_examples)
@@ -545,6 +561,6 @@ class DataIdDataset(torch.utils.data.Dataset):
     def num_examples_for_field(self, field):
         if field not in self._field_specs:
             raise KeyError('Unknown field: {}'.format(field))
-        if field in self._response_data_key_to_unique_keys:
-            return len(self._response_data_key_to_unique_keys[field])
+        if field in self._response_data_key_to_unique_ids:
+            return len(self._response_data_key_to_unique_ids[field])
         return len(self._all_unique_ids)

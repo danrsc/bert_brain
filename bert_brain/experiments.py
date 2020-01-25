@@ -669,11 +669,12 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 corpus_types.BooleanQuestions(),
                 corpus_types.CommitmentBank(),
                 corpus_types.ChoiceOfPlausibleAlternatives(),
-                # corpus_types.MultiSentenceReadingComprehension(),
-                # corpus_types.ReadingComprehensionWithCommonSenseReasoning(),
+                corpus_types.MultiSentenceReadingComprehension(),
+                corpus_types.ReadingComprehensionWithCommonSenseReasoning(),
                 corpus_types.RecognizingTextualEntailment(),
                 corpus_types.WinogradSchemaChallenge(),
                 corpus_types.WordInContext()),
+            max_sequence_length=256,
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
@@ -686,7 +687,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind=('single_task_uniform', 5000),
+            batch_kind=('single_task_uniform', 500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(

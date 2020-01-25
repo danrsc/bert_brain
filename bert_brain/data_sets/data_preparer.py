@@ -154,7 +154,7 @@ class DataPreparer:
                     preprocessors = (preprocessors,)
                 else:
                     preprocessors = tuple(preprocessors)
-                preprocess_list.append((response_key_kind.response_key, preprocessors))
+            preprocess_list.append((response_key_kind.response_key, preprocessors))
             if self.preprocess_fork_fn is not None:
                 forked_name, forked_preprocessors = self.preprocess_fork_fn(
                     response_key_kind.response_key, response_key_kind.kind, preprocessors)

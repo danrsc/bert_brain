@@ -1,5 +1,6 @@
 import os
 import json
+from dataclasses import dataclass
 import numpy as np
 
 from .input_features import RawData, KindData, ResponseKind, FieldSpec
@@ -10,6 +11,7 @@ from .spacy_token_meta import ChineseCharDetected
 __all__ = ['BooleanQuestions']
 
 
+@dataclass(frozen=True)
 class BooleanQuestions(CorpusBase):
     path: str = path_attribute_field('boolq_path')
 

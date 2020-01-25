@@ -40,7 +40,9 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
             loss_keys,
             data_id_in_batch_keys=None,
             filter_when_not_in_loss_keys=None,
-            index_responses_separately=True):
+            index_responses_separately=True,
+            ignore_multipart_ids=False):
+
         self._max_sequence_length = max(DataIdDataset.get_init_metadata(path).max_sequence_length for path in paths)
         self._data_sets = OrderedDict()
         self._data_set_lengths = OrderedDict()
@@ -56,24 +58,25 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
                 loss_keys,
                 data_id_in_batch_keys,
                 filter_when_not_in_loss_keys,
-                index_responses_separately)
+                index_responses_separately,
+                ignore_multipart_ids=ignore_multipart_ids)
+
+            for field in data_set.response_fields:
+                if field in self._field_to_data_set_key:
+                    raise ValueError('Multiple corpora ({}, {}) use the same response field: {}'.format(
+                        self._field_to_data_set_key[field], data_set.data_set_key, field))
+                self._field_to_data_set_key[field] = data_set.data_set_key
+
             self._data_sets[data_set.data_set_key] = data_set
             # cache this since we use it over and over and it may take some compute
             self._data_set_lengths[data_set.data_set_key] = len(data_set)
             self._data_set_id_to_data_set_key[data_set_id] = data_set.data_set_key
 
-            for data_set_key in self._data_sets:
-                for field in self._data_sets[data_set_key].response_fields:
-                    if field in self._field_to_data_set_key:
-                        raise ValueError('Multiple corpora ({}, {}) use the same response field: {}'.format(
-                            self._field_to_data_set_key[field], data_set_key, field))
-                    self._field_to_data_set_key[field] = data_set_key
-
+            # noinspection PyProtectedMember
+            for field in data_set._field_specs:
                 # noinspection PyProtectedMember
-                for field in self._data_sets[data_set_key]._field_specs:
-                    # noinspection PyProtectedMember
-                    DataIdMultiDataset._add_field_or_check_consistent(
-                        self._field_specs, field, self._data_sets[data_set_key]._field_specs)
+                DataIdMultiDataset._add_field_or_check_consistent(
+                    self._field_specs, field, data_set._field_specs)
 
     @property
     def max_sequence_length(self):
@@ -166,6 +169,7 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
 
     def task_indices(self):
         indices = None
+        offset = 0
         for data_set_key in self._data_sets:
             t = self._data_sets[data_set_key].task_indices()
             if indices is None:
@@ -175,9 +179,15 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
                     # should never happen
                     raise RuntimeError('Inconsistent task_indices across data_sets')
                 if isinstance(indices, dict):
-                    indices.update(t)
+                    for k in t:
+                        assert(k not in indices)
+                        indices[k] = list()
+                        for item in t[k]:
+                            indices[k].append(item + offset)
                 else:
-                    indices.extend(t)
+                    for item in t:
+                        indices.append(item + offset)
+            offset += self._data_set_lengths[data_set_key]
         return indices
 
     def num_examples_for_field(self, field):
@@ -273,7 +283,7 @@ class BatchOneTaskUniformTaskSampler(torch.utils.data.Sampler):
         idx = 0
         while self.batches_per_epoch <= 0 or idx < self.batches_per_epoch:
             task = np.random.choice(tasks)
-            task_sample = np.random.permutation(len(self.task_indices[task]))
+            task_sample = np.random.randint(0, len(self.task_indices[task]), self.batch_size)
             batch = list()
             for i in task_sample:
                 if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
