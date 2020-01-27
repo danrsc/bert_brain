@@ -61,6 +61,10 @@ class BooleanQuestions(CorpusBase):
     def response_key(cls):
         return 'boolq'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = BooleanQuestions._read_examples(

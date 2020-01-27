@@ -165,17 +165,36 @@ def _default_supplemental_fields():
 
 def _default_critics():
 
-    return {
+    result = {
         corpus_types.UclCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.ns_froi: CriticSettings(critic_type=CriticKeys.single_mse),
         corpus_types.NaturalStoriesCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
         ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
-        corpus_types.HarryPotterCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
-        corpus_types.ColorlessGreenCorpus.__name__: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        corpus_types.LinzenAgreementCorpus.__name__: CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy),
-        corpus_types.StanfordSentimentTreebank.__name__: CriticSettings(
-            critic_type=CriticKeys.single_binary_cross_entropy)
+        corpus_types.HarryPotterCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse)
     }
+
+    for corpus_type_str in corpus_types.__all__:
+        corpus_type = getattr(corpus_types, corpus_type_str)
+        if hasattr(corpus_type, 'num_classes'):
+            is_sequence_labeled = False
+            if hasattr(corpus_type, 'is_sequence_labeled'):
+                is_sequence_labeled = corpus_type.is_sequence_labeled()
+            if is_sequence_labeled:
+                if corpus_type.num_classes() > 2:
+                    result[corpus_type.__name__] = CriticSettings(
+                        critic_type=CriticKeys.cross_entropy,
+                        critic_kwargs=dict(num_classes=corpus_type.num_classes()))
+                else:
+                    result[corpus_type.__name__] = CriticSettings(critic_type=CriticKeys.binary_cross_entropy)
+            else:
+                if corpus_type.num_classes() > 2:
+                    result[corpus_type.__name__] = CriticSettings(
+                        critic_type=CriticKeys.single_cross_entropy,
+                        critic_kwargs=dict(num_classes=corpus_type.num_classes()))
+                else:
+                    result[corpus_type.__name__] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+
+    return result
 
 
 @dataclass

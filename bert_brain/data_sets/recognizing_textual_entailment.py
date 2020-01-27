@@ -57,6 +57,10 @@ class RecognizingTextualEntailment(CorpusBase):
     def response_key(cls):
         return 'rte'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = RecognizingTextualEntailment._read_examples(

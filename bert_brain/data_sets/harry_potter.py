@@ -95,6 +95,7 @@ class HarryPotterCorpus(CorpusBase):
     meg_subjects: Optional[Sequence[str]] = None
     meg_kind: str = 'leila'
     separate_meg_axes: Optional[Union[str, Sequence[str]]] = None
+    separate_fmri_components: bool = False
     group_meg_sentences_like_fmri: bool = False
     fmri_smooth_factor: Optional[float] = 1.
     fmri_skip_start_trs: int = 20
@@ -130,7 +131,9 @@ class HarryPotterCorpus(CorpusBase):
     # don't read in fmri data; i.e. as a way to do train-test splits the
     # same for MEG as for fMRI. We will assert that the run lengths we
     # get are equal to these when we read fMRI
-    static_run_lengths: ClassVar[Tuple[int]] = (340, 352, 279, 380)
+    static_run_lengths: ClassVar[Tuple[int, ...]] = (340, 352, 279, 380)
+    all_fmri_subjects: ClassVar[Tuple[str, ...]] = ('F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N')
+    all_meg_subjects: ClassVar[Tuple[str, ...]] = ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I')
 
     @staticmethod
     def _add_fmri_example(
@@ -766,6 +769,13 @@ class HarryPotterCorpus(CorpusBase):
         for subject in data:
             # add a subject axis as axis 1 since downstream preprocessors expect it (they handle multi-subject data)
             data[subject] = np.expand_dims(data[subject], axis=1)
+
+        if self.separate_fmri_components:
+            separated_data = dict()
+            for subject in data:
+                for index_component in range(data[subject].shape[-1]):
+                    separated_data['{}_{}'.format(subject, index_component)] = data[subject][..., index_component]
+            data = separated_data
 
         word_ids = list()
         for example in local_examples:

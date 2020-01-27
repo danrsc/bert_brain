@@ -2,6 +2,7 @@ import csv
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import ClassVar, Tuple
 
 import numpy as np
 from scipy.io import loadmat
@@ -21,6 +22,8 @@ class UclCorpus(CorpusBase):
     include_erp: bool = True
     include_eye: bool = True
     self_paced_inclusion: str = 'all'
+
+    all_erp_tasks: ClassVar[Tuple[str, ...]] = ('epnp', 'pnp', 'elan', 'lan', 'n400', 'p600')
 
     def _load(self, example_manager: CorpusExampleUnifier):
         data = OrderedDict()

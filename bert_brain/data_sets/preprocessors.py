@@ -187,7 +187,7 @@ class PreprocessKMeans:
     transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
     n_init: int = 10
 
-    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
+    def __call__(self, loaded_data_tuple, metadata, random_state, dataset_path, data_key):
         from sklearn.cluster import KMeans
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
@@ -205,9 +205,9 @@ class PreprocessKMeans:
             cluster_means[:, index_cluster] = np.mean(data[:, indicator_cluster], axis=1)
 
         clusters = np.reshape(clusters, valid_train_values.shape[1:])
-        if not os.path.exists(output_model_path):
-            os.makedirs(output_model_path)
-        np.save(os.path.join(output_model_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
+        if not os.path.exists(dataset_path):
+            os.makedirs(dataset_path)
+        np.save(os.path.join(dataset_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
         print('done')
 
         return replace(loaded_data_tuple, data=cluster_means)
@@ -221,7 +221,7 @@ class PreprocessMiniBatchKMeans:
     n_init: int = 10
     batch_size: int = 100
 
-    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
+    def __call__(self, loaded_data_tuple, metadata, random_state, dataset_path, data_key):
         from sklearn.cluster import MiniBatchKMeans
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), loaded_data_tuple.train, self.stop_mode)
@@ -240,9 +240,9 @@ class PreprocessMiniBatchKMeans:
             cluster_means[:, index_cluster] = np.mean(data[:, indicator_cluster], axis=1)
 
         clusters = np.reshape(clusters, valid_train_values.shape[1:])
-        if not os.path.exists(output_model_path):
-            os.makedirs(output_model_path)
-        np.save(os.path.join(output_model_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
+        if not os.path.exists(dataset_path):
+            os.makedirs(dataset_path)
+        np.save(os.path.join(dataset_path, 'kmeans_clusters_{}.npy'.format(data_key)), clusters)
         print('done')
 
         return replace(loaded_data_tuple, data=cluster_means)
@@ -1026,9 +1026,9 @@ class PreprocessRandomPair:
 class PreprocessToDisk:
     delete: bool = True
 
-    def __call__(self, loaded_data_tuple, metadata, random_state, output_model_path, data_key):
-        if not os.path.exists(output_model_path):
-            os.makedirs(output_model_path)
+    def __call__(self, loaded_data_tuple, metadata, random_state, dataset_path, data_key):
+        if not os.path.exists(dataset_path):
+            os.makedirs(dataset_path)
         print('saving {} to disk...'.format(data_key), end='', flush=True)
         unique_ids = list()
         lengths = list()
@@ -1039,7 +1039,7 @@ class PreprocessToDisk:
             lengths.append(len(ex.data_ids))
             data_ids.extend(ex.data_ids)
         np.savez(
-            os.path.join(output_model_path, '{}.npz'.format(data_key)),
+            os.path.join(dataset_path, '{}.npz'.format(data_key)),
             unique_ids=np.array(unique_ids),
             lengths=np.array(lengths),
             data_ids=np.array(data_ids),

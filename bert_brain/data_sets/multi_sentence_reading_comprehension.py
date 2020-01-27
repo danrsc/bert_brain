@@ -148,6 +148,10 @@ class MultiSentenceReadingComprehension(CorpusBase):
     def response_key(cls):
         return 'multi_rc'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = MultiSentenceReadingComprehension._read_examples(

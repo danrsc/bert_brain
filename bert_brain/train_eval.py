@@ -220,7 +220,10 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
     for k in data_set.fields:
         kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
         corpus_key = data_set.data_set_key_for_field(k)
-        if k in settings.all_loss_tasks or k in settings.non_response_outputs or data_set.is_response_data(k):
+        if k in settings.all_loss_tasks \
+                or kind in settings.all_loss_tasks \
+                or k in settings.non_response_outputs \
+                or data_set.is_response_data(k):
             if k in settings.all_loss_tasks or kind in settings.all_loss_tasks:
                 loss_example_counts[k] = data_set.num_examples_for_field(k)
             critic_settings = settings.get_critic(k, data_set)

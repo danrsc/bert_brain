@@ -5,7 +5,7 @@ import csv
 from dataclasses import dataclass
 from collections import OrderedDict
 import dataclasses
-from typing import Sequence, Optional
+from typing import Sequence, Optional, ClassVar, Tuple
 
 import numpy as np
 from scipy.io import loadmat
@@ -315,6 +315,10 @@ class NaturalStoriesCorpus(CorpusBase):
     froi_sentence_mode: str = 'multiple'
     froi_minimum_story_count: int = 1
     froi_example_builder: FMRICombinedSentenceExamples = dataclasses.field(init=False, repr=False, compare=False)
+
+    all_froi_tasks: ClassVar[Tuple[str, ...]] = (
+        'ns_lh_pt', 'ns_lh_at', 'ns_lh_ifg', 'ns_lh_ifgpo', 'ns_lh_mfg', 'ns_lh_ag',
+        'ns_rh_pt', 'ns_rh_at', 'ns_rh_ifg', 'ns_rh_ifgpo', 'ns_rh_mfg', 'ns_rh_ag')
 
     def __post_init__(self, index_run: Optional[int]):
         def _as_tuple(name):

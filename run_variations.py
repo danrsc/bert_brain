@@ -102,7 +102,6 @@ def run_variation(
                 index_run,
                 corpus,
                 settings.preprocessors,
-                output_model_path,
                 settings.get_split_function(corpus.corpus_key, index_run),
                 settings.preprocess_fork_fn,
                 force_cache_miss_set is not None and (

@@ -59,6 +59,10 @@ class WordInContext(CorpusBase):
     def response_key(cls):
         return 'wic'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = WordInContext._read_examples(

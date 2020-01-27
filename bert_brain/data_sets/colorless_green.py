@@ -117,6 +117,10 @@ class ColorlessGreenCorpus(CorpusBase):
     def response_key(cls):
         return 'colorless'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         english_web_paths = [
             os.path.join(self.path, 'en_ewt-ud-train.conllu'),
@@ -146,6 +150,10 @@ class LinzenAgreementCorpus(CorpusBase):
     @classmethod
     def response_key(cls):
         return 'linzen_agree'
+
+    @classmethod
+    def num_classes(cls):
+        return 2
 
     def _load(self, example_manager: CorpusExampleUnifier):
 

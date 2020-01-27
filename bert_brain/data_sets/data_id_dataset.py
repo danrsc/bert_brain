@@ -97,7 +97,8 @@ class DataIdDataset(torch.utils.data.Dataset):
         return (
             filter_when_not_in_loss_keys is None
             or (field_name not in filter_when_not_in_loss_keys and kind not in filter_when_not_in_loss_keys)
-            or field_name in loss_keys)
+            or field_name in loss_keys
+            or kind in loss_keys)
 
     def __init__(
             self,

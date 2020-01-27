@@ -132,7 +132,6 @@ class DataPreparer:
     corpus_key: str
     response_key_kinds: Sequence[ResponseKeyKind]
     preprocess_dict: Optional[PhasePreprocessorMappingT]
-    output_model_path: str
     split_function: Optional[SplitFunctionT] = None
     preprocess_fork_fn: Optional[PreprocessForkFnT] = None
     forked_response_keys: Optional[Sequence[Tuple[str, str]]] = field(init=False)
@@ -187,7 +186,7 @@ class DataPreparer:
             return preprocess_dict[corpus_key]
         return None
 
-    def _run_step(self, step, result, metadata, random_state, response_k=None):
+    def _run_step(self, step, result, metadata, random_state, dataset_path, response_k=None):
         sig = signature(step.__call__)
         parameters = OrderedDict(sig.parameters)
         loaded_data_tuple = _make_prepared_data_view(result, response_k) if response_k is not None else result
@@ -195,7 +194,7 @@ class DataPreparer:
             loaded_data_tuple=loaded_data_tuple,
             metadata=metadata,
             random_state=random_state,
-            output_model_path=self.output_model_path)
+            dataset_path=dataset_path)
         if response_k is not None:
             arguments['data_key'] = response_k
         step_kwargs = OrderedDict()
@@ -208,7 +207,7 @@ class DataPreparer:
         step_args = [arguments[k] for i, k in enumerate(arguments) if i < len(parameters)]
         return step(*step_args, **step_kwargs)
 
-    def prepare(self, raw_data: RawData) -> Tuple[PreparedData, Optional[Mapping[str, np.ndarray]]]:
+    def prepare(self, raw_data: RawData, dataset_path: str) -> Tuple[PreparedData, Optional[Mapping[str, np.ndarray]]]:
 
         random_state = np.random.RandomState(self.seed)
         metadata = raw_data.metadata
@@ -301,10 +300,10 @@ class DataPreparer:
             for response_k in current_response_keys:
                 if phase_steps[response_k] is not None:
                     for step in phase_steps[response_k][index_phase]:
-                        processed = self._run_step(step, result, metadata, random_state, response_k)
+                        processed = self._run_step(step, result, metadata, random_state, dataset_path, response_k)
                         _reconcile_view(result, processed, response_k)
             if index_phase < len(phases):
                 phase_change_step = phase_change_steps[phases[index_phase]]
-                result, metadata = self._run_step(phase_change_step, result, metadata, random_state)
+                result, metadata = self._run_step(phase_change_step, result, metadata, dataset_path, random_state)
 
         return result, metadata

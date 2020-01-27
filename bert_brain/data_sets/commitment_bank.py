@@ -53,6 +53,10 @@ class CommitmentBank(CorpusBase):
     def response_key(cls):
         return 'cb'
 
+    @classmethod
+    def num_classes(cls):
+        return 4
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = CommitmentBank._read_examples(

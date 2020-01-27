@@ -105,6 +105,10 @@ class WinogradSchemaChallenge(CorpusBase):
     def response_key(cls):
         return 'wsc'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         named_span_encoder = NamedSpanEncoder()

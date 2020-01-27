@@ -61,6 +61,10 @@ class ChoiceOfPlausibleAlternatives(CorpusBase):
     def response_key(cls):
         return 'copa'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         labels = list()
         train = ChoiceOfPlausibleAlternatives._read_examples(

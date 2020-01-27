@@ -48,7 +48,6 @@ class CorpusDatasetFactory:
             index_run: int,
             corpus: CorpusBase,
             preprocess_dict: Optional[PhasePreprocessorMappingT],
-            output_model_path: str,
             split_function: Optional[SplitFunctionT] = None,
             preprocess_fork_fn: Optional[PreprocessForkFnT] = None,
             force_cache_miss: bool = False,
@@ -71,7 +70,6 @@ class CorpusDatasetFactory:
                 corpus.corpus_key,
                 response_key_kinds,
                 preprocess_dict,
-                output_model_path,
                 split_function,
                 preprocess_fork_fn)
 
@@ -102,7 +100,6 @@ class CorpusDatasetFactory:
             corpus.corpus_key,
             response_key_kinds,
             preprocess_dict,
-            output_model_path,
             split_function,
             preprocess_fork_fn)
 
@@ -115,7 +112,7 @@ class CorpusDatasetFactory:
 
         data_set_path = os.path.join(corpus.cache_base_path, data_set_hash)
 
-        data, metadata = data_preparer.prepare(data)
+        data, metadata = data_preparer.prepare(data, data_set_path)
         DataIdDataset.make_dataset_files(data_set_path, corpus.corpus_key, data, metadata)
 
         print('done')

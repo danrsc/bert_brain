@@ -47,6 +47,10 @@ class StanfordSentimentTreebank(CorpusBase):
     def response_key(cls):
         return 'sentiment'
 
+    @classmethod
+    def num_classes(cls):
+        return 2
+
     def _load(self, example_manager: CorpusExampleUnifier):
         label_list = list()
         train_examples = StanfordSentimentTreebank._read_labels(
