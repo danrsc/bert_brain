@@ -1,8 +1,9 @@
 from collections import OrderedDict
+from typing import Optional, Union, Sequence, Callable, Mapping, Tuple, Iterable
 
 import numpy as np
 import torch
-from torch import nn
+from torch import nn, Tensor
 import torch.nn.functional
 
 from transformers.modeling_bert import gelu_new as gelu
@@ -55,7 +56,10 @@ class KeyedBase(GraphPart):
                 output_key_to_shape[key] = (output_key_to_shape[key],)
         return [int(np.prod(output_key_to_shape[k])) for k in output_key_to_shape]
 
-    def __init__(self, output_key_to_shape, targets):
+    def __init__(
+            self,
+            output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]],
+            targets: Optional[Union[str, Iterable[str]]]):
         super().__init__()
         if output_key_to_shape is None:
             self.output_key_to_shape = OrderedDict()
@@ -123,15 +127,15 @@ class KeyedLinear(KeyedBase):
 
     def __init__(
             self,
-            source_name,
-            is_sequence,
-            hidden_sizes=None,
-            hidden_activation=gelu,
-            force_cpu=False,
-            output_key_to_shape=None,
-            targets=None,
-            apply_at_most_one_data_id=False,
-            should_norm=False):
+            source_name: Union[str, Tuple[str, ...]],
+            is_sequence: bool,
+            hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
+            hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
+            force_cpu: bool = False,
+            output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
+            targets: Optional[Union[str, Iterable[str]]] = None,
+            apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False,
+            should_norm: bool = False):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
         self.is_sequence = is_sequence
@@ -189,8 +193,14 @@ class KeyedLinear(KeyedBase):
                 p = p.view(p.size()[:1] + self.output_key_to_shape[k])
             result[k] = p
 
-            if (self.apply_at_most_one_data_id == 'if_no_target' and k not in batch and (k, 'data_ids') in batch) \
-                    or self.apply_at_most_one_data_id is True:
+            if isinstance(self.apply_at_most_one_data_id, dict):
+                apply_at_most_one_data_id = self.apply_at_most_one_data_id[k] \
+                    if k in self.apply_at_most_one_data_id else False
+            else:
+                apply_at_most_one_data_id = self.apply_at_most_one_data_id
+
+            if (apply_at_most_one_data_id == 'if_no_target' and k not in batch and (k, 'data_ids') in batch) \
+                    or apply_at_most_one_data_id is True:
                 data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
                 indicator_valid = data_ids >= 0
                 result[k] = result[k][indicator_valid]

@@ -1,7 +1,7 @@
 import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 import hashlib
 import pickle
 
@@ -14,6 +14,12 @@ from .data_preparer import DataPreparer, PhasePreprocessorMappingT, SplitFunctio
 from .data_id_dataset import DataIdDataset
 
 __all__ = ['CorpusDatasetFactory']
+
+
+@dataclass(frozen=True)
+class CorpusLoadInfo:
+    response_key_kinds: Tuple[ResponseKeyKind, ...]
+    true_max_sequence_length: int
 
 
 @dataclass(frozen=True)
@@ -57,28 +63,31 @@ class CorpusDatasetFactory:
         corpus = CorpusBase.replace_paths(corpus, paths_obj, index_run=index_run)
         corpus_load_hash = type(self)._hash_arguments(OrderedDict((k, v) for k, v in [
             ('factory', self),
-            ('corpus', corpus),
-            ('max_sequence_length', max_sequence_length)]))
+            ('corpus', corpus)]))
 
         corpus_info_path = os.path.join(corpus.cache_base_path, corpus_load_hash, 'corpus_info.pkl')
         if os.path.exists(corpus_info_path) and not force_cache_miss:
             with open(corpus_info_path, 'rb') as corpus_info_file:
-                response_key_kinds = pickle.load(corpus_info_file)
+                corpus_info: CorpusLoadInfo = pickle.load(corpus_info_file)
 
             data_preparer = DataPreparer(
                 seed,
                 corpus.corpus_key,
-                response_key_kinds,
+                corpus_info.response_key_kinds,
                 preprocess_dict,
                 split_function,
                 preprocess_fork_fn)
+
+            effective_max_sequence_length = corpus_info.true_max_sequence_length
+            if max_sequence_length is not None and max_sequence_length < effective_max_sequence_length:
+                effective_max_sequence_length = max_sequence_length
 
             data_set_hash = type(self)._hash_arguments(
                 OrderedDict((k, v) for k, v in [
                     ('factory', self),
                     ('corpus', corpus),
                     ('data_preparer', data_preparer),
-                    ('max_sequence_length', max_sequence_length)]))
+                    ('max_sequence_length', effective_max_sequence_length)]))
 
             data_set_path = os.path.join(corpus.cache_base_path, data_set_hash)
             init_file_path = os.path.join(data_set_path, DataIdDataset.dataset_init_file)
@@ -90,25 +99,32 @@ class CorpusDatasetFactory:
         print('Loading {}...'.format(corpus.corpus_key), end='', flush=True)
         if not os.path.exists(os.path.split(corpus_info_path)[0]):
             os.makedirs(os.path.split(corpus_info_path)[0])
-        data = corpus.load(self.spacy_language, self.model_tokenizer, max_sequence_length=max_sequence_length)
-        response_key_kinds = tuple(ResponseKeyKind(k, data.response_data[k].kind) for k in data.response_data)
+        data, true_max_sequence_length = corpus.load(
+            self.spacy_language, self.model_tokenizer, max_sequence_length=max_sequence_length)
+        corpus_info = CorpusLoadInfo(
+            response_key_kinds=tuple(ResponseKeyKind(k, data.response_data[k].kind) for k in data.response_data),
+            true_max_sequence_length=true_max_sequence_length)
         with open(corpus_info_path, 'wb') as corpus_info_file:
-            pickle.dump(response_key_kinds, corpus_info_file, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(corpus_info, corpus_info_file, protocol=pickle.HIGHEST_PROTOCOL)
 
         data_preparer = DataPreparer(
             seed,
             corpus.corpus_key,
-            response_key_kinds,
+            corpus_info.response_key_kinds,
             preprocess_dict,
             split_function,
             preprocess_fork_fn)
+
+        effective_max_sequence_length = corpus_info.true_max_sequence_length
+        if max_sequence_length is not None and max_sequence_length < effective_max_sequence_length:
+            effective_max_sequence_length = max_sequence_length
 
         data_set_hash = type(self)._hash_arguments(
             OrderedDict((k, v) for k, v in [
                 ('factory', self),
                 ('corpus', corpus),
                 ('data_preparer', data_preparer),
-                ('max_sequence_length', max_sequence_length)]))
+                ('max_sequence_length', effective_max_sequence_length)]))
 
         data_set_path = os.path.join(corpus.cache_base_path, data_set_hash)
 

@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Iterable, Container, Mapping, Any
 
 import numpy as np
 import torch
@@ -35,13 +35,14 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
 
     def __init__(
             self,
-            which,
-            paths,
-            loss_keys,
-            data_id_in_batch_keys=None,
-            filter_when_not_in_loss_keys=None,
-            index_responses_separately=True,
-            ignore_multipart_ids=False):
+            which: str,
+            paths: Iterable[str],
+            loss_keys: Container[str],
+            data_id_in_batch_keys: Optional[Iterable[str]] = None,
+            filter_when_not_in_loss_keys: Optional[Iterable[str]] = None,
+            field_spec_replacers: Optional[Mapping[str, Mapping[str, Any]]] = None,
+            index_responses_separately: bool = True,
+            ignore_multipart_ids: bool = False):
 
         self._max_sequence_length = max(DataIdDataset.get_init_metadata(path).max_sequence_length for path in paths)
         self._data_sets = OrderedDict()
@@ -58,6 +59,7 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
                 loss_keys,
                 data_id_in_batch_keys,
                 filter_when_not_in_loss_keys,
+                field_spec_replacers,
                 index_responses_separately,
                 ignore_multipart_ids=ignore_multipart_ids)
 
@@ -103,6 +105,16 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
                 return True
         except KeyError:
             return False
+
+    def is_just_in_time_field(self, field, allow_invalid_field=False):
+        if field not in self._field_specs:
+            if allow_invalid_field:
+                return False
+            raise KeyError('Invalid field: {}'.format(field))
+        for data_set_key in self._data_sets:
+            if self._data_sets[data_set_key].is_just_in_time_field(field, allow_invalid_field=True):
+                return True
+        return False
 
     def response_data_kind(self, field):
         if field not in self._field_specs:

@@ -82,11 +82,11 @@ class BigramShift(CorpusBase):
     path: str = path_attribute_field('bigram_shift_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'bshift'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -98,11 +98,11 @@ class CoordinationInversion(CorpusBase):
     path: str = path_attribute_field('coordination_inversion_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'coord_inv'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -114,11 +114,11 @@ class ObjectNumber(CorpusBase):
     path: str = path_attribute_field('object_number_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'obj_num'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -130,11 +130,11 @@ class SemanticOddManOut(CorpusBase):
     path: str = path_attribute_field('semantic_odd_man_out_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'somo'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -146,11 +146,11 @@ class SentenceLength(CorpusBase):
     path: str = path_attribute_field('sentence_length_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'sent_len'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 6
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -162,11 +162,11 @@ class SubjectNumber(CorpusBase):
     path: str = path_attribute_field('subject_number_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'subj_num'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -178,11 +178,11 @@ class TopConstituents(CorpusBase):
     path: str = path_attribute_field('top_constituents_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'top_const'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 20
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -194,11 +194,11 @@ class TreeDepth(CorpusBase):
     path: str = path_attribute_field('tree_depth_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'tree_depth'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 7
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -210,11 +210,11 @@ class VerbTense(CorpusBase):
     path: str = path_attribute_field('verb_tense_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'tense'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
@@ -226,11 +226,11 @@ class WordContent(CorpusBase):
     path: str = path_attribute_field('word_content_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'wc'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 1000
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:

@@ -2,7 +2,7 @@ import os
 import pickle
 import dataclasses
 from collections import OrderedDict
-from typing import Mapping, Tuple
+from typing import Mapping, Tuple, Optional, Container, Iterable, Any
 
 import numpy as np
 import torch
@@ -102,14 +102,15 @@ class DataIdDataset(torch.utils.data.Dataset):
 
     def __init__(
             self,
-            path,
-            which,
-            pad_sequence_length,
-            loss_keys,
-            data_id_in_batch_keys=None,
-            filter_when_not_in_loss_keys=None,
-            index_responses_separately=True,
-            ignore_multipart_ids=False):
+            path: str,
+            which: str,
+            pad_sequence_length: int,
+            loss_keys: Container[str],
+            data_id_in_batch_keys: Optional[Iterable[str]] = None,
+            filter_when_not_in_loss_keys: Optional[Iterable[str]] = None,
+            field_spec_replacers: Optional[Mapping[str, Mapping[str, Any]]] = None,
+            index_responses_separately: bool = True,
+            ignore_multipart_ids: bool = False):
 
         self._path = path
         self._which = which
@@ -123,16 +124,25 @@ class DataIdDataset(torch.utils.data.Dataset):
         self._data_id_field_spec = None
         self._value_shapes = dict()
         for field in init_data.field_specs:
-            if field == DataIdDataset.data_id_field:
-                self._data_id_field_spec = init_data.field_specs[field]
-                continue
-            if init_data.field_specs[field].tensor_dtype == str:
-                continue
+            field_spec = init_data.field_specs[field]
             kind = init_data.data_kinds[field] if field in init_data.data_kinds else None
+            if field_spec_replacers is not None:
+                if field in field_spec_replacers:
+                    field_spec = dataclasses.replace(field_spec, **field_spec_replacers[field])
+                elif kind is not None and kind in field_spec_replacers:
+                    field_spec = dataclasses.replace(field_spec, **field_spec_replacers[kind])
+                elif kind is not None and self._data_set_key in field_spec_replacers:
+                    field_spec = dataclasses.replace(field_spec, **field_spec_replacers[self._data_set_key])
+            if field == DataIdDataset.data_id_field:
+                self._data_id_field_spec = field_spec
+                continue
+            if field_spec.tensor_dtype == str:
+                continue
             if not DataIdDataset._is_field_allowed(filter_when_not_in_loss_keys, loss_keys, field, kind=kind):
                 continue
-            self._field_specs[field] = init_data.field_specs[field]
+            self._field_specs[field] = field_spec
             self._value_shapes[field] = init_data.value_shapes[field]
+
         unique_id_to_multipart_id = init_data.unique_id_to_multipart_id if not ignore_multipart_ids else None
         self._response_data_kind = init_data.data_kinds
         self._response_data_has_word_ids = init_data.has_word_ids
@@ -312,6 +322,13 @@ class DataIdDataset(torch.utils.data.Dataset):
             raise KeyError('Invalid field: {}'.format(field))
         return field in self._response_data_kind
 
+    def is_just_in_time_field(self, field, allow_invalid_field=False):
+        if field not in self._field_specs:
+            if allow_invalid_field:
+                return False
+            raise KeyError('Invalid field: {}'.format(field))
+        return field in self._data_id_in_batch_keys
+
     def response_data_kind(self, field):
         if field not in self._field_specs:
             raise KeyError('Unknown field: {}'.format(field))
@@ -458,7 +475,7 @@ class DataIdDataset(torch.utils.data.Dataset):
                     index_valid = None
                     for index_sequence, data_id in enumerate(indices):
                         if data_id >= 0:
-                            if index_valid is not None:
+                            if index_valid is not None and indices[index_valid] != data_id:
                                 raise ValueError('Too many valid indices for a non-sequence field: {}'.format(
                                     response_data_key))
                             index_valid = index_sequence

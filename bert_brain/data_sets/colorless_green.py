@@ -114,11 +114,11 @@ class ColorlessGreenCorpus(CorpusBase):
     path: str = path_attribute_field('english_web_universal_dependencies_v_2_3_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'colorless'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier):
@@ -148,11 +148,11 @@ class LinzenAgreementCorpus(CorpusBase):
     path: str = path_attribute_field('linzen_agreement_path')
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'linzen_agree'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier):

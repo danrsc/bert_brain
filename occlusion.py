@@ -61,7 +61,6 @@ def _run_occlusion_for_variation(
 
     seed = set_random_seeds(settings.seed, index_run, n_gpu)
 
-    output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
     data_set_paths = list()
     for corpus in settings.corpora:
         data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
@@ -69,7 +68,6 @@ def _run_occlusion_for_variation(
             index_run,
             corpus,
             settings.preprocessors,
-            output_model_path,
             settings.get_split_function(corpus.corpus_key, index_run),
             settings.preprocess_fork_fn,
             False,
@@ -81,13 +79,15 @@ def _run_occlusion_for_variation(
         data_set_paths,
         settings.all_loss_tasks,
         data_id_in_batch_keys=settings.data_id_in_batch_keys,
-        filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
+        filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
+        field_spec_replacers=settings.field_spec_replacers)
 
     batch_iterator = TorchDataLoader(
         validation_data,
         sampler=SequentialSampler(validation_data),
         batch_size=settings.optimization_settings.predict_batch_size,
-        collate_fn=collate_fn)
+        collate_fn=collate_fn,
+        num_workers=1)
 
     _, _, _, loss_handlers = setup_prediction_heads_and_losses(settings, validation_data)
 

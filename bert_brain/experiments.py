@@ -724,8 +724,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 learning_rate=1e-5,
                 learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
                 train_batch_size=8,
-                predict_batch_size=8),
+                predict_batch_size=8,
+                num_loader_workers=1),
             loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
@@ -747,10 +750,8 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 metadata_example_group_by='fmri_runs',
                 train_on_all=True,
                 use_one_hot=False)]
-        for corpus in settings.corpora:
-            heads = make_standard_head_graph(
-                corpus, pooled_key='pooled_all_bottleneck', sequence_key='sequence_all_bottleneck')
-            settings.head_graph_parts.update(heads)
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
         return settings
@@ -811,23 +812,6 @@ def make_standard_head_graph(corpus, sequence_key=None, pooled_key=None):
         head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
             2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
             output_key_to_shape={response_key: 1})
-        return head
-    elif isinstance(corpus, (
-            corpus_types.CommitmentBank,
-            corpus_types.BooleanQuestions,
-            corpus_types.RecognizingTextualEntailment,
-            corpus_types.BigramShift,
-            corpus_types.CoordinationInversion,
-            corpus_types.ObjectNumber,
-            corpus_types.SemanticOddManOut,
-            corpus_types.SentenceLength,
-            corpus_types.SubjectNumber,
-            corpus_types.TopConstituents,
-            corpus_types.TreeDepth,
-            corpus_types.VerbTense,
-            corpus_types.WordContent)):
-        head['{}_linear'.format(response_key)] = KeyedLinear(
-            pooled_key, is_sequence=False, output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
         return head
     else:
         return head

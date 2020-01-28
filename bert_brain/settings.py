@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT
+from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT, Any
 
 import math
 import numpy as np
@@ -108,6 +108,8 @@ class OptimizationSettings:
     num_epochs_train_prediction_heads_only: int = 0
     # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
     num_final_epochs_train_prediction_heads_only: int = 0
+    # Passed as num_workers to torch.utils.DataLoader
+    num_loader_workers: int = 0
 
 
 @dataclass
@@ -237,6 +239,10 @@ class Settings:
     # of parameter-sharing between fields.
     head_graph_parts: MutableMapping[str, OrderedDictT[str, GraphPart]] = field(default_factory=dict)
 
+    # Default prediction heads will use these locations in the graph as the source
+    default_sequence_source: Union[str, Tuple[str, ...]] = ('bert', 'sequence')
+    default_pooled_source: Union[str, Tuple[str, ...]] = ('bert', 'pooled')
+
     # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into a
     # batch directly; This allows the system to save significant resources by not padding a tensor for a full
     # sequence of entries when the number of real entries in the tensor is sparse. Mostly, this is for fMRI where
@@ -245,11 +251,18 @@ class Settings:
     # must also handle modification of the (field, data_ids) so that the alignment between the model predictions and
     # the target is correctly maintained. The system will then go fetch the data corresponding to data_ids
     # and put them into the batch just before the losses are computed.
-    data_id_in_batch_keys: Sequence[str] = (ResponseKind.ns_froi, ResponseKind.hp_fmri)
+    data_id_in_batch_keys: Optional[Sequence[str]] = (ResponseKind.ns_froi, ResponseKind.hp_fmri)
 
     # Sequence of [response_key or kind]. Data corresponding to fields specified here will not be put into the dataset
     # unless those fields are in the loss
     filter_when_not_in_loss_keys: Optional[Sequence[str]] = None
+
+    # Optional mapping from a [response_key, kind, or corpus_key] to a dictionary which is called as:
+    #   replacers = field_spec_replacers[response_key]
+    #   field_spec = dataclasses.replace(field_spec, **replacers)
+    # to override specific attributes of a FieldSpec. For example, this can be used to modify the tensor type
+    # or to treat a sequence as a non-sequence (when only when data_id is valid)
+    field_spec_replacers: Optional[Mapping[str, Mapping[str, Any]]] = None
 
     # one of:
     # mixed_task_random: Batches contain multiple tasks, all items are visited in an epoch in random order

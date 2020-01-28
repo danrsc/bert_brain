@@ -246,7 +246,7 @@ def bert_tokenize_with_spacy_meta(
         multipart_id: Optional[int] = None,
         span_ids: Optional[Sequence[int]] = None,
         is_apply_data_offset_entire_group: bool = False,
-        max_sequence_length: Optional[int] = None) -> Tuple[InputFeatures, np.array]:
+        max_sequence_length: Optional[int] = None) -> Tuple[InputFeatures, np.array, int]:
     """
     Uses spacy to get information such as part of speech, probability of word, etc. and aligns the tokenization from
     spacy with the bert tokenization.
@@ -392,6 +392,8 @@ def bert_tokenize_with_spacy_meta(
 
     idx_sequence = 0
     current_sequence_length = 0
+    true_sequence_length = 0
+    max_true_sequence_length = 0
     for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
         if last_sentence_id is None or sentence_ids[idx_group] != last_sentence_id:
             index_token_in_sentence = -1
@@ -400,6 +402,8 @@ def bert_tokenize_with_spacy_meta(
             if idx_sequence + 1 < len(sequences):
                 idx_sequence += 1
                 current_sequence_length = 0
+                max_true_sequence_length = max(true_sequence_length, max_true_sequence_length)
+                true_sequence_length = 0
             else:
                 break
         if idx_group < sequences[idx_sequence][0]:
@@ -408,6 +412,7 @@ def bert_tokenize_with_spacy_meta(
         included_indices.append(idx_group)
         index_word_in_example += 1
         idx_data = get_data_token_index(bert_tokens_with_spacy)
+        true_sequence_length += len(bert_token_groups_with_spacy)
         if max_sequence_length is None or len(bert_tokens_with_spacy) + current_sequence_length < max_sequence_length:
             for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
                 index_token_in_sentence += 1
@@ -453,6 +458,7 @@ def bert_tokenize_with_spacy_meta(
         return arr
 
     example_data_ids = _readonly(np.array(example_data_ids))
+    max_true_sequence_length = max(max_true_sequence_length, true_sequence_length)
 
     input_features = InputFeatures(
         unique_id=unique_id,
@@ -473,4 +479,4 @@ def bert_tokenize_with_spacy_meta(
         span_ids=_readonly(np.array(example_span_ids)) if example_span_ids is not None else None,
         data_ids=dict((k, example_data_ids) for k in data_key))
 
-    return input_features, np.array(included_indices)
+    return input_features, np.array(included_indices), max_true_sequence_length

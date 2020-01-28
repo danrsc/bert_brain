@@ -115,7 +115,8 @@ def run_variation(
                 data_set_paths,
                 settings.all_loss_tasks,
                 data_id_in_batch_keys=settings.data_id_in_batch_keys,
-                filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys)
+                filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
+                field_spec_replacers=settings.field_spec_replacers)
             for which in ('train', 'validation', 'test'))
 
         load_from_path = None

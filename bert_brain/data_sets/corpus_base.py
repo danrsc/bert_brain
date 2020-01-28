@@ -29,6 +29,11 @@ class CorpusExampleUnifier:
         self._examples = OrderedDict()
         self._seen_data_keys = OrderedDict()
         self.max_sequence_length = max_sequence_length
+        self._true_max_sequence_length = 0
+
+    @property
+    def true_max_sequence_length(self):
+        return self._true_max_sequence_length
 
     def add_example(
             self,
@@ -102,7 +107,7 @@ class CorpusExampleUnifier:
         Returns:
             The InputFeatures instance associated with the example
         """
-        input_features, included_indices = bert_tokenize_with_spacy_meta(
+        input_features, included_indices, true_sequence_length = bert_tokenize_with_spacy_meta(
             self.spacy_tokenize_model, self.bert_tokenizer,
             len(self._examples), words, sentence_ids, data_key, data_ids,
             start, stop,
@@ -119,6 +124,7 @@ class CorpusExampleUnifier:
         if example_key not in self._examples:
             if allow_new_examples:
                 self._examples[example_key] = input_features
+                self._true_max_sequence_length = max(self._true_max_sequence_length, true_sequence_length)
             else:
                 return None
         else:
@@ -261,11 +267,11 @@ class CorpusBase:
             self,
             spacy_tokenizer_model: SpacyLanguage,
             bert_tokenizer: BertTokenizer,
-            max_sequence_length: Optional[int] = None):
+            max_sequence_length: Optional[int] = None) -> Tuple[RawData, int]:
         example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer, max_sequence_length)
         result = self._load(example_manager)
         CorpusBase._populate_default_field_specs(result)
-        return result
+        return result, example_manager.true_max_sequence_length
 
     def _run_info(self, index_run):
         return -1

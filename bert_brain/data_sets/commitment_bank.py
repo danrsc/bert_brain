@@ -50,11 +50,11 @@ class CommitmentBank(CorpusBase):
         return examples
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'cb'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 4
 
     def _load(self, example_manager: CorpusExampleUnifier):

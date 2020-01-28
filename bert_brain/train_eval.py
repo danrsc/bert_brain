@@ -50,7 +50,8 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
             if test_nan and torch.isnan(param_model.grad).sum() > 0:
                 is_nan = True
             if param_opti.grad is None:
-                param_opti.grad = torch.nn.Parameter(param_opti.data.new().resize_(*param_opti.data.size()))
+                param_opti.grad = torch.nn.Parameter(
+                    param_opti.data.new().resize_(*param_opti.data.size()), requires_grad=True)
             # noinspection PyUnresolvedReferences
             param_opti.grad.data.copy_(param_model.grad.data)
         else:
@@ -67,7 +68,7 @@ def restore_model_parameters_and_set_meta_gradient(
             raise ValueError('Inconsistent state dictionaries')
         if p.requires_grad:
             if p.grad is None:
-                p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()))
+                p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()), requires_grad=True)
             # noinspection PyUnresolvedReferences
             p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps)
 
@@ -98,9 +99,14 @@ def evaluate(
     if batch_sampler is None:
         eval_data_loader = TorchDataLoader(
             eval_data_set,
-            sampler=eval_sampler, batch_size=settings.optimization_settings.predict_batch_size, collate_fn=collate_fn)
+            sampler=eval_sampler,
+            batch_size=settings.optimization_settings.predict_batch_size,
+            collate_fn=collate_fn,
+            num_workers=settings.optimization_settings.num_loader_workers)
     else:
-        eval_data_loader = TorchDataLoader(eval_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
+        eval_data_loader = TorchDataLoader(
+            eval_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn,
+            num_workers=settings.optimization_settings.num_loader_workers)
 
     model.eval()
     all_results = OrderedDict()
@@ -273,17 +279,21 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
         if prediction_head_parts is None:
             if data_set.is_sequence(k):
                 if default_sequence_head is None:
-                    default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(('bert', 'sequence'), True))
+                    default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(
+                        settings.default_sequence_source, True))
                 prediction_head_parts = default_sequence_head
-                # noinspection PyUnresolvedReferences
                 prediction_head_parts['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
+                prediction_head_parts['default_sequence_linear'].apply_at_most_one_data_id[k] = \
+                    'if_no_target' if data_set.is_just_in_time_field(k) else False
             else:
                 if default_pooled_head is None:
                     default_pooled_head = OrderedDict(
-                        default_pooled_linear=KeyedLinear(('bert', 'pooled'), False))
+                        default_pooled_linear=KeyedLinear(
+                            settings.default_pooled_source, False, apply_at_most_one_data_id=dict()))
                 prediction_head_parts = default_pooled_head
-                # noinspection PyUnresolvedReferences
                 prediction_head_parts['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
+                prediction_head_parts['default_pooled_linear'].apply_at_most_one_data_id[k] = \
+                    'if_no_target' if data_set.is_just_in_time_field(k) else False
 
         for key in prediction_head_parts:
             if key not in graph_parts:
@@ -492,9 +502,11 @@ def train(
 
     if is_meta_learn_active:
         no_gradient_meta_learn_loader = None if no_gradient_meta_learn_sampler is None else TorchDataLoader(
-            train_data_set, batch_sampler=no_gradient_meta_learn_sampler, collate_fn=collate_fn)
+            train_data_set, batch_sampler=no_gradient_meta_learn_sampler, collate_fn=collate_fn,
+            num_workers=settings.optimization_settings.num_loader_workers)
         gradient_meta_learn_loader = TorchDataLoader(
-            train_data_set, batch_sampler=gradient_meta_learn_sampler, collate_fn=collate_fn)
+            train_data_set, batch_sampler=gradient_meta_learn_sampler, collate_fn=collate_fn,
+            num_workers=settings.optimization_settings.num_loader_workers)
         len_train = int(np.round(gradient_meta_learn_sampler.true_div_len() * gradient_meta_learn_sampler.batch_size))
         train_data_loader = None
     else:
@@ -505,9 +517,12 @@ def train(
                 train_data_set,
                 sampler=train_sampler,
                 batch_size=settings.optimization_settings.train_batch_size,
-                collate_fn=collate_fn)
+                collate_fn=collate_fn,
+                num_workers=settings.optimization_settings.num_loader_workers)
         else:
-            train_data_loader = TorchDataLoader(train_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn)
+            train_data_loader = TorchDataLoader(
+                train_data_set, batch_sampler=batch_sampler, collate_fn=collate_fn,
+                num_workers=settings.optimization_settings.num_loader_workers)
         len_train = train_data_set.length(task_filter=settings.meta_learn_gradient_loss_tasks) \
             if is_meta_learn_active else len(train_data_set)
 

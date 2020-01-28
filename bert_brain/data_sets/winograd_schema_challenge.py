@@ -102,11 +102,11 @@ class WinogradSchemaChallenge(CorpusBase):
         return examples
 
     @classmethod
-    def response_key(cls):
+    def response_key(cls) -> str:
         return 'wsc'
 
     @classmethod
-    def num_classes(cls):
+    def num_classes(cls) -> int:
         return 2
 
     def _load(self, example_manager: CorpusExampleUnifier):
