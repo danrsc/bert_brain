@@ -1,9 +1,14 @@
 from dataclasses import dataclass, field
-from typing import Sequence, Callable, MutableMapping, Mapping, Optional, Union, Tuple, OrderedDict as OrderedDictT, Any
+from typing import Iterable, Sequence, Callable, MutableMapping, Mapping, \
+    Optional, Union, Tuple, OrderedDict as OrderedDictT, Any
+from inspect import signature
 
 import math
 import numpy as np
 from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.optimizer import Optimizer
+
+from transformers import AdamW
 
 from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, \
@@ -13,7 +18,8 @@ from .common import SwitchRemember
 from .modeling import CriticKeys, GraphPart
 
 
-__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'CriticSettings', 'Settings']
+__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'CriticSettings', 'Settings',
+           'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory']
 
 
 @dataclass
@@ -83,10 +89,54 @@ class LearningRateSchedule:
         return LambdaLR(optimizer, functions, last_epoch)
 
 
+def make_optimizer_factory(optimizer_type: type, **kwargs) -> Callable[[Iterable[Mapping[str, Any]], float], Optimizer]:
+    def make_optimizer(params, lr):
+        return optimizer_type(params=params, lr=lr, **kwargs)
+
+    return make_optimizer
+
+
+def make_inner_meta_learn_optimizer_factory(
+        optimizer_type: type,
+        use_outer_optimizer_as_defaults: bool = True,
+        partial_sequence_overrides: Optional[Union[Iterable[str], str]] = 'betas',
+        **kwargs) -> Callable[[Optimizer, Iterable[Mapping[str, Any]], float], Optimizer]:
+    def make_optimizer(outer_optimizer: Optimizer, params, lr):
+        kwargs_ = kwargs
+        if use_outer_optimizer_as_defaults:
+            partial_sequence_overrides_ = partial_sequence_overrides \
+                if np.ndim(partial_sequence_overrides) > 0 else (partial_sequence_overrides,)
+            # noinspection PyUnresolvedReferences
+            outer_kwargs = dict(
+                (k, outer_optimizer.defaults[k])
+                for k in signature(optimizer_type.__init__) if k in outer_optimizer.defaults)
+            for key in partial_sequence_overrides_:
+                if key in outer_kwargs and key in kwargs_:
+                    if np.ndim(outer_kwargs[key]) != np.ndim(kwargs_[key]):
+                        raise ValueError('Incompatible partial sequence overrides: {}'.format(key))
+                    if np.ndim(outer_kwargs[key]) == 0:
+                        # scalar, just do normal override
+                        continue
+                    if len(outer_kwargs[key]) != len(kwargs_[key]):
+                        raise ValueError('Incompatible partial sequence overrides: {}'.format(key))
+                    kwargs_[key] = type(outer_kwargs[key])(
+                        outer if inner is None else inner for outer, inner in zip(
+                            outer_kwargs[key], kwargs_[key]))
+            outer_kwargs.update(kwargs_)
+            kwargs_ = outer_kwargs
+        return optimizer_type(params=params, lr=lr, **kwargs_)
+
+    return make_optimizer
+
+
 @dataclass
 class OptimizationSettings:
     # Total number of training epochs to perform.
     num_train_epochs: int = 3
+    make_optimizer: Callable[[Iterable[Mapping[str, Any]], float], Optimizer] = make_optimizer_factory(
+        AdamW, correct_bias=False)
+    make_inner_meta_learn_optimizer: Callable[[Optimizer, Iterable[Mapping[str, Any]], float], Optimizer] = \
+        make_inner_meta_learn_optimizer_factory(AdamW, betas=(0, None))
     # initial learning rate for Adam
     learning_rate: float = 5e-5
     learning_rate_schedule: LearningRateSchedule = LearningRateSchedule()

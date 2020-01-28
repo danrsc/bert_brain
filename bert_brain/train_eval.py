@@ -8,7 +8,6 @@ import logging
 import numpy as np
 import torch
 import torch.nn
-from transformers import AdamW
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader, RandomSampler
 from tqdm import tqdm, trange
 
@@ -586,19 +585,19 @@ def train(
     optimizer_grouped_parameters = [
         # weight decay, prediction head
         {'params': [p for n, p in param_optimizer if n not in no_decay and n.startswith('prediction_head.')],
-         'weight_decay_rate': 0.01,
+         'weight_decay': 0.01,
          't_total': num_train_steps_prediction_heads},
         # no weight decay, prediction head
         {'params': [p for n, p in param_optimizer if n in no_decay and n.statswith('prediction_head.')],
-         'weight_decay_rate': 0.0,
+         'weight_decay': 0.0,
          't_total': num_train_steps_prediction_heads},
         # weight decay, non-prediction head
         {'params': [p for n, p in param_optimizer if n not in no_decay and not n.startswith('prediction_head.')],
-         'weight_decay_rate': 0.01,
+         'weight_decay': 0.01,
          't_total': num_train_steps_other},
         # no weight decay, prediction head
         {'params': [p for n, p in param_optimizer if n in no_decay and not n.statswith('prediction_head.')],
-         'weight_decay_rate': 0.0,
+         'weight_decay': 0.0,
          't_total': num_train_steps_other}]
     inner_optimizer_grouped_parameters = None
     if is_meta_learn_active:
@@ -606,21 +605,19 @@ def train(
         for g in inner_optimizer_grouped_parameters:
             g['t_total'] *= settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples
 
-    optimizer = AdamW(
+    optimizer = settings.optimization_settings.make_optimizer(
         optimizer_grouped_parameters,
-        lr=settings.optimization_settings.learning_rate,
-        correct_bias=False)
+        lr=settings.optimization_settings.learning_rate)
     scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
         optimizer, optimizer_grouped_parameters)
 
     inner_meta_learn_optimizer = None
     inner_meta_learn_scheduler = None
     if is_meta_learn_active:
-        inner_meta_learn_optimizer = AdamW(
+        inner_meta_learn_optimizer = settings.optimization_settings.make_inner_meta_learn_optimizer(
+            optimizer,
             inner_optimizer_grouped_parameters,
-            lr=settings.optimization_settings.learning_rate,
-            betas=(0, optimizer.defaults['betas'][1]),
-            correct_bias=False)
+            lr=settings.optimization_settings.learning_rate)
         inner_meta_learn_scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
             inner_meta_learn_optimizer, inner_optimizer_grouped_parameters)
 

@@ -8,6 +8,7 @@ from typing import Union, Iterable, Mapping, Tuple
 import numpy as np
 import torch
 import torch.cuda
+from torch.optim import SGD
 
 from .common import SwitchRemember
 from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
@@ -15,7 +16,8 @@ from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessQuantileDigitize, corpus_types
 from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration, PooledFromSequence, \
     MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention
-from .settings import Settings, OptimizationSettings, CriticSettings, LearningRateSchedule
+from .settings import Settings, OptimizationSettings, CriticSettings, LearningRateSchedule, make_optimizer_factory, \
+    make_inner_meta_learn_optimizer_factory
 
 
 __all__ = [
@@ -721,6 +723,70 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                train_batch_size=8,
+                predict_batch_size=8,
+                num_loader_workers=1),
+            loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
+            weight_losses_by_inverse_example_counts=False,
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            batch_kind=('single_task_uniform', 500),
+            num_runs=1)
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 3,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'), is_sequence=True,
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                        should_norm=True))),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode=None,
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
+        return settings
+    elif name == 'fmri_cram_cpg_sgd':
+        settings = Settings(
+            corpora=(
+                corpus_types.HarryPotterCorpus(
+                    fmri_subjects=None,  # None means all
+                    fmri_sentence_mode='ignore',
+                    fmri_window_duration=10.1,
+                    fmri_minimum_duration_required=9.6,
+                    fmri_kind='rank_clustered',
+                    fmri_smooth_factor=None,
+                    separate_fmri_components=True,
+                    group_meg_sentences_like_fmri=True,
+                    meg_subjects=[]),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.WordContent()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=3,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0,
+                make_optimizer=make_optimizer_factory(SGD),
+                make_inner_meta_learn_optimizer=make_inner_meta_learn_optimizer_factory(
+                    SGD, use_outer_optimizer_as_defaults=False),
                 learning_rate=1e-5,
                 learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
                 train_batch_size=8,
