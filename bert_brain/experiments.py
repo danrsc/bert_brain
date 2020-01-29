@@ -13,7 +13,8 @@ from torch.optim import SGD
 from .common import SwitchRemember
 from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, PreprocessForkNoClusterToDisk, \
-    PreprocessQuantileDigitize, corpus_types
+    PreprocessQuantileDigitize, corpus_types, BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, \
+    BatchOneTaskProportionalSamplerFactory
 from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration, PooledFromSequence, \
     MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention
 from .settings import Settings, OptimizationSettings, CriticSettings, LearningRateSchedule, make_optimizer_factory, \
@@ -76,6 +77,64 @@ def iterate_powerset(items):
     for sub_set in itertools.chain.from_iterable(
             itertools.combinations(items, num) for num in range(1, len(items) + 1)):
         yield sub_set
+
+
+def make_standard_head_graph(corpus, sequence_key=None, pooled_key=None):
+
+    if pooled_key is None:
+        pooled_key = ('bert', 'pooled')
+    if sequence_key is None:
+        sequence_key = ('bert', 'sequence')
+
+    response_key = type(corpus).response_key() if hasattr(type(corpus), 'response_key') else None
+
+    head = OrderedDict()
+
+    if isinstance(corpus, corpus_types.NaturalStoriesCorpus):
+        head[ResponseKind.ns_froi] = OrderedDict(
+            froi_linear=KeyedLinear(
+                pooled_key, is_sequence=False, apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.ns_froi))
+        return head
+    elif isinstance(corpus, corpus_types.HarryPotterCorpus):
+        if corpus.meg_subjects is None or len(corpus.meg_subjects) > 0:
+            head[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+                sequence_key, is_sequence=True, targets=ResponseKind.hp_meg))
+        if corpus.fmri_subjects is None or len(corpus.fmri_subjects) > 0:
+            head[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinear(
+                pooled_key,
+                is_sequence=False,
+                apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
+        return head
+    elif isinstance(corpus, corpus_types.WordInContext):
+        head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokens(
+            2,
+            response_key, 'data_ids',
+            '{}_concat'.format(response_key),
+            sequence_key)
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            '{}_concat'.format(response_key), is_sequence=False,
+            output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
+        return head
+    elif isinstance(
+            corpus,
+            (corpus_types.ChoiceOfPlausibleAlternatives,
+             corpus_types.ReadingComprehensionWithCommonSenseReasoning,
+             corpus_types.MultiSentenceReadingComprehension)):
+        head['{}_linear'.format(response_key)] = KeyedLinear(
+            pooled_key, is_sequence=False, output_key_to_shape={
+                '{}_choice'.format(response_key): 1}, apply_at_most_one_data_id=True)
+        head['{}_mc'.format(response_key)] = GroupMultipart(
+            None, 'multipart_id', response_key, '{}_choice'.format(response_key))
+        return head
+    elif isinstance(corpus, corpus_types.WinogradSchemaChallenge):
+        head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
+            2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
+            output_key_to_shape={response_key: 1})
+        return head
+    else:
+        return head
 
 
 def singleton_variation(name: Union[str, Tuple[str, int]]) -> Tuple[Tuple[str, str], Settings]:
@@ -167,7 +226,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return [
             Settings(
                 corpora=(
-                    corpus_types.ColorlessGreenCorpus(), corpus_types.LinzenAgreementCorpus(), corpus_types.UclCorpus()),
+                    corpus_types.ColorlessGreenCorpus(),
+                    corpus_types.LinzenAgreementCorpus(),
+                    corpus_types.UclCorpus()),
                 optimization_settings=OptimizationSettings(num_train_epochs=50),
                 num_runs=10,
                 loss_tasks=set(t))
@@ -211,7 +272,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             meta_learn_gradient_loss_tasks={'hp_fmri_I'},
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind='single_task_random',
+            sampler_factory=BatchOneTaskRandomSamplerFactory(),
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -391,7 +452,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=50,
                 num_final_epochs_train_prediction_heads_only=0),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
-            batch_kind=('single_task_uniform', 100),
+            sampler_factory=BatchOneTaskSamplerFactory(100),
             weight_losses_by_inverse_example_counts=False,
             num_runs=4,
             loss_tasks=set('hp_meg_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_meg_subjects))
@@ -455,7 +516,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
-            batch_kind=('single_task_uniform', 100),
+            sampler_factory=BatchOneTaskSamplerFactory(100),
             weight_losses_by_inverse_example_counts=False,
             loss_tasks=set('hp_meg_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_meg_subjects),
             num_runs=4)
@@ -502,7 +563,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             weight_losses_by_inverse_example_counts=False,
-            batch_kind=('single_task_uniform', 100),
+            sampler_factory=BatchOneTaskSamplerFactory(100),
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
@@ -541,7 +602,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             weight_losses_by_inverse_example_counts=False,
-            batch_kind=('single_task_uniform', 100),
+            sampler_factory=BatchOneTaskSamplerFactory(100),
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
@@ -605,7 +666,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 predict_batch_size=8),
             loss_tasks=set(),
             weight_losses_by_inverse_example_counts=False,
-            batch_kind=('single_task_uniform', 5000),
+            sampler_factory=BatchOneTaskSamplerFactory(5000),
             num_runs=1)
         for corpus in settings.corpora:
             heads = make_standard_head_graph(
@@ -637,7 +698,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind=('single_task_uniform', 500),
+            sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -679,7 +740,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind=('single_task_uniform', 500),
+            sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -734,7 +795,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind=('single_task_uniform', 500),
+            sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -798,7 +859,72 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
-            batch_kind=('single_task_uniform', 500),
+            sampler_factory=BatchOneTaskSamplerFactory(500),
+            num_runs=1)
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 3,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'), is_sequence=True,
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
+                        should_norm=True))),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode=None,
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
+        return settings
+    elif name == 'fmri_cram_cpg_sgd_prop':
+        settings = Settings(
+            corpora=(
+                corpus_types.HarryPotterCorpus(
+                    fmri_subjects=None,  # None means all
+                    fmri_sentence_mode='ignore',
+                    fmri_window_duration=10.1,
+                    fmri_minimum_duration_required=9.6,
+                    fmri_kind='rank_clustered',
+                    fmri_smooth_factor=None,
+                    separate_fmri_components=True,
+                    group_meg_sentences_like_fmri=True,
+                    meg_subjects=[]),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.WordContent()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=3,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0,
+                make_optimizer=make_optimizer_factory(SGD),
+                make_inner_meta_learn_optimizer=make_inner_meta_learn_optimizer_factory(
+                    SGD, use_outer_optimizer_as_defaults=False),
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                train_batch_size=8,
+                predict_batch_size=8,
+                num_loader_workers=1),
+            loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
+            weight_losses_by_inverse_example_counts=False,
+            num_meta_learn_gradient_samples=10,
+            num_meta_learn_no_gradient_samples=0,
+            sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
+            use_sequential_sampling_on_evaluate=False,
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -823,61 +949,3 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         return settings
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))
-
-
-def make_standard_head_graph(corpus, sequence_key=None, pooled_key=None):
-
-    if pooled_key is None:
-        pooled_key = ('bert', 'pooled')
-    if sequence_key is None:
-        sequence_key = ('bert', 'sequence')
-
-    response_key = type(corpus).response_key() if hasattr(type(corpus), 'response_key') else None
-
-    head = OrderedDict()
-
-    if isinstance(corpus, corpus_types.NaturalStoriesCorpus):
-        head[ResponseKind.ns_froi] = OrderedDict(
-            froi_linear=KeyedLinear(
-                pooled_key, is_sequence=False, apply_at_most_one_data_id='if_no_target',
-                targets=ResponseKind.ns_froi))
-        return head
-    elif isinstance(corpus, corpus_types.HarryPotterCorpus):
-        if corpus.meg_subjects is None or len(corpus.meg_subjects) > 0:
-            head[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
-                sequence_key, is_sequence=True, targets=ResponseKind.hp_meg))
-        if corpus.fmri_subjects is None or len(corpus.fmri_subjects) > 0:
-            head[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinear(
-                pooled_key,
-                is_sequence=False,
-                apply_at_most_one_data_id='if_no_target',
-                targets=ResponseKind.hp_fmri))
-        return head
-    elif isinstance(corpus, corpus_types.WordInContext):
-        head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokens(
-            2,
-            response_key, 'data_ids',
-            '{}_concat'.format(response_key),
-            sequence_key)
-        head['{}_linear'.format(response_key)] = KeyedLinear(
-            '{}_concat'.format(response_key), is_sequence=False,
-            output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
-        return head
-    elif isinstance(
-            corpus,
-            (corpus_types.ChoiceOfPlausibleAlternatives,
-             corpus_types.ReadingComprehensionWithCommonSenseReasoning,
-             corpus_types.MultiSentenceReadingComprehension)):
-        head['{}_linear'.format(response_key)] = KeyedLinear(
-            pooled_key, is_sequence=False, output_key_to_shape={
-                '{}_choice'.format(response_key): 1}, apply_at_most_one_data_id=True)
-        head['{}_mc'.format(response_key)] = GroupMultipart(
-            None, 'multipart_id', response_key, '{}_choice'.format(response_key))
-        return head
-    elif isinstance(corpus, corpus_types.WinogradSchemaChallenge):
-        head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
-            2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
-            output_key_to_shape={response_key: 1})
-        return head
-    else:
-        return head

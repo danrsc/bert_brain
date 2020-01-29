@@ -8,11 +8,10 @@ import logging
 import numpy as np
 import torch
 import torch.nn
-from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader, RandomSampler
+from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 from tqdm import tqdm, trange
 
-from .data_sets import collate_fn, DataIdMultiDataset, \
-    BatchOneTaskRandomSampler, BatchOneTaskUniformTaskSampler, BatchOneTaskSequentialSampler
+from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskSequentialSampler
 from .modeling import make_loss_handler, KeyedLinear
 from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
 from .settings import Settings
@@ -81,17 +80,24 @@ def evaluate(
         global_step,
         eval_results,
         eval_data_set,
-        is_one_task_at_a_time,
         return_detailed=False):
 
     eval_sampler = None
     batch_sampler = None
     if settings.optimization_settings.local_rank == -1:
-        if is_one_task_at_a_time:
-            batch_sampler = BatchOneTaskSequentialSampler(
-                eval_data_set, settings.optimization_settings.predict_batch_size)
+        if settings.use_sequential_sampling_on_evaluate:
+            if settings.sampler_factory.is_one_task_at_a_time_sampler():
+                batch_sampler = BatchOneTaskSequentialSampler(
+                    eval_data_set, settings.optimization_settings.predict_batch_size)
+            else:
+                eval_sampler = SequentialSampler(eval_data_set)
         else:
-            eval_sampler = SequentialSampler(eval_data_set)
+            sampler_ = settings.sampler_factory.make_sampler(
+                eval_data_set, settings.optimization_settings.predict_batch_size)
+            if settings.sampler_factory.is_batch_sampler():
+                batch_sampler = sampler_
+            else:
+                eval_sampler = sampler_
     else:
         raise ValueError('Not supported')
 
@@ -453,49 +459,37 @@ def train(
             raise ValueError('settings.num_meta_learn_gradient_samples must be >= 1 when meta learning is active')
         if settings.num_meta_learn_no_gradient_samples < 0:
             raise ValueError('settings.num_meta_learn_no_gradient_samples must be >= 0 when meta learning is active')
-        if not settings.is_one_task_at_a_time:
-            raise ValueError('settings.batch_kind must be a single_task_* variety for meta learning')
+        if not settings.sampler_factory.is_one_task_at_a_time_sampler():
+            raise ValueError('settings.sampler_factory must be a one-task-at-a-time variety for meta learning. '
+                             'Current factory: {}'.format(settings.sampler_factory))
 
     train_sampler = None
     batch_sampler = None
     no_gradient_meta_learn_sampler = None
     gradient_meta_learn_sampler = None
-    is_one_task_at_a_time = True
     if settings.optimization_settings.local_rank == -1:
-        if isinstance(settings.batch_kind, (tuple, list)):
-            if settings.batch_kind[0] != 'single_task_uniform':
-                raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
-            if is_meta_learn_active:
-                if (settings.meta_learn_no_gradient_loss_tasks is not None
-                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
-                    no_gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
-                        train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
-                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
-                gradient_meta_learn_sampler = BatchOneTaskUniformTaskSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1],
-                    task_filter=settings.meta_learn_gradient_loss_tasks)
-            else:
-                batch_sampler = BatchOneTaskUniformTaskSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size, settings.batch_kind[1])
-        elif settings.batch_kind == 'single_task_random':
-            if is_meta_learn_active:
-                if (settings.meta_learn_no_gradient_loss_tasks is not None
-                        and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
-                    no_gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
-                        train_data_set, settings.optimization_settings.train_batch_size,
-                        task_filter=settings.meta_learn_no_gradient_loss_tasks)
-                gradient_meta_learn_sampler = BatchOneTaskRandomSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size,
-                    task_filter=settings.meta_learn_gradient_loss_tasks)
-            else:
-                batch_sampler = BatchOneTaskRandomSampler(
-                    train_data_set, settings.optimization_settings.train_batch_size)
-        elif settings.batch_kind == 'mixed_task_random':
-            assert (not is_meta_learn_active)
-            is_one_task_at_a_time = False
-            train_sampler = RandomSampler(train_data_set)
+        if is_meta_learn_active:
+            if not settings.sampler_factory.is_batch_sampler() \
+                    or not settings.sampler_factory.is_one_task_at_a_time_sampler():
+                raise ValueError('Unsupported sampler_factory for meta learning: {}'.format(
+                    type(settings.sampler_factory)))
+            gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
+                train_data_set,
+                settings.optimization_settings.train_batch_size,
+                settings.meta_learn_gradient_loss_tasks)
+            if (settings.meta_learn_no_gradient_loss_tasks is not None
+                    and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
+                no_gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
+                    train_data_set,
+                    settings.optimization_settings.train_batch_size,
+                    settings.meta_learn_no_gradient_loss_tasks)
         else:
-            raise ValueError('Unknown batch_kind: {}'.format(settings.batch_kind))
+            sampler_ = settings.sampler_factory.make_sampler(
+                train_data_set, settings.optimization_settings.train_batch_size)
+            if settings.sampler_factory.is_batch_sampler():
+                batch_sampler = sampler_
+            else:
+                train_sampler = sampler_
     else:
         raise ValueError('Not supported')
 
@@ -722,8 +716,8 @@ def train(
 
         write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
-            evaluate(settings, model, loss_handlers, device, index_epoch, global_step,
-                     validation_results, validation_data_set, is_one_task_at_a_time)
+            evaluate(settings, model, loss_handlers, device, index_epoch,
+                     global_step, validation_results, validation_data_set)
             write_loss_curve(output_validation_curve_path, validation_results)
 
     logger.info("***** Running predictions *****")
@@ -734,15 +728,14 @@ def train(
     if len(validation_data_set) > 0:
         all_validation = evaluate(
             settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
-            global_step, TaskResults(), validation_data_set, is_one_task_at_a_time,
-            return_detailed=True)
+            global_step, TaskResults(), validation_data_set, return_detailed=True)
     else:
         all_validation = {}
 
     if test_data_set is not None and len(test_data_set) > 0:
         all_test = evaluate(
             settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
-            global_step, TaskResults(), test_data_set, is_one_task_at_a_time, return_detailed=True)
+            global_step, TaskResults(), test_data_set, return_detailed=True)
     else:
         all_test = {}
 

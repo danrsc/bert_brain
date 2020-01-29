@@ -13,7 +13,7 @@ from transformers import AdamW
 from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, \
     ResponseKind, NaturalStoriesMakeLeaveStoriesOut, corpus_types, CorpusBase, \
-    UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT
+    UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT, SamplerFactory, RandomSamplerFactory
 from .common import SwitchRemember
 from .modeling import CriticKeys, GraphPart
 
@@ -314,13 +314,12 @@ class Settings:
     # or to treat a sequence as a non-sequence (when only when data_id is valid)
     field_spec_replacers: Optional[Mapping[str, Mapping[str, Any]]] = None
 
-    # one of:
-    # mixed_task_random: Batches contain multiple tasks, all items are visited in an epoch in random order
-    # single_task_random: Batches contain a single task, all items are visited in an epoch in random order
-    # (single_task_uniform, num_batches_per_epoch):
-    #   Batches contain a single task, tasks are uniformly sampled, then items are sampled within
-    #   a task to create a batch. num_batches_per_epoch controls epoch length, items may not all be visited in an epoch
-    batch_kind: [Union[str, Tuple[str, int]]] = 'mixed_task_random'
+    # An instances of a SamplerFactory which will be used to create the training sampler.
+    # If use_sequential_sampling_on_evaluate is False, then sampler_factory is also used to create the evaluation
+    # sampler
+    sampler_factory: SamplerFactory = RandomSamplerFactory()
+
+    use_sequential_sampling_on_evaluate: bool = True
 
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
     critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)
@@ -412,10 +411,3 @@ class Settings:
         if isinstance(critic, str):
             return CriticSettings(critic)
         return critic
-
-    @property
-    def is_one_task_at_a_time(self):
-        if isinstance(self.batch_kind, (tuple, list)):
-            return self.batch_kind[0].startswith('single_task_')
-        else:
-            return self.batch_kind.startswith('single_task_')
