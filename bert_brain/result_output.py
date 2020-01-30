@@ -54,7 +54,13 @@ def write_predictions(output_dir, all_results, data_set, settings):
         if len(all_results[key]) == 0:
             continue
 
-        critic_settings = settings.get_critic(key, data_set)
+        critic = settings.get_critic(key, data_set)
+        critic_kwargs = dict()
+        for field in dataclasses.fields(type(critic)):
+            if field.init:
+                critic_kwargs[field.name] = getattr(critic, field.name)
+        if len(critic_kwargs) == 0:
+            critic_kwargs = None
 
         predictions = list()
         targets = list()
@@ -116,12 +122,12 @@ def write_predictions(output_dir, all_results, data_set, settings):
         output_dict['data_keys'] = np.array(data_keys)
         output_dict['unique_ids'] = np.array(unique_ids)
         output_dict['tokens'] = np.array(tokens)
-        output_dict['critic'] = critic_settings.critic_type
+        output_dict['critic'] = type(critic).__name__
         output_dict['sequence_type'] = sequence_type
         output_dict['word_ids'] = np.concatenate(word_ids) if word_ids[0] is not None else None
-        if critic_settings.critic_kwargs is not None:
-            for critic_key in critic_settings.critic_kwargs:
-                output_dict['critic_kwarg_{}'.format(critic_key)] = critic_settings.critic_kwargs[critic_key]
+        if critic_kwargs is not None:
+            for critic_key in critic_kwargs:
+                output_dict['critic_kwarg_{}'.format(critic_key)] = critic_kwargs[critic_key]
 
         np.savez(os.path.join(output_dir, '{}.npz'.format(key)), **output_dict)
 

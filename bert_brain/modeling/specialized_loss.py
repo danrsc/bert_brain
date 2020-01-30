@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 import dataclasses
-from typing import Optional, Any
-from collections import OrderedDict
+from typing import Optional, Callable, List
 
 import numpy as np
 import torch
@@ -18,6 +17,7 @@ __all__ = [
     'masked_binary_cross_entropy_with_logits',
     'masked_soft_label_cross_entropy',
     'stop_word_and_target_not_nan_mask',
+    'NamedTargetMaskedLossBase',
     'NamedTargetStopWordAwareMSE',
     'NamedTargetStopWordAwareMAE',
     'NamedTargetStopWordAwareKLeastSE',
@@ -38,15 +38,11 @@ __all__ = [
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
     'NamedTargetSingleCrossEntropy',
     'NamedTargetSingleSoftLabelCrossEntropy',
-    'CriticMapping',
-    'CriticKeys',
-    'make_loss_handler',
     'KLeastSEHalvingEpochs',
     'DetailedResult']
 
 
 class NoValidInputs(Exception):
-
     def __init__(self):
         super().__init__()
 
@@ -372,10 +368,10 @@ def _masked_reduce(loss, valid_count, reduction, as_numpy):
     return loss, valid_count
 
 
-class _NamedTargetMaskedLoss:
-
-    def __init__(self, field, weight=1.):
-        self.field, self.weight = field, weight
+@dataclass(frozen=True)
+class NamedTargetMaskedLossBase:
+    field: Optional[str] = None
+    weight: float = 1
 
     def apply_weight(self, result):
         is_tuple = isinstance(result, tuple)
@@ -403,6 +399,9 @@ class _NamedTargetMaskedLoss:
             as_numpy=False,
             apply_weight=True):
 
+        if self.field is None:
+            raise ValueError('field is required to be set before loss is called')
+
         if self.field not in batch:
             if reduction == 'mean' or reduction == 'sum':
                 result = 'no_valid_inputs'
@@ -427,6 +426,8 @@ class _NamedTargetMaskedLoss:
                 result = 'no_valid_inputs'
             else:
                 result = 'no_valid_inputs', 0
+
+        result = self._modify_loss(result, batch, prediction_dict)
 
         if apply_weight:
             result = self.apply_weight(result)
@@ -510,6 +511,9 @@ class _NamedTargetMaskedLoss:
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        return loss
+
     @classmethod
     def _is_sequence_loss(cls):
         return False
@@ -518,11 +522,9 @@ class _NamedTargetMaskedLoss:
         return shape
 
 
-class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
-
-    def __init__(self, field, keep_content=True, weight=1.):
-        super().__init__(field, weight)
-        self.keep_content = keep_content
+@dataclass(frozen=True)
+class _NamedTargetStopWordAwareLoss(NamedTargetMaskedLossBase):
+    keep_content: bool = True
 
     def _get_mask(self, is_eval, epoch, global_step, batch, predictions, target):
         return stop_word_and_target_not_nan_mask(
@@ -537,112 +539,177 @@ class _NamedTargetStopWordAwareLoss(_NamedTargetMaskedLoss):
         return True
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareMSE(_NamedTargetStopWordAwareLoss):
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_squared_error(mask, predictions, target)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareMAE(_NamedTargetStopWordAwareLoss):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_absolute_error(mask, predictions, target)
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareKLeastSE(_NamedTargetStopWordAwareLoss):
+    k_function: Callable[[int, int, int], int] = None
+    moving_average_decay: float = 0.98
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
-    def __init__(self, field, k_fn, moving_average_decay=0.98, keep_content=True, weight=1.):
-        super().__init__(field, keep_content, weight)
-        self.k_fn = k_fn
-        self.moving_average_decay = moving_average_decay
-        self._accumulator = None
-        self._active_mask = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _active_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         num_features = int(np.prod(target.size()[2:]))
-        k = self.k_fn(epoch, global_step, num_features)
-        self._accumulator, self._active_mask, result = k_least_squared_error(
+        k = self.k_function(epoch, global_step, num_features)
+        self._accumulator[0], self._active_mask[0], result = k_least_squared_error(
             is_eval, is_sequence=True, k=k, mask=mask, predictions=predictions, target=target,
-            accumulator=self._accumulator, active_mask=self._active_mask,
+            accumulator=self._accumulator[0], active_mask=self._active_mask[0],
             moving_average_decay=self.moving_average_decay)
         return result
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareKLeastSEEvalUpdate(_NamedTargetStopWordAwareLoss):
+    k_function: Callable[[int, int, int], int] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
-    def __init__(self, field, k_fn, keep_content=True, weight=1.):
-        super().__init__(field, keep_content, weight)
-        self.k_fn = k_fn
-        self._accumulator = None
-        self._counts = None
-        self._top_k_mask = None
-        self._num_features = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _counts: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _top_k_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _num_features: List[Optional[int]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
-        if self._num_features is None:
-            self._num_features = int(np.prod(target.size()[2:]))
-        self._accumulator, self._counts, result = k_least_squared_error_update_on_eval(
+        if self._num_features[0] is None:
+            self._num_features[0] = int(np.prod(target.size()[2:]))
+        self._accumulator[0], self._counts[0], result = k_least_squared_error_update_on_eval(
             is_eval, is_sequence=True, mask=mask, predictions=predictions, target=target,
-            top_k_mask=self._top_k_mask, next_accumulator=self._accumulator, next_counts=self._counts)
+            top_k_mask=self._top_k_mask[0], next_accumulator=self._accumulator[0], next_counts=self._counts[0])
         return result
 
     def after_eval_batches(self, epoch, global_step):
-        k = self.k_fn(epoch, global_step, self._num_features)
-        self._top_k_mask = update_k_least(self._accumulator, self._counts, k)
-        self._accumulator = None
-        self._counts = None
+        k = self.k_function(epoch, global_step, self._num_features[0])
+        self._top_k_mask[0] = update_k_least(self._accumulator[0], self._counts[0], k)
+        self._accumulator[0] = None
+        self._counts[0] = None
+
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
+
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareKLeastAE(_NamedTargetStopWordAwareLoss):
+    k_function: Callable[[int, int, int], int] = None
+    moving_average_decay: float = 0.98
 
-    def __init__(self, field, k_fn, moving_average_decay=0.98, keep_content=True, weight=1.):
-        super().__init__(field, keep_content, weight)
-        self.k_fn = k_fn
-        self.moving_average_decay = moving_average_decay
-        self._accumulator = None
-        self._active_mask = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _active_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         num_features = int(np.prod(target.size()[2:]))
-        k = self.k_fn(epoch, global_step, num_features)
-        self._accumulator, self._active_mask, result = k_least_squared_error(
+        k = self.k_function(epoch, global_step, num_features)
+        self._accumulator[0], self._active_mask[0], result = k_least_squared_error(
             is_eval, is_sequence=True, k=k, mask=mask, predictions=predictions, target=target,
-            accumulator=self._accumulator, active_mask=self._active_mask,
+            accumulator=self._accumulator[0], active_mask=self._active_mask[0],
             moving_average_decay=self.moving_average_decay, use_abs=True)
         return result
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareKLeastAEEvalUpdate(_NamedTargetStopWordAwareLoss):
+    k_function: Callable[[int, int, int], int] = None
 
-    def __init__(self, field, k_fn, keep_content=True, weight=1.):
-        super().__init__(field, keep_content, weight)
-        self.k_fn = k_fn
-        self._accumulator = None
-        self._counts = None
-        self._top_k_mask = None
-        self._num_features = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _counts: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _top_k_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _num_features: List[Optional[int]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
-        if self._num_features is None:
-            self._num_features = int(np.prod(target.size()[2:]))
-        self._accumulator, self._counts, result = k_least_squared_error_update_on_eval(
+        if self._num_features[0] is None:
+            self._num_features[0] = int(np.prod(target.size()[2:]))
+        self._accumulator[0], self._counts[0], result = k_least_squared_error_update_on_eval(
             is_eval, is_sequence=True, mask=mask, predictions=predictions, target=target,
-            top_k_mask=self._top_k_mask, next_accumulator=self._accumulator, next_counts=self._counts, use_abs=True)
+            top_k_mask=self._top_k_mask[0], next_accumulator=self._accumulator[0],
+            next_counts=self._counts[0], use_abs=True)
         return result
 
     def after_eval_batches(self, epoch, global_step):
-        k = self.k_fn(epoch, global_step, self._num_features)
-        self._top_k_mask = update_k_least(self._accumulator, self._counts, k)
-        self._accumulator = None
-        self._counts = None
+        k = self.k_function(epoch, global_step, self._num_features[0])
+        self._top_k_mask[0] = update_k_least(self._accumulator[0], self._counts[0], k)
+        self._accumulator[0] = None
+        self._counts[0] = None
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
-
-    def __init__(self, field, keep_content=True, should_penalize_scale=False, weight=1., axis=1):
-        super().__init__(field, keep_content, weight)
-        self.should_penalize_scale = should_penalize_scale
-        self.axis = axis
+    should_penalize_scale: bool = False
+    axis: int = 1
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
@@ -653,11 +720,14 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
         return loss, valid_count
 
 
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
+    num_classes: Optional[int] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
-    def __init__(self, field, num_classes, keep_content=True, weight=1.):
-        self.num_classes = num_classes
-        super().__init__(field, keep_content, weight)
+    def __post_init__(self):
+        if self.num_classes is None:
+            raise ValueError('num_classes is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
@@ -665,41 +735,89 @@ class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordAwareLoss):
-
-    def __init__(self, field, keep_content=True, weight=1., pos_weight=None):
-        super().__init__(field, keep_content, weight)
-        self.pos_weight = pos_weight
+    pos_weight: Optional[float] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLoss):
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-class NamedTargetSingleMSE(_NamedTargetMaskedLoss):
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleMSE(NamedTargetMaskedLossBase):
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_squared_error(mask, predictions, target)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-class NamedTargetSingleMAE(_NamedTargetMaskedLoss):
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleMAE(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_absolute_error(mask, predictions, target)
 
 
+@dataclass(frozen=True)
 class KLeastSEHalvingEpochs:
-    def __init__(self, half_life_in_epochs, delay_in_epochs=0, minimum_k=100, final_full_epochs_start=None):
-        self.half_life_in_epochs = half_life_in_epochs
-        self.delay_in_epochs = delay_in_epochs
-        self.minimum_k = minimum_k
-        self.final_full_epochs_start = final_full_epochs_start
+    half_life_in_epochs: float
+    delay_in_epochs: int = 0
+    minimum_k: int = 0
+    final_full_epochs_start: Optional[int] = None
 
     def __call__(self, epoch, global_step, num_features):
         if self.final_full_epochs_start is not None and epoch >= self.final_full_epochs_start:
@@ -709,100 +827,151 @@ class KLeastSEHalvingEpochs:
         return max(k, min(self.minimum_k, num_features))
 
 
-class NamedTargetSingleKLeastSE(_NamedTargetMaskedLoss):
+@dataclass(frozen=True)
+class NamedTargetSingleKLeastSE(NamedTargetMaskedLossBase):
+    k_function: Callable[[int, int, int], int] = None
+    moving_average_decay: float = 0.98
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
-    def __init__(self, field, k_fn, moving_average_decay=0.98, weight=1.):
-        super().__init__(field, weight)
-        self.k_fn = k_fn
-        self.moving_average_decay = moving_average_decay
-        self._accumulator = None
-        self._active_mask = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _active_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         num_features = int(np.prod(target.size()[1:]))
-        k = self.k_fn(epoch, global_step, num_features)
-        self._accumulator, self._active_mask, result = k_least_squared_error(
+        k = self.k_function(epoch, global_step, num_features)
+        self._accumulator[0], self._active_mask[0], result = k_least_squared_error(
             is_eval, is_sequence=False, k=k, mask=mask, predictions=predictions, target=target,
-            accumulator=self._accumulator, active_mask=self._active_mask,
+            accumulator=self._accumulator[0], active_mask=self._active_mask[0],
             moving_average_decay=self.moving_average_decay)
         return result
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-class NamedTargetSingleKLeastSEEvalUpdate(_NamedTargetMaskedLoss):
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
 
-    def __init__(self, field, k_fn, weight=1.):
-        super().__init__(field, weight)
-        self.k_fn = k_fn
-        self._accumulator = None
-        self._counts = None
-        self._top_k_mask = None
-        self._num_features = None
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleKLeastSEEvalUpdate(NamedTargetMaskedLossBase):
+    k_function: Callable[[int, int, int], int] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
+
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _counts: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _top_k_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _num_features: List[Optional[int]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
-        if self._num_features is None:
-            self._num_features = int(np.prod(target.size()[1:]))
-        self._accumulator, self._counts, result = k_least_squared_error_update_on_eval(
+        if self._num_features[0] is None:
+            self._num_features[0] = int(np.prod(target.size()[1:]))
+        self._accumulator[0], self._counts[0], result = k_least_squared_error_update_on_eval(
             is_eval, is_sequence=False, mask=mask, predictions=predictions, target=target,
-            top_k_mask=self._top_k_mask, next_accumulator=self._accumulator, next_counts=self._counts)
+            top_k_mask=self._top_k_mask[0], next_accumulator=self._accumulator[0], next_counts=self._counts[0])
         return result
 
     def after_eval_batches(self, epoch, global_step):
-        k = self.k_fn(epoch, global_step, self._num_features)
-        self._top_k_mask = update_k_least(self._accumulator, self._counts, k)
-        self._accumulator = None
-        self._counts = None
+        k = self.k_function(epoch, global_step, self._num_features[0])
+        self._top_k_mask[0] = update_k_least(self._accumulator[0], self._counts[0], k)
+        self._accumulator[0] = None
+        self._counts[0] = None
+
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
+
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / (2 * torch.exp(log_sigma_squared)) + log_sigma_squared / 2
 
 
-class NamedTargetSingleKLeastAE(_NamedTargetMaskedLoss):
+@dataclass(frozen=True)
+class NamedTargetSingleKLeastAE(NamedTargetMaskedLossBase):
+    k_function: Callable[[int, int, int], int] = None
+    moving_average_decay: float = 0.98
 
-    def __init__(self, field, k_fn, moving_average_decay=0.98, weight=1.):
-        super().__init__(field, weight)
-        self.k_fn = k_fn
-        self.moving_average_decay = moving_average_decay
-        self._accumulator = None
-        self._active_mask = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _active_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         num_features = int(np.prod(target.size()[1:]))
-        k = self.k_fn(epoch, global_step, num_features)
-        self._accumulator, self._active_mask, result = k_least_squared_error(
+        k = self.k_function(epoch, global_step, num_features)
+        self._accumulator[0], self._active_mask[0], result = k_least_squared_error(
             is_eval, is_sequence=False, k=k, mask=mask, predictions=predictions, target=target,
-            accumulator=self._accumulator, active_mask=self._active_mask,
+            accumulator=self._accumulator[0], active_mask=self._active_mask[0],
             moving_average_decay=self.moving_average_decay, use_abs=True)
         return result
 
 
-class NamedTargetSingleKLeastAEEvalUpdate(_NamedTargetMaskedLoss):
+@dataclass(frozen=True)
+class NamedTargetSingleKLeastAEEvalUpdate(NamedTargetMaskedLossBase):
+    k_function: Callable[[int, int, int], int] = None
 
-    def __init__(self, field, k_fn, weight=1.):
-        super().__init__(field, weight)
-        self.k_fn = k_fn
-        self._accumulator = None
-        self._counts = None
-        self._top_k_mask = None
-        self._num_features = None
+    # use lists so we can modify these
+    _accumulator: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _counts: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _top_k_mask: List[Optional[torch.Tensor]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+    _num_features: List[Optional[int]] = dataclasses.field(
+        init=False, repr=False, compare=False, default_factory=lambda: [None])
+
+    def __post_init__(self):
+        if self.k_function is None:
+            raise ValueError('k_function is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
-        if self._num_features is None:
-            self._num_features = int(np.prod(target.size()[1:]))
-        self._accumulator, self._counts, result = k_least_squared_error_update_on_eval(
+        if self._num_features[0] is None:
+            self._num_features[0] = int(np.prod(target.size()[1:]))
+        self._accumulator[0], self._counts[0], result = k_least_squared_error_update_on_eval(
             is_eval, is_sequence=False, mask=mask, predictions=predictions, target=target,
-            top_k_mask=self._top_k_mask, next_accumulator=self._accumulator, next_counts=self._counts, use_abs=True)
+            top_k_mask=self._top_k_mask[0], next_accumulator=self._accumulator[0], next_counts=self._counts[0],
+            use_abs=True)
         return result
 
     def after_eval_batches(self, epoch, global_step):
-        k = self.k_fn(epoch, global_step, self._num_features)
-        self._top_k_mask = update_k_least(self._accumulator, self._counts, k)
-        self._accumulator = None
-        self._counts = None
+        k = self.k_function(epoch, global_step, self._num_features[0])
+        self._top_k_mask[0] = update_k_least(self._accumulator[0], self._counts[0], k)
+        self._accumulator[0] = None
+        self._counts[0] = None
 
 
-class NamedTargetSinglePearsonDistance(_NamedTargetMaskedLoss):
-
-    def __init__(self, field, should_penalize_scale=False, weight=1., axis=0):
-        super().__init__(field, weight)
-        self.should_penalize_scale = should_penalize_scale
-        self.axis = axis
+@dataclass(frozen=True)
+class NamedTargetSinglePearsonDistance(NamedTargetMaskedLossBase):
+    should_penalize_scale: bool = False
+    axis: int = 0
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         distance, valid_count, var_input, var_target, mean_input, mean_target = masked_pearsons_distance(
@@ -813,11 +982,14 @@ class NamedTargetSinglePearsonDistance(_NamedTargetMaskedLoss):
         return loss, valid_count
 
 
-class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
+@dataclass(frozen=True)
+class NamedTargetSingleCrossEntropy(NamedTargetMaskedLossBase):
+    num_classes: Optional[int] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
-    def __init__(self, field, num_classes, weight=1.):
-        self.num_classes = num_classes
-        super().__init__(field, weight)
+    def __post_init__(self):
+        if self.num_classes is None:
+            raise ValueError('num_classes is required')
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
@@ -825,62 +997,52 @@ class NamedTargetSingleCrossEntropy(_NamedTargetMaskedLoss):
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-class NamedTargetSingleSoftLabelCrossEntropy(_NamedTargetMaskedLoss):
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
+
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleSoftLabelCrossEntropy(NamedTargetMaskedLossBase):
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-class NamedTargetSingleBinaryCrossEntropyWithLogits(_NamedTargetMaskedLoss):
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
 
-    def __init__(self, field, weight=1., pos_weight=None):
-        super().__init__(field, weight)
-        self.pos_weight = pos_weight
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleBinaryCrossEntropyWithLogits(NamedTargetMaskedLossBase):
+    pos_weight: Optional[float] = None
+    uncertainty_log_sigma_squared_field: Optional[str] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
+    def _modify_loss(self, loss, batch, prediction_dict):
+        if self.uncertainty_log_sigma_squared_field is None:
+            return loss
 
-@dataclass(frozen=True)
-class CriticMapping:
-    # this metadata trick allows us to give the canonical value along with the field definition
-    # while not specifying a default (so we force all versions of the mapping to instantiate all the fields)
-    mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareMSE))
-    mae: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareMAE))
-    k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareKLeastSE))
-    k_least_se_on_eval: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareKLeastSEEvalUpdate))
-    k_least_ae: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareKLeastAE))
-    k_least_ae_on_eval: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareKLeastAEEvalUpdate))
-    pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwarePearsonDistance))
-    cross_entropy: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetStopWordAwareCrossEntropy))
-    binary_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetStopWordAwareBinaryCrossEntropyWithLogits))
-    soft_label_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetStopWordAwareSoftLabelCrossEntropy))
-    single_mse: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMSE))
-    single_mae: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleMAE))
-    single_k_least_se: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastSE))
-    single_k_least_se_on_eval: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastSEEvalUpdate))
-    single_k_least_ae: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastAE))
-    single_k_least_ae_on_eval: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSingleKLeastAEEvalUpdate))
-    single_pearson: Any = dataclasses.field(metadata=dict(hidden_value=NamedTargetSinglePearsonDistance))
-    single_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSingleCrossEntropy))
-    single_binary_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSingleBinaryCrossEntropyWithLogits))
-    single_soft_label_cross_entropy: Any = dataclasses.field(
-        metadata=dict(hidden_value=NamedTargetSingleSoftLabelCrossEntropy))
+        if self.uncertainty_log_sigma_squared_field not in prediction_dict:
+            raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
+                self.uncertainty_log_sigma_squared_field))
 
-
-CriticKeys = CriticMapping(**dict((f.name, f.name) for f in dataclasses.fields(CriticMapping)))
-_critic_type_dict = OrderedDict((f.name, f.metadata['hidden_value']) for f in dataclasses.fields(CriticMapping))
-
-
-def make_loss_handler(field, which_loss, loss_kwargs=None):
-    if which_loss not in _critic_type_dict:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(_critic_type_dict.keys()))
-    factory = _critic_type_dict[which_loss]
-    if loss_kwargs is None:
-        loss_kwargs = {}
-    return factory(field, **loss_kwargs)
+        log_sigma_squared = prediction_dict[self.uncertainty_log_sigma_squared_field]
+        return loss / torch.exp(log_sigma_squared) + log_sigma_squared / 2

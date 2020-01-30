@@ -8,17 +8,15 @@ from typing import Union, Iterable, Mapping, Tuple
 import numpy as np
 import torch
 import torch.cuda
-from torch.optim import SGD
 
 from .common import SwitchRemember
 from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, PreprocessForkNoClusterToDisk, \
     PreprocessQuantileDigitize, corpus_types, BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, \
     BatchOneTaskProportionalSamplerFactory
-from .modeling import KeyedLinear, CriticKeys, LinearContextualParameterGeneration, PooledFromSequence, \
-    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention
-from .settings import Settings, OptimizationSettings, CriticSettings, LearningRateSchedule, make_optimizer_factory, \
-    make_inner_meta_learn_optimizer_factory
+from .modeling import KeyedLinear, LinearContextualParameterGeneration, PooledFromSequence, \
+    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types
+from .settings import Settings, OptimizationSettings, LearningRateSchedule
 
 
 __all__ = [
@@ -407,7 +405,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             untransformed_pooled_linear=KeyedLinear(
                 ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
-        settings.critics[ResponseKind.hp_fmri] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits()
         return settings
     elif name == 'hp_meg_diff_drc_25':
         settings = Settings(
@@ -434,8 +432,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 train_on_all=True,
                 use_one_hot=False)
         ]
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_meg_diff_drc_25_one':
         settings = Settings(
@@ -464,8 +461,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 train_on_all=True,
                 use_one_hot=False)
         ]
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_meg_p75_drc_one':
         settings = Settings(
@@ -498,8 +494,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 ('bert', 'sequence', 'all'), is_sequence=True,
                 hidden_sizes=[100], hidden_activation=None, targets=ResponseKind.hp_meg))
 
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_meg_cpg':
         settings = Settings(
@@ -539,8 +534,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
             'sequence_all_bottleneck', is_sequence=True, targets=ResponseKind.hp_meg))
 
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_fmri_reptile':
         settings = Settings(
@@ -576,8 +570,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             untransformed_pooled_linear=KeyedLinear(
                 ('bert', 'untransformed_pooled'), is_sequence=False, apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
-        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
-            critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_fmri_meg_meta':
         settings = Settings(
@@ -640,10 +633,8 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             is_sequence=False,
             apply_at_most_one_data_id='if_no_target',
             targets=ResponseKind.hp_fmri))
-        settings.critics[ResponseKind.hp_meg] = CriticSettings(
-            critic_type=CriticKeys.cross_entropy, critic_kwargs=dict(num_classes=2))
-        settings.critics[ResponseKind.hp_fmri] = CriticSettings(
-            critic_type=CriticKeys.single_cross_entropy, critic_kwargs=dict(num_classes=2))
+        settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleCrossEntropy(num_classes=2)
         return settings
     elif name == 'superglue':
         settings = Settings(
@@ -818,7 +809,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
         return settings
-    elif name == 'fmri_cram_cpg_sgd':
+    elif name == 'fmri_cram_cpg_prop':
         settings = Settings(
             corpora=(
                 corpus_types.HarryPotterCorpus(
@@ -842,78 +833,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 corpus_types.VerbTense(),
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=3,
-                num_epochs_train_prediction_heads_only=0,
+                num_train_epochs=10,
+                num_epochs_train_prediction_heads_only=5,
                 num_final_epochs_train_prediction_heads_only=0,
-                make_optimizer=make_optimizer_factory(SGD),
-                make_inner_meta_learn_optimizer=make_inner_meta_learn_optimizer_factory(
-                    SGD, use_outer_optimizer_as_defaults=False),
-                learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
-                train_batch_size=8,
-                predict_batch_size=8,
-                num_loader_workers=1),
-            loss_tasks=set(),
-            data_id_in_batch_keys=None,
-            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
-            weight_losses_by_inverse_example_counts=False,
-            num_meta_learn_gradient_samples=10,
-            num_meta_learn_no_gradient_samples=0,
-            sampler_factory=BatchOneTaskSamplerFactory(500),
-            num_runs=1)
-        settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
-                'response_id', 'num_response_data_fields', 3,
-                OrderedDict(
-                    bottleneck=KeyedLinear(
-                        ('bert', 'sequence', 'all'), is_sequence=True,
-                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
-                        should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
-        settings.preprocessors[ResponseKind.hp_fmri] = [
-            PreprocessQuantileDigitize(
-                quantiles=2,
-                stop_mode=None,
-                metadata_example_group_by='fmri_runs',
-                train_on_all=True,
-                use_one_hot=False)]
-        settings.default_pooled_source = 'pooled_all_bottleneck'
-        settings.default_sequence_source = 'sequence_all_bottleneck'
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
-        return settings
-    elif name == 'fmri_cram_cpg_sgd_prop':
-        settings = Settings(
-            corpora=(
-                corpus_types.HarryPotterCorpus(
-                    fmri_subjects=None,  # None means all
-                    fmri_sentence_mode='ignore',
-                    fmri_window_duration=10.1,
-                    fmri_minimum_duration_required=9.6,
-                    fmri_kind='rank_clustered',
-                    fmri_smooth_factor=None,
-                    separate_fmri_components=True,
-                    group_meg_sentences_like_fmri=True,
-                    meg_subjects=[]),
-                corpus_types.BigramShift(),
-                corpus_types.CoordinationInversion(),
-                corpus_types.ObjectNumber(),
-                corpus_types.SemanticOddManOut(),
-                corpus_types.SentenceLength(),
-                corpus_types.SubjectNumber(),
-                corpus_types.TopConstituents(),
-                corpus_types.TreeDepth(),
-                corpus_types.VerbTense(),
-                corpus_types.WordContent()),
-            optimization_settings=OptimizationSettings(
-                num_train_epochs=3,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                make_optimizer=make_optimizer_factory(SGD),
-                make_inner_meta_learn_optimizer=make_inner_meta_learn_optimizer_factory(
-                    SGD, use_outer_optimizer_as_defaults=False),
-                learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                learning_rate=5e-3,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=1000),
                 train_batch_size=8,
                 predict_batch_size=8,
                 num_loader_workers=1),
@@ -928,7 +852,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
-                'response_id', 'num_response_data_fields', 3,
+                'response_id', 'num_response_data_fields', 20,
                 OrderedDict(
                     bottleneck=KeyedLinear(
                         ('bert', 'sequence', 'all'), is_sequence=True,
@@ -942,6 +866,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 metadata_example_group_by='fmri_runs',
                 train_on_all=True,
                 use_one_hot=False)]
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits()
         settings.default_pooled_source = 'pooled_all_bottleneck'
         settings.default_sequence_source = 'sequence_all_bottleneck'
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)

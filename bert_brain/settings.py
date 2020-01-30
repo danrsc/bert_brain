@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Sequence, Callable, MutableMapping, Mapping, \
     Optional, Union, Tuple, OrderedDict as OrderedDictT, Any
 from inspect import signature
@@ -15,10 +15,10 @@ from .data_sets import PreprocessStandardize, PreprocessLog, \
     ResponseKind, NaturalStoriesMakeLeaveStoriesOut, corpus_types, CorpusBase, \
     UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT, SamplerFactory, RandomSamplerFactory
 from .common import SwitchRemember
-from .modeling import CriticKeys, GraphPart
+from .modeling import critic_types, GraphPart, NamedTargetMaskedLossBase
 
 
-__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'CriticSettings', 'Settings',
+__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'Settings',
            'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory']
 
 
@@ -109,7 +109,7 @@ def make_inner_meta_learn_optimizer_factory(
             # noinspection PyUnresolvedReferences
             outer_kwargs = dict(
                 (k, outer_optimizer.defaults[k])
-                for k in signature(optimizer_type.__init__) if k in outer_optimizer.defaults)
+                for k in signature(optimizer_type.__init__).parameters if k in outer_optimizer.defaults and k != 'lr')
             for key in partial_sequence_overrides_:
                 if key in outer_kwargs and key in kwargs_:
                     if np.ndim(outer_kwargs[key]) != np.ndim(kwargs_[key]):
@@ -162,12 +162,6 @@ class OptimizationSettings:
     num_loader_workers: int = 0
 
 
-@dataclass
-class CriticSettings:
-    critic_type: str
-    critic_kwargs: Optional[Mapping] = None
-
-
 def _default_split_functions():
 
     return {
@@ -218,11 +212,11 @@ def _default_supplemental_fields():
 def _default_critics():
 
     result = {
-        corpus_types.UclCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
-        ResponseKind.ns_froi: CriticSettings(critic_type=CriticKeys.single_mse),
-        corpus_types.NaturalStoriesCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse),
-        ResponseKind.hp_fmri: CriticSettings(critic_type=CriticKeys.single_mse),
-        corpus_types.HarryPotterCorpus.__name__: CriticSettings(critic_type=CriticKeys.mse)
+        corpus_types.UclCorpus.__name__: critic_types.NamedTargetStopWordAwareMSE(),
+        ResponseKind.ns_froi: critic_types.NamedTargetSingleMSE(),
+        corpus_types.NaturalStoriesCorpus.__name__: critic_types.NamedTargetStopWordAwareMSE(),
+        ResponseKind.hp_fmri: critic_types.NamedTargetSingleMSE(),
+        corpus_types.HarryPotterCorpus.__name__: critic_types.NamedTargetStopWordAwareMSE()
     }
 
     for corpus_type_str in corpus_types.__all__:
@@ -233,18 +227,16 @@ def _default_critics():
                 is_sequence_labeled = corpus_type.is_sequence_labeled()
             if is_sequence_labeled:
                 if corpus_type.num_classes() > 2:
-                    result[corpus_type.__name__] = CriticSettings(
-                        critic_type=CriticKeys.cross_entropy,
-                        critic_kwargs=dict(num_classes=corpus_type.num_classes()))
+                    result[corpus_type.__name__] = critic_types.NamedTargetStopWordAwareCrossEntropy(
+                        num_classes=corpus_type.num_classes())
                 else:
-                    result[corpus_type.__name__] = CriticSettings(critic_type=CriticKeys.binary_cross_entropy)
+                    result[corpus_type.__name__] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
             else:
                 if corpus_type.num_classes() > 2:
-                    result[corpus_type.__name__] = CriticSettings(
-                        critic_type=CriticKeys.single_cross_entropy,
-                        critic_kwargs=dict(num_classes=corpus_type.num_classes()))
+                    result[corpus_type.__name__] = critic_types.NamedTargetSingleCrossEntropy(
+                        num_classes=corpus_type.num_classes())
                 else:
-                    result[corpus_type.__name__] = CriticSettings(critic_type=CriticKeys.single_binary_cross_entropy)
+                    result[corpus_type.__name__] = critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits()
 
     return result
 
@@ -322,7 +314,7 @@ class Settings:
     use_sequential_sampling_on_evaluate: bool = True
 
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
-    critics: MutableMapping[str, Union[CriticSettings, str]] = field(default_factory=_default_critics)
+    critics: MutableMapping[str, NamedTargetMaskedLossBase] = field(default_factory=_default_critics)
 
     # fields which should be used to evaluate the loss. All critics specified by the critics setting will be invoked,
     # but only the fields listed here will be considered part of the loss for the purpose of optimization and
@@ -394,20 +386,14 @@ class Settings:
             return None
         return self.split_functions[key](index_run)
 
-    def _lookup_critic(self, field_name, data_set):
+    def get_critic(self, field_name, data_set):
         if field_name in self.critics:
-            return self.critics[field_name]
+            return replace(self.critics[field_name], field=field_name)
         if data_set.is_response_data(field_name):
             kind = data_set.response_data_kind(field_name)
             if kind in self.critics:
-                return self.critics[kind]
+                return replace(self.critics[kind], field=field_name)
             data_key = data_set.data_set_key_for_field(field_name)
             if data_key in self.critics:
-                return self.critics[data_key]
-        return CriticKeys.mse
-
-    def get_critic(self, field_name, data_set):
-        critic = self._lookup_critic(field_name, data_set)
-        if isinstance(critic, str):
-            return CriticSettings(critic)
-        return critic
+                return replace(self.critics[data_key], field=field_name)
+        return critic_types.NamedTargetStopWordAwareMSE(field=field_name)

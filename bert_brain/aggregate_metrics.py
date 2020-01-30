@@ -10,7 +10,7 @@ import numpy as np
 from scipy.special import logsumexp
 
 from .experiments import singleton_variation, task_hash
-from .modeling import CriticMapping
+from .modeling import critic_types
 from .result_output import read_predictions
 
 __all__ = [
@@ -524,60 +524,64 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma)
 
 
-_prediction_handlers = dataclasses.asdict(CriticMapping(
-    mse=aggregator_regression_handler,
-    mae=aggregator_regression_handler,
-    k_least_se=aggregator_regression_handler,
-    k_least_se_on_eval=aggregator_regression_handler,
-    k_least_ae=aggregator_regression_handler,
-    k_least_ae_on_eval=aggregator_regression_handler,
-    pearson=aggregator_regression_handler,
-    cross_entropy=aggregator_class_handler,
-    binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
-    soft_label_cross_entropy=aggregator_class_handler,
-    single_mse=aggregator_regression_handler,
-    single_mae=aggregator_regression_handler,
-    single_k_least_se=aggregator_regression_handler,
-    single_k_least_se_on_eval=aggregator_regression_handler,
-    single_k_least_ae=aggregator_regression_handler,
-    single_k_least_ae_on_eval=aggregator_regression_handler,
-    single_pearson=aggregator_regression_handler,
-    single_cross_entropy=aggregator_class_handler,
-    single_binary_cross_entropy=(aggregator_class_handler, dict(is_binary=True)),
-    single_soft_label_cross_entropy=aggregator_class_handler), dict_factory=OrderedDict)
+_regression_critic_types = frozenset(t.__name__ for t in [
+    critic_types.NamedTargetStopWordAwareMSE,
+    critic_types.NamedTargetStopWordAwareMAE,
+    critic_types.NamedTargetStopWordAwareKLeastSE,
+    critic_types.NamedTargetStopWordAwareKLeastSEEvalUpdate,
+    critic_types.NamedTargetStopWordAwareKLeastAE,
+    critic_types.NamedTargetStopWordAwareKLeastAEEvalUpdate,
+    critic_types.NamedTargetStopWordAwarePearsonDistance,
+    critic_types.NamedTargetSingleMSE,
+    critic_types.NamedTargetSingleMAE,
+    critic_types.NamedTargetSingleKLeastSE,
+    critic_types.NamedTargetSingleKLeastSEEvalUpdate,
+    critic_types.NamedTargetSingleKLeastAE,
+    critic_types.NamedTargetSingleKLeastAEEvalUpdate,
+    critic_types.NamedTargetSinglePearsonDistance])
+
+_binary_classifier_types = frozenset(t.__name__ for t in [
+    critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits,
+    critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits])
+
+_classifier_types = frozenset(t.__name__ for t in [
+    critic_types.NamedTargetStopWordAwareCrossEntropy,
+    critic_types.NamedTargetSingleCrossEntropy,
+    critic_types.NamedTargetStopWordAwareSoftLabelCrossEntropy,
+    critic_types.NamedTargetSingleSoftLabelCrossEntropy])
 
 
-_no_aggregator_prediction_handlers = dataclasses.asdict(CriticMapping(
-    mse=regression_handler,
-    mae=regression_handler,
-    k_least_se=regression_handler,
-    k_least_se_on_eval=regression_handler,
-    k_least_ae=regression_handler,
-    k_least_ae_on_eval=regression_handler,
-    pearson=regression_handler,
-    cross_entropy=class_handler,
-    binary_cross_entropy=(class_handler, dict(is_binary=True)),
-    soft_label_cross_entropy=class_handler,
-    single_mse=regression_handler,
-    single_mae=regression_handler,
-    single_k_least_se=regression_handler,
-    single_k_least_se_on_eval=regression_handler,
-    single_k_least_ae=regression_handler,
-    single_k_least_ae_on_eval=regression_handler,
-    single_pearson=regression_handler,
-    single_cross_entropy=class_handler,
-    single_binary_cross_entropy=(class_handler, dict(is_binary=True)),
-    single_soft_label_cross_entropy=class_handler), dict_factory=OrderedDict)
+def _check_all_types_present():
+    all_present = _regression_critic_types.union(_binary_classifier_types).union(_classifier_types)
+    for critic_type_str in critic_types.__all__:
+        if critic_type_str not in all_present:
+            raise AssertionError('type: {} not present in mappings'.format(critic_type_str))
+
+
+_check_all_types_present()
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True):
-    handler_map = _prediction_handlers if using_aggregator else _no_aggregator_prediction_handlers
-    if which_loss not in handler_map:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(handler_map.keys()))
-    factory = handler_map[which_loss]
-    loss_kwargs = {} if loss_kwargs is None else dict(loss_kwargs)
-    if isinstance(factory, tuple):
-        factory, factory_kwargs = factory
+    if which_loss in _regression_critic_types:
+        if using_aggregator:
+            factory, factory_kwargs = aggregator_regression_handler, None
+        else:
+            factory, factory_kwargs = regression_handler, None
+    elif which_loss in _binary_classifier_types:
+        if using_aggregator:
+            factory, factory_kwargs = aggregator_class_handler, dict(is_binary=True)
+        else:
+            factory, factory_kwargs = class_handler, dict(is_binary=True)
+    elif which_loss in _classifier_types:
+        if using_aggregator:
+            factory, factory_kwargs = aggregator_class_handler, None
+        else:
+            factory, factory_kwargs = class_handler, None
+    else:
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(
+            _regression_critic_types.union(_binary_classifier_types).union(_classifier_types)))
+    loss_kwargs = dict() if loss_kwargs is None else dict(loss_kwargs)
+    if factory_kwargs is not None:
         loss_kwargs.update(factory_kwargs)
     factory_signature = inspect.signature(factory)
     bad_keys = [k for k in loss_kwargs if k not in factory_signature.parameters]

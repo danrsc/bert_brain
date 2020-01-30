@@ -3,16 +3,18 @@ import gc
 from collections import OrderedDict
 from dataclasses import dataclass
 from copy import deepcopy
+from typing import Optional
 import logging
 
 import numpy as np
 import torch
 import torch.nn
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm, trange
 
 from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskSequentialSampler
-from .modeling import make_loss_handler, KeyedLinear
+from .modeling import KeyedLinear
 from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
 from .settings import Settings
 from .result_output import write_predictions, write_loss_curve
@@ -61,14 +63,16 @@ def restore_model_parameters_and_set_meta_gradient(
         model, model_state_to_restore, model_state_for_gradient, num_inner_steps):
     target_state = deepcopy(model.state_dict())
     model.load_state_dict(model_state_to_restore)
+    model.zero_grad()
     for key, p in model.named_parameters():
         if key not in target_state or key not in model_state_for_gradient:
             raise ValueError('Inconsistent state dictionaries')
         if p.requires_grad:
             if p.grad is None:
                 p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()), requires_grad=True)
+            p.grad.zero_()
             # noinspection PyUnresolvedReferences
-            p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps)
+            p.grad += (model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps
 
 
 def evaluate(
@@ -85,7 +89,7 @@ def evaluate(
     eval_sampler = None
     batch_sampler = None
     if settings.optimization_settings.local_rank == -1:
-        if settings.use_sequential_sampling_on_evaluate:
+        if settings.use_sequential_sampling_on_evaluate or return_detailed:
             if settings.sampler_factory.is_one_task_at_a_time_sampler():
                 batch_sampler = BatchOneTaskSequentialSampler(
                     eval_data_set, settings.optimization_settings.predict_batch_size)
@@ -192,6 +196,10 @@ def evaluate(
         else:
             logger.info('eval:  {}'.format(np.nan))
 
+    # try to make sure the worker processes shut down
+    del eval_data_loader
+    gc.collect()
+
     if return_detailed:
         return all_results
 
@@ -237,8 +245,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
                 or data_set.is_response_data(k):
             if k in settings.all_loss_tasks or kind in settings.all_loss_tasks:
                 loss_example_counts[k] = data_set.num_examples_for_field(k)
-            critic_settings = settings.get_critic(k, data_set)
-            handler = make_loss_handler(k, critic_settings.critic_type, critic_settings.critic_kwargs)
+            handler = settings.get_critic(k, data_set)
             loss_handlers.append(handler)
 
             prediction_shape = handler.shape_adjust(data_set.value_shape(k))
@@ -320,6 +327,16 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
                 pooled_supplemental_key_to_shape[k] = data_set.value_shape(k)
 
     return graph_parts, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers
+
+
+@dataclass
+class MetaLearnScheduler:
+    outer_scheduler: LambdaLR
+    inner_scheduler: LambdaLR
+
+    def step(self, epoch: Optional[int] = None):
+        self.outer_scheduler.step(epoch)
+        self.inner_scheduler.step(epoch)
 
 
 def _train_step(
@@ -407,11 +424,13 @@ def _train_step(
                 model.zero_grad()
                 return False
             optimizer.step()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
         else:
             optimizer.step()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
         model.zero_grad()
 
         for group in optimizer.param_groups:
@@ -567,7 +586,9 @@ def train(
                            for n, param in model.named_parameters()]
     else:
         param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'gamma', 'beta']
+
+    def is_no_decay(param_name):
+        return param_name.split('.')[-1] in ['bias', 'gamma', 'beta']
 
     non_prediction_head_parameters = None
     if num_epochs_prediction_head_only_train > 0 or start_final_epochs_prediction_head_only_train:
@@ -578,21 +599,22 @@ def train(
     # noinspection PyUnresolvedReferences
     optimizer_grouped_parameters = [
         # weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if n not in no_decay and n.startswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if not is_no_decay(n) and n.startswith('prediction_head.')],
          'weight_decay': 0.01,
          't_total': num_train_steps_prediction_heads},
         # no weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if n in no_decay and n.statswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if is_no_decay(n) and n.startswith('prediction_head.')],
          'weight_decay': 0.0,
          't_total': num_train_steps_prediction_heads},
         # weight decay, non-prediction head
-        {'params': [p for n, p in param_optimizer if n not in no_decay and not n.startswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if not is_no_decay(n) and not n.startswith('prediction_head.')],
          'weight_decay': 0.01,
          't_total': num_train_steps_other},
         # no weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if n in no_decay and not n.statswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if is_no_decay(n) and not n.startswith('prediction_head.')],
          'weight_decay': 0.0,
          't_total': num_train_steps_other}]
+
     inner_optimizer_grouped_parameters = None
     if is_meta_learn_active:
         inner_optimizer_grouped_parameters = list(dict(g) for g in optimizer_grouped_parameters)
@@ -606,14 +628,13 @@ def train(
         optimizer, optimizer_grouped_parameters)
 
     inner_meta_learn_optimizer = None
-    inner_meta_learn_scheduler = None
     if is_meta_learn_active:
         inner_meta_learn_optimizer = settings.optimization_settings.make_inner_meta_learn_optimizer(
             optimizer,
             inner_optimizer_grouped_parameters,
             lr=settings.optimization_settings.learning_rate)
-        inner_meta_learn_scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
-            inner_meta_learn_optimizer, inner_optimizer_grouped_parameters)
+        inner_meta_learn_scheduler = LambdaLR(inner_meta_learn_optimizer, scheduler.lr_lambdas, last_epoch=-1)
+        scheduler = MetaLearnScheduler(scheduler, inner_meta_learn_scheduler)
 
     global_step = 0
     train_results = TaskResults()
@@ -692,8 +713,9 @@ def train(
                         current_loss_tasks,
                         train_data_set, n_gpu, device, model, inner_batch, step, index_epoch, global_step,
                         loss_handlers, train_results, param_optimizer,
-                        inner_meta_learn_optimizer, inner_meta_learn_scheduler, log_tag=log_tag)
+                        inner_meta_learn_optimizer, None, log_tag=log_tag)
                 logger.info('meta epoch {}, step {}'.format(index_epoch, step))
+                optimizer.zero_grad()
                 restore_model_parameters_and_set_meta_gradient(
                     model, restore_state, gradient_state, settings.num_meta_learn_gradient_samples)
                 optimizer.step()
