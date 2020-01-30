@@ -11,11 +11,9 @@ import torch
 import torch.nn
 from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 from torch.optim.lr_scheduler import LambdaLR
-from tqdm import tqdm, trange
 
 from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskSequentialSampler
-from .modeling import KeyedLinear
-from bert_brain.modeling.bert_multi_prediction_head import BertMultiPredictionHead
+from .modeling import KeyedLinear, BertMultiPredictionHead
 from .settings import Settings
 from .result_output import write_predictions, write_loss_curve
 
@@ -61,6 +59,7 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
 
 def restore_model_parameters_and_set_meta_gradient(
         model, model_state_to_restore, model_state_for_gradient, num_inner_steps):
+    model.zero_grad()
     target_state = deepcopy(model.state_dict())
     model.load_state_dict(model_state_to_restore)
     model.zero_grad()
@@ -70,15 +69,15 @@ def restore_model_parameters_and_set_meta_gradient(
         if p.requires_grad:
             if p.grad is None:
                 p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()), requires_grad=True)
-            p.grad.zero_()
             # noinspection PyUnresolvedReferences
-            p.grad += (model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps
+            p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps)
 
 
 def evaluate(
         settings: Settings,
         model,
         loss_handlers,
+        train_samplers,
         device,
         epoch,
         global_step,
@@ -88,22 +87,21 @@ def evaluate(
 
     eval_sampler = None
     batch_sampler = None
-    if settings.optimization_settings.local_rank == -1:
-        if settings.use_sequential_sampling_on_evaluate or return_detailed:
-            if settings.sampler_factory.is_one_task_at_a_time_sampler():
-                batch_sampler = BatchOneTaskSequentialSampler(
-                    eval_data_set, settings.optimization_settings.predict_batch_size)
-            else:
-                eval_sampler = SequentialSampler(eval_data_set)
-        else:
-            sampler_ = settings.sampler_factory.make_sampler(
+    if settings.use_sequential_sampling_on_evaluate or return_detailed:
+        if settings.sampler_factory.is_one_task_at_a_time_sampler():
+            batch_sampler = BatchOneTaskSequentialSampler(
                 eval_data_set, settings.optimization_settings.predict_batch_size)
-            if settings.sampler_factory.is_batch_sampler():
-                batch_sampler = sampler_
-            else:
-                eval_sampler = sampler_
+        else:
+            eval_sampler = SequentialSampler(eval_data_set)
     else:
-        raise ValueError('Not supported')
+        sampler_ = settings.sampler_factory.make_sampler(
+            eval_data_set, settings.optimization_settings.predict_batch_size)
+        if hasattr(sampler_, 'update_from'):
+            sampler_.update_from(train_samplers)
+        if settings.sampler_factory.is_batch_sampler():
+            batch_sampler = sampler_
+        else:
+            eval_sampler = sampler_
 
     if batch_sampler is None:
         eval_data_loader = TorchDataLoader(
@@ -121,16 +119,11 @@ def evaluate(
     all_results = OrderedDict()
     logger.info("Start evaluating")
 
-    if settings.show_step_progress:
-        batch_iterator = tqdm(eval_data_loader, desc="Evaluating")
-    else:
-        batch_iterator = eval_data_loader
-
     total_loss = 0
     total_count = 0
     losses_to_write = OrderedDict()
     losses_to_write_counts = OrderedDict()
-    for batch in batch_iterator:
+    for batch in eval_data_loader:
         # if len(all_results) % 1000 == 0:
         #     logger.info("Processing example: %d" % (len(all_results)))
         for k in batch:
@@ -195,10 +188,6 @@ def evaluate(
                 ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
         else:
             logger.info('eval:  {}'.format(np.nan))
-
-    # try to make sure the worker processes shut down
-    del eval_data_loader
-    gc.collect()
 
     if return_detailed:
         return all_results
@@ -343,7 +332,6 @@ def _train_step(
         settings: Settings,
         loss_tasks: set,
         train_data_set: DataIdMultiDataset,
-        n_gpu: int,
         device,
         model,
         batch,
@@ -355,20 +343,19 @@ def _train_step(
         param_optimizer,
         optimizer,
         scheduler,
+        sampler_to_update,
         log_tag='train'):
-    if n_gpu == 1:
-        for k in batch:
-            batch[k] = batch[k].to(device)
+
+    for k in batch:
+        batch[k] = batch[k].to(device)
     predictions = model(batch, train_data_set)
+    if sampler_to_update is not None and hasattr(sampler_to_update, 'update'):
+        sampler_to_update.update(batch, predictions, loss_handlers)
     train_data_set.just_in_time_targets(batch, predictions)
     loss_dict = OrderedDict(
         (h.field,
          (h.weight,
           h(False, index_epoch, global_step, batch, predictions, apply_weight=False))) for h in loss_handlers)
-
-    # free up memory
-    del predictions
-    del batch
 
     loss = None
     losses_to_write = OrderedDict()
@@ -390,8 +377,6 @@ def _train_step(
             global_step,
             train_result)
 
-    del loss_dict
-
     if loss is not None:
         if len(losses_to_write) < 4:
             # noinspection PyUnresolvedReferences
@@ -400,9 +385,6 @@ def _train_step(
         else:
             # noinspection PyUnresolvedReferences
             logger.info('{}: {}'.format(log_tag, loss.item()))
-        if n_gpu > 1:  # hmm - not sure how this is supposed to work
-            # noinspection PyUnresolvedReferences
-            loss = loss.mean()  # mean() to average on multi-gpu.
         if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
             # rescale loss for fp16 training
             # see https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html
@@ -436,13 +418,13 @@ def _train_step(
         for group in optimizer.param_groups:
             assert(group['lr'] >= 0)
 
-    # we're being super aggressive about releasing memory here because
-    # we're right on the edge of fitting in gpu
-    del loss
-    gc.collect()
-    torch.cuda.empty_cache()
-
     return True
+
+
+def iterate_and_update(update_fn, iterable):
+    for item in iterable:
+        yield item
+        update_fn()
 
 
 def train(
@@ -453,8 +435,8 @@ def train(
         train_data_set: DataIdMultiDataset,
         validation_data_set: DataIdMultiDataset,
         test_data_set: DataIdMultiDataset,
-        n_gpu: int,
-        device,
+        device: torch.device,
+        progress_update,
         load_from_path: str = None):
 
     if len(test_data_set) == 0:
@@ -486,31 +468,32 @@ def train(
     batch_sampler = None
     no_gradient_meta_learn_sampler = None
     gradient_meta_learn_sampler = None
-    if settings.optimization_settings.local_rank == -1:
-        if is_meta_learn_active:
-            if not settings.sampler_factory.is_batch_sampler() \
-                    or not settings.sampler_factory.is_one_task_at_a_time_sampler():
-                raise ValueError('Unsupported sampler_factory for meta learning: {}'.format(
-                    type(settings.sampler_factory)))
-            gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
+    train_samplers = list()
+    if is_meta_learn_active:
+        if not settings.sampler_factory.is_batch_sampler() \
+                or not settings.sampler_factory.is_one_task_at_a_time_sampler():
+            raise ValueError('Unsupported sampler_factory for meta learning: {}'.format(
+                type(settings.sampler_factory)))
+        gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
+            train_data_set,
+            settings.optimization_settings.train_batch_size,
+            settings.meta_learn_gradient_loss_tasks)
+        train_samplers.append(gradient_meta_learn_sampler)
+        if (settings.meta_learn_no_gradient_loss_tasks is not None
+                and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
+            no_gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
                 train_data_set,
                 settings.optimization_settings.train_batch_size,
-                settings.meta_learn_gradient_loss_tasks)
-            if (settings.meta_learn_no_gradient_loss_tasks is not None
-                    and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
-                no_gradient_meta_learn_sampler = settings.sampler_factory.make_sampler(
-                    train_data_set,
-                    settings.optimization_settings.train_batch_size,
-                    settings.meta_learn_no_gradient_loss_tasks)
-        else:
-            sampler_ = settings.sampler_factory.make_sampler(
-                train_data_set, settings.optimization_settings.train_batch_size)
-            if settings.sampler_factory.is_batch_sampler():
-                batch_sampler = sampler_
-            else:
-                train_sampler = sampler_
+                settings.meta_learn_no_gradient_loss_tasks)
+            train_samplers.append(no_gradient_meta_learn_sampler)
     else:
-        raise ValueError('Not supported')
+        sampler_ = settings.sampler_factory.make_sampler(
+            train_data_set, settings.optimization_settings.train_batch_size)
+        train_samplers.append(sampler_)
+        if settings.sampler_factory.is_batch_sampler():
+            batch_sampler = sampler_
+        else:
+            train_sampler = sampler_
 
     if is_meta_learn_active:
         no_gradient_meta_learn_loader = None if no_gradient_meta_learn_sampler is None else TorchDataLoader(
@@ -543,6 +526,8 @@ def train(
         settings.optimization_settings.train_batch_size /
         settings.optimization_settings.gradient_accumulation_steps))
 
+    progress_update.update_batch_total(num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs)
+
     num_train_steps_prediction_heads = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
     num_train_steps_other = num_train_steps_per_epoch * (
         settings.optimization_settings.num_train_epochs
@@ -569,13 +554,6 @@ def train(
     if settings.optimization_settings.fp16:
         model.half()
     model.to(device)
-    if settings.optimization_settings.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[settings.optimization_settings.local_rank],
-            output_device=settings.optimization_settings.local_rank)
-    elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
     if settings.optimization_settings.fp16:
@@ -588,7 +566,12 @@ def train(
         param_optimizer = list(model.named_parameters())
 
     def is_no_decay(param_name):
-        return param_name.split('.')[-1] in ['bias', 'gamma', 'beta']
+        name_parts = param_name.split('.')
+        if name_parts[-1] in ['bias', 'gamma', 'beta']:
+            return True
+        if len(name_parts) > 1 and name_parts[-2] == 'LayerNorm' and name_parts[-1] == 'weight':
+            return True
+        return False
 
     non_prediction_head_parameters = None
     if num_epochs_prediction_head_only_train > 0 or start_final_epochs_prediction_head_only_train:
@@ -647,12 +630,8 @@ def train(
     logger.info("  Num steps (heads) = %d", num_train_steps_prediction_heads)
     logger.info("  Num steps (all param) = %d", num_train_steps_other)
 
-    if settings.show_epoch_progress:
-        epoch_range = trange(int(settings.optimization_settings.num_train_epochs), desc="Epoch")
-    else:
-        epoch_range = range(int(settings.optimization_settings.num_train_epochs))
-
-    for index_epoch in epoch_range:
+    for index_epoch in iterate_and_update(
+            progress_update.update_epoch, range(int(settings.optimization_settings.num_train_epochs))):
 
         logger.info('Starting epoch {}'.format(index_epoch))
 
@@ -670,13 +649,9 @@ def train(
                 if no_gradient_meta_learn_loader is not None else None
             gradient_meta_learn_iterator = iter(gradient_meta_learn_loader)
 
-            if settings.show_step_progress:
-                step_iterator = trange(
-                    num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)
-            else:
-                step_iterator = range(
-                    num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)
-            for step in step_iterator:
+            for step in iterate_and_update(
+                    progress_update.update_batch,
+                    range(num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)):
                 restore_state = deepcopy(model.state_dict())
                 for key, p in model.named_parameters():
                     restore_state[key].requires_grad = p.requires_grad
@@ -690,6 +665,7 @@ def train(
                             no_gradient_meta_learn_iterator = iter(no_gradient_meta_learn_loader)
                             inner_batch = next(no_gradient_meta_learn_iterator)
                         current_loss_tasks = settings.meta_learn_no_gradient_loss_tasks
+                        sampler_to_update = no_gradient_meta_learn_sampler
                         log_tag = 'inner_no_grad'
                     else:
                         if index_inner_step == settings.num_meta_learn_no_gradient_samples:
@@ -707,15 +683,15 @@ def train(
                             gradient_meta_learn_iterator = iter(gradient_meta_learn_loader)
                             inner_batch = next(gradient_meta_learn_iterator)
                         current_loss_tasks = settings.meta_learn_gradient_loss_tasks
+                        sampler_to_update = gradient_meta_learn_sampler
                         log_tag = 'inner_grad'
                     _train_step(
                         settings,
                         current_loss_tasks,
-                        train_data_set, n_gpu, device, model, inner_batch, step, index_epoch, global_step,
+                        train_data_set, device, model, inner_batch, step, index_epoch, global_step,
                         loss_handlers, train_results, param_optimizer,
-                        inner_meta_learn_optimizer, None, log_tag=log_tag)
+                        inner_meta_learn_optimizer, None, sampler_to_update, log_tag=log_tag)
                 logger.info('meta epoch {}, step {}'.format(index_epoch, step))
-                optimizer.zero_grad()
                 restore_model_parameters_and_set_meta_gradient(
                     model, restore_state, gradient_state, settings.num_meta_learn_gradient_samples)
                 optimizer.step()
@@ -723,22 +699,19 @@ def train(
                 model.zero_grad()
                 global_step += 1
         else:
-            if settings.show_step_progress:
-                batch_iterator = tqdm(train_data_loader, desc="Iteration")
-            else:
-                batch_iterator = train_data_loader
+            sampler_to_update = batch_sampler if batch_sampler is not None else train_sampler
 
-            for step, batch in enumerate(batch_iterator):
+            for step, batch in iterate_and_update(progress_update.update_batch, enumerate(train_data_loader)):
                 if _train_step(
                         settings,
                         settings.meta_learn_gradient_loss_tasks if is_meta_learn_active else settings.loss_tasks,
-                        train_data_set, n_gpu, device, model, batch, step, index_epoch, global_step,
-                        loss_handlers, train_results, param_optimizer, optimizer, scheduler):
+                        train_data_set, device, model, batch, step, index_epoch, global_step,
+                        loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update):
                     global_step += 1
 
         write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
-            evaluate(settings, model, loss_handlers, device, index_epoch,
+            evaluate(settings, model, loss_handlers, train_samplers, device, index_epoch,
                      global_step, validation_results, validation_data_set)
             write_loss_curve(output_validation_curve_path, validation_results)
 
@@ -749,14 +722,14 @@ def train(
 
     if len(validation_data_set) > 0:
         all_validation = evaluate(
-            settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
+            settings, model, loss_handlers, train_samplers, device, settings.optimization_settings.num_train_epochs - 1,
             global_step, TaskResults(), validation_data_set, return_detailed=True)
     else:
         all_validation = {}
 
     if test_data_set is not None and len(test_data_set) > 0:
         all_test = evaluate(
-            settings, model, loss_handlers, device, settings.optimization_settings.num_train_epochs - 1,
+            settings, model, loss_handlers, train_samplers, device, settings.optimization_settings.num_train_epochs - 1,
             global_step, TaskResults(), test_data_set, return_detailed=True)
     else:
         all_test = {}

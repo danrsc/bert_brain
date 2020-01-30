@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import hashlib
 import pickle
+import logging
 
 from transformers import BertTokenizer
 from spacy.language import Language
@@ -14,6 +15,10 @@ from .data_preparer import DataPreparer, PhasePreprocessorMappingT, SplitFunctio
 from .data_id_dataset import DataIdDataset
 
 __all__ = ['CorpusDatasetFactory']
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel('INFO')
 
 
 @dataclass(frozen=True)
@@ -93,7 +98,7 @@ class CorpusDatasetFactory:
             init_file_path = os.path.join(data_set_path, DataIdDataset.dataset_init_file)
 
             if os.path.exists(init_file_path):
-                print('Using cached {}'.format(corpus.corpus_key), flush=True)
+                logger.info('Using cached {}'.format(corpus.corpus_key))
                 return data_set_path
 
         print('Loading {}...'.format(corpus.corpus_key), end='', flush=True)

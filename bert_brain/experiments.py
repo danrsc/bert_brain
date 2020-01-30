@@ -834,13 +834,13 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=5,
+                num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
-                learning_rate=5e-3,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=1000),
+                learning_rate=1e-5,
+                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=2500),
                 train_batch_size=8,
                 predict_batch_size=8,
-                num_loader_workers=1),
+                num_loader_workers=8),
             loss_tasks=set(),
             data_id_in_batch_keys=None,
             field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
@@ -849,7 +849,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             use_sequential_sampling_on_evaluate=False,
-            num_runs=1)
+            num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
                 'response_id', 'num_response_data_fields', 20,

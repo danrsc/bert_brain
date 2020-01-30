@@ -381,6 +381,9 @@ class DataIdDataset(torch.utils.data.Dataset):
             index -= len(self._response_data_key_to_unique_ids[response_key])
         raise IndexError('Index out of bounds: {}'.format(index))
 
+    def response_field_for_id(self, response_id):
+        return self.response_fields[response_id]
+
     def __getitem__(self, item):
         if self._index_responses_separately:
             response_id, response_data_key_, item = self._response_key_and_index(item)

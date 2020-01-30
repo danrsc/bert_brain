@@ -146,9 +146,4 @@ class LinearContextualParameterGeneration(GraphPart):
                     # overwrite batch[k] if it exists
                     batch[k] = graph_part_outputs[k]
 
-        # detach the variables in the contextualized modules
-        for name in self._generated_parameters:
-            module, attr_name, shape = self._generated_parameters[name]
-            setattr(module, attr_name, getattr(module, attr_name).detach())
-
         return outputs

@@ -10,7 +10,7 @@ import numpy as np
 from scipy.special import logsumexp
 
 from .experiments import singleton_variation, task_hash
-from .modeling import critic_types
+from .modeling import critic_types, NamedTargetMaskedLossBase
 from .result_output import read_predictions
 
 __all__ = [
@@ -524,62 +524,29 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma)
 
 
-_regression_critic_types = frozenset(t.__name__ for t in [
-    critic_types.NamedTargetStopWordAwareMSE,
-    critic_types.NamedTargetStopWordAwareMAE,
-    critic_types.NamedTargetStopWordAwareKLeastSE,
-    critic_types.NamedTargetStopWordAwareKLeastSEEvalUpdate,
-    critic_types.NamedTargetStopWordAwareKLeastAE,
-    critic_types.NamedTargetStopWordAwareKLeastAEEvalUpdate,
-    critic_types.NamedTargetStopWordAwarePearsonDistance,
-    critic_types.NamedTargetSingleMSE,
-    critic_types.NamedTargetSingleMAE,
-    critic_types.NamedTargetSingleKLeastSE,
-    critic_types.NamedTargetSingleKLeastSEEvalUpdate,
-    critic_types.NamedTargetSingleKLeastAE,
-    critic_types.NamedTargetSingleKLeastAEEvalUpdate,
-    critic_types.NamedTargetSinglePearsonDistance])
-
-_binary_classifier_types = frozenset(t.__name__ for t in [
-    critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits,
-    critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits])
-
-_classifier_types = frozenset(t.__name__ for t in [
-    critic_types.NamedTargetStopWordAwareCrossEntropy,
-    critic_types.NamedTargetSingleCrossEntropy,
-    critic_types.NamedTargetStopWordAwareSoftLabelCrossEntropy,
-    critic_types.NamedTargetSingleSoftLabelCrossEntropy])
-
-
-def _check_all_types_present():
-    all_present = _regression_critic_types.union(_binary_classifier_types).union(_classifier_types)
-    for critic_type_str in critic_types.__all__:
-        if critic_type_str not in all_present:
-            raise AssertionError('type: {} not present in mappings'.format(critic_type_str))
-
-
-_check_all_types_present()
-
-
 def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True):
-    if which_loss in _regression_critic_types:
+    if not hasattr(critic_types, which_loss):
+        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(critic_types.__all__))
+    critic_type: NamedTargetMaskedLossBase = getattr(critic_types, which_loss)
+    if critic_type.is_classification_loss():
+        binary_classifier_types = frozenset(t.__name__ for t in [
+            critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits,
+            critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits])
+        if critic_type.__name__ in binary_classifier_types:
+            if using_aggregator:
+                factory, factory_kwargs = aggregator_class_handler, dict(is_binary=True)
+            else:
+                factory, factory_kwargs = class_handler, dict(is_binary=True)
+        else:
+            if using_aggregator:
+                factory, factory_kwargs = aggregator_class_handler, None
+            else:
+                factory, factory_kwargs = class_handler, None
+    else:
         if using_aggregator:
             factory, factory_kwargs = aggregator_regression_handler, None
         else:
             factory, factory_kwargs = regression_handler, None
-    elif which_loss in _binary_classifier_types:
-        if using_aggregator:
-            factory, factory_kwargs = aggregator_class_handler, dict(is_binary=True)
-        else:
-            factory, factory_kwargs = class_handler, dict(is_binary=True)
-    elif which_loss in _classifier_types:
-        if using_aggregator:
-            factory, factory_kwargs = aggregator_class_handler, None
-        else:
-            factory, factory_kwargs = class_handler, None
-    else:
-        raise ValueError('Unknown value for which_loss. Known values are: {}'.format(
-            _regression_critic_types.union(_binary_classifier_types).union(_classifier_types)))
     loss_kwargs = dict() if loss_kwargs is None else dict(loss_kwargs)
     if factory_kwargs is not None:
         loss_kwargs.update(factory_kwargs)

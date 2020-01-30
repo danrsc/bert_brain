@@ -5,6 +5,7 @@ from . import grouping_modules
 from . import bert_multi_prediction_head
 from . import contextual_parameter_generation
 from . import specialized_loss
+from . import task_uncertainty_module
 from . import utility_modules
 
 from .critic_types import *
@@ -14,10 +15,11 @@ from .grouping_modules import *
 from .bert_multi_prediction_head import *
 from .contextual_parameter_generation import *
 from .specialized_loss import *
+from .task_uncertainty_module import *
 from .utility_modules import *
 
 __all__ = ['critic_types', 'keyed_modules', 'graph_part', 'grouping_modules', 'bert_multi_prediction_head',
-           'specialized_loss', 'utility_modules', 'contextual_parameter_generation']
+           'specialized_loss', 'utility_modules', 'contextual_parameter_generation', 'task_uncertainty_module']
 __all__.extend(keyed_modules.__all__)
 __all__.extend(graph_part.__all__)
 __all__.extend(grouping_modules.__all__)
@@ -25,6 +27,7 @@ __all__.extend(bert_multi_prediction_head.__all__)
 __all__.extend(contextual_parameter_generation.__all__)
 __all__.extend(specialized_loss.__all__)
 __all__.extend(utility_modules.__all__)
+__all__.extend(task_uncertainty_module.__all__)
 
 
 def _assert_critic_subclasses_recursive():

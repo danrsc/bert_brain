@@ -7,7 +7,9 @@ import queue
 from tqdm import tqdm
 from threading import Thread
 from multiprocessing import get_context
+from multiprocessing.context import BaseContext
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Optional, Union
 import torch
 
 
@@ -17,7 +19,10 @@ __all__ = ['cuda_map_unordered',
            'cuda_memory_info',
            'DeviceMemoryInfo',
            'ProgressContext',
-           'cuda_auto_empty_cache_context']
+           'cuda_auto_empty_cache_context',
+           'worker_update_progress',
+           'worker_update_progress_total',
+           'worker_device']
 
 
 @contextmanager
@@ -36,7 +41,12 @@ def cuda_auto_empty_cache_context(device):
             torch.cuda.empty_cache()
 
 
-def _set_device_id_and_initialize(device_queue, no_available_queue, initializer, initargs):
+_worker_progress_queue = None
+_worker_device = None
+
+
+def _set_device_id_and_initialize(device_queue, no_available_queue, progress_queue, initializer, initargs):
+    global _worker_progress_queue, _worker_device
 
     try:
         device_id = device_queue.get(timeout=5)
@@ -50,11 +60,33 @@ def _set_device_id_and_initialize(device_queue, no_available_queue, initializer,
     print('binding to device {}'.format(device_id))
 
     torch.cuda.set_device(device_id)
+    _worker_progress_queue = progress_queue
+    _worker_device = torch.device('cuda', device_id)
 
     if initializer is not None:
         if initargs is None:
             initargs = ()
         initializer(*initargs)
+
+
+def worker_device():
+    return _worker_device
+
+
+def worker_update_progress(count: int = 1, ignore_if_no_progress_context=False):
+    if _worker_progress_queue is None:
+        if ignore_if_no_progress_context:
+            return
+        raise ValueError('No progress context available')
+    _worker_progress_queue.put(count)
+
+
+def worker_update_progress_total(increment, ignore_if_no_progress_context=False):
+    if _worker_progress_queue is None:
+        if ignore_if_no_progress_context:
+            return
+        raise ValueError('No progress context available')
+    _worker_progress_queue.put((_progress_update_total, increment))
 
 
 def _monitor_devices(max_workers, min_memory, starting_ids, device_queue, no_available_queue):
@@ -124,6 +156,7 @@ class OutOfMemoryRetry(object):
 
 
 _progress_stop_sentinel = 'kill_progress_monitor'
+_progress_update_total = 'update_total'
 
 
 def _monitor_progress(progress_t, progress_queue):
@@ -131,6 +164,14 @@ def _monitor_progress(progress_t, progress_queue):
         p = progress_queue.get()
         if p == _progress_stop_sentinel:
             return
+        if isinstance(p, tuple):
+            if p[0] == _progress_update_total:
+                if progress_t.total is None:
+                    progress_t.total = p[1]
+                else:
+                    progress_t.total += p[1]
+            else:
+                raise RuntimeError('Invalid value in progress_queue: {}'.format(p))
         if p < 0:
             progress_t.n = progress_t.n - p
             progress_t.refresh()
@@ -175,9 +216,15 @@ class ProgressContext(object):
 
 
 def cuda_map_unordered(
-        min_memory, func, iterables,
-        max_workers=None, mp_context=None, initializer=None, initargs=None,
-        num_cuda_memory_retries=0, chunksize=1):
+        min_memory_gb: int,
+        func,
+        iterables,
+        max_workers=None,
+        mp_context: Optional[Union[BaseContext, ProgressContext]] = None,
+        initializer=None,
+        initargs=None,
+        num_cuda_memory_retries: int = 0,
+        chunksize: int = 1):
 
     items = iterables
 
@@ -190,7 +237,7 @@ def cuda_map_unordered(
         retries = list()
 
         with cuda_pool_executor(
-                min_memory, max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs) as ex:
+                min_memory_gb, max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs) as ex:
 
             if num_cuda_memory_retries > 0:
                 result = ex.map(_cuda_memory_retry_wrap, items, chunksize=chunksize)
@@ -270,12 +317,24 @@ class CudaOutOfMemoryShouldRetry(object):
 class CudaPoolExecutor(object):
 
     @staticmethod
-    def _create_process_pool_executor(min_memory, max_workers, mp_context, initializer, initargs):
+    def _create_process_pool_executor(
+            min_memory_gb: int,
+            max_workers: int,
+            mp_context: Union[BaseContext, ProgressContext],
+            initializer,
+            initargs):
+
+        min_memory = min_memory_gb * 1024 ** 3
+        progress_queue = None
+
         memory_info = cuda_memory_info()
         if max_workers is None:
             max_workers = len(memory_info)
         if mp_context is None:
             mp_context = get_context('spawn')
+        elif isinstance(mp_context, ProgressContext):
+            progress_queue = mp_context.progress_queue
+            mp_context = mp_context.mp_context
 
         memory_info = [
             (device_id, device_info.free) for device_id, device_info in enumerate(memory_info)]
@@ -307,7 +366,7 @@ class CudaPoolExecutor(object):
             max_workers=max_workers,
             mp_context=mp_context,
             initializer=_set_device_id_and_initialize,
-            initargs=(device_queue, no_available_queue, initializer, initargs))
+            initargs=(device_queue, no_available_queue, progress_queue, initializer, initargs))
 
         return process_pool_executor, no_available_queue
 

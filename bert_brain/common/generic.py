@@ -1,10 +1,11 @@
 import inspect
 from itertools import zip_longest
 import re
+from datetime import datetime
 
 
 __all__ = ['zip_equal', 'copy_from_properties', 'get_keyword_properties', 'SwitchRemember', 'camel_to_snake',
-           'MultiReplace', 'split_with_indices']
+           'MultiReplace', 'split_with_indices', 'TimeLines', 'TimeLinesAccumulator']
 
 
 def zip_equal(*it):
@@ -160,3 +161,40 @@ class MultiReplace:
 
     def replace(self, text):
         return self._regex.sub(self._get_replacement, text)
+
+
+class TimeLinesAccumulator:
+
+    def __init__(self, name):
+        self.name = name
+        self.count = 0
+        self.time = None
+
+    def update(self, increment, report=False):
+        self.count += 1
+        if self.time is None:
+            self.time = increment
+        else:
+            self.time += increment
+        if report:
+            self.report()
+
+    def report(self):
+        print('{}: {}'.format(self.name, self.time / self.count), flush=True)
+
+
+class TimeLines:
+
+    _accumulators = dict()
+
+    def __init__(self, name):
+        if name not in TimeLines._accumulators:
+            TimeLines._accumulators[name] = TimeLinesAccumulator(name)
+        self.accumulator = TimeLines._accumulators[name]
+        self.start = None
+
+    def __enter__(self):
+        self.start = datetime.now()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.accumulator.update(datetime.now() - self.start, report=True)

@@ -176,24 +176,13 @@ def run_occlusion(variation_set_name, index_run=None):
     named_settings = named_variations(variation_set_name)
     for variation, training_variation in named_settings:
         settings = named_settings[(variation, training_variation)]
-        if settings.optimization_settings.local_rank == -1 or settings.no_cuda:
-            if not torch.cuda.is_available or settings.no_cuda:
-                device = torch.device('cpu')
-            else:
-                device_id, free = cuda_most_free_device()
-                torch.cuda.set_device(device_id)
-                logger.info('binding to device {} with {} memory free'.format(device_id, free))
-                device = torch.device('cuda:{}'.format(device_id))
-            n_gpu = 1  # torch.cuda.device_count()
+        if not torch.cuda.is_available or settings.no_cuda:
+            device = torch.device('cpu')
         else:
-            # noinspection PyUnresolvedReferences
-            device = torch.device('cuda', settings.local_rank)
-            n_gpu = 1
-            # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-            # noinspection PyUnresolvedReferences
-            torch.distributed.init_process_group(backend='nccl')
-            if settings.optimization_settings.fp16:
-                settings.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
+            device_id, free = cuda_most_free_device()
+            torch.cuda.set_device(device_id)
+            logger.info('binding to device {} with {} memory free'.format(device_id, free))
+            device = torch.device('cuda:{}'.format(device_id))
 
         print('Running on variation: {}'.format(training_variation))
 
@@ -205,7 +194,7 @@ def run_occlusion(variation_set_name, index_run=None):
 
         for index_run in run_iterator:
             run_results = _run_occlusion_for_variation(
-                paths, corpus_dataset_factory, settings, index_run, device, n_gpu)
+                paths, corpus_dataset_factory, settings, index_run, device, n_gpu=1)
             write_occlusion_predictions(
                 os.path.join(paths.result_path, 'run_{}'.format(index_run), 'output_validation_occlusion.npz'),
                 run_results)

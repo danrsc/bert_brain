@@ -152,8 +152,6 @@ class OptimizationSettings:
     loss_scale: float = 128
     # Number of updates steps to accumulate before performing a backward/update pass.
     gradient_accumulation_steps: int = 1
-    # local_rank for distributed training on gpus; probably don't need this
-    local_rank: int = -1
     # During the first num_epochs_train_prediction_heads_only, only the prediction heads will be trained
     num_epochs_train_prediction_heads_only: int = 0
     # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
@@ -373,10 +371,6 @@ class Settings:
 
     # The number of times to run the training
     num_runs: int = 1
-
-    # turn on tqdm at more granular levels
-    show_epoch_progress: bool = False
-    show_step_progress: bool = False
 
     # Whether not to use CUDA when available
     no_cuda: bool = False

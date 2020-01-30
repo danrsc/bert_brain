@@ -18,15 +18,17 @@ from shutil import rmtree
 import argparse
 import logging
 import os
-from dataclasses import replace
-from typing import Optional
+import itertools
+from dataclasses import replace, dataclass
+from typing import Optional, Callable
 from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
 
 import torch
 
-from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, CorpusDatasetFactory, \
-    Settings, task_hash, set_random_seeds, named_variations, singleton_variation, train, DataIdMultiDataset
+from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, ProgressContext, cuda_map_unordered, \
+    worker_update_progress, worker_update_progress_total, worker_device, CorpusDatasetFactory, Settings, task_hash, \
+    set_random_seeds, named_variations, singleton_variation, train, DataIdMultiDataset
 from bert_brain_paths import Paths
 
 
@@ -37,10 +39,125 @@ replace_root_logger_handler()
 logger = logging.getLogger(__name__)
 
 
-def progress_iterate(iterable, progress_bar):
-    for item in iterable:
-        yield item
-        progress_bar.update()
+def _dummy_update():
+    return
+
+
+def _dummy_update_total(_):
+    return
+
+
+@dataclass(frozen=True)
+class ProgressUpdater:
+    update_batch: Callable[[], None] = _dummy_update
+    update_epoch: Callable[[], None] = _dummy_update
+    update_run: Callable[[], None] = _dummy_update
+    update_batch_total: Callable[[int], None] = _dummy_update_total
+
+
+def _worker_run_variation(name, index_variation, index_run, force_cache_miss_set, progress_level):
+    named_settings = named_variations(name)
+    settings = None
+    variation = None
+    for index_current_variation, (variation_, training_variation) in enumerate(named_settings):
+        if index_current_variation == index_variation:
+            settings = named_settings[(variation_, training_variation)]
+            variation = variation_
+            break
+    if settings is None:
+        raise IndexError('No variation found for index_variation {} in name: {}'.format(index_variation, name))
+
+    corpus_dataset_factory, paths = _io_setup(variation, settings)
+
+    progress_updater_kwargs = dict()
+    if progress_level == 'runs':
+        progress_updater_kwargs['update_run'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+    elif progress_level == 'epochs':
+        progress_updater_kwargs['update_epoch'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+    elif progress_level == 'batches':
+        progress_updater_kwargs['update_batch'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_batch_total'] = lambda increment: worker_update_progress_total(
+            increment, ignore_if_no_progress_context=True)
+    else:
+        raise ValueError('Unknown progress_level: {}'.format(progress_level))
+    progress_updater = ProgressUpdater(**progress_updater_kwargs)
+
+    _train_single_run(
+        settings, paths, index_run, worker_device(), corpus_dataset_factory, force_cache_miss_set, progress_updater)
+
+
+def _io_setup(set_name, settings):
+    hash_ = task_hash(settings)
+    paths = Paths()
+    paths.model_path = os.path.join(paths.model_path, set_name, hash_)
+    paths.result_path = os.path.join(paths.result_path, set_name, hash_)
+
+    corpus_dataset_factory = CorpusDatasetFactory(cache_path=paths.cache_path)
+
+    if not os.path.exists(paths.model_path):
+        os.makedirs(paths.model_path)
+    if not os.path.exists(paths.result_path):
+        os.makedirs(paths.result_path)
+
+    return corpus_dataset_factory, paths
+
+
+def _train_single_run(
+        settings, paths, index_run, device, corpus_dataset_factory, force_cache_miss_set, progress_updater):
+    output_dir = os.path.join(paths.result_path, 'run_{}'.format(index_run))
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    completion_file_path = os.path.join(output_dir, 'completed.txt')
+
+    if os.path.exists(completion_file_path):
+        return
+
+    output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
+
+    seed = set_random_seeds(settings.seed, index_run, n_gpu=1)
+
+    data_set_paths = list()
+    for corpus in settings.corpora:
+        data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
+            seed,
+            index_run,
+            corpus,
+            settings.preprocessors,
+            settings.get_split_function(corpus.corpus_key, index_run),
+            settings.preprocess_fork_fn,
+            force_cache_miss_set is not None and (
+                    corpus.corpus_key in force_cache_miss_set or '__all__' in force_cache_miss_set),
+            paths,
+            settings.max_sequence_length))
+
+    train_data, validation_data, test_data = (
+        DataIdMultiDataset(
+            which,
+            data_set_paths,
+            settings.all_loss_tasks,
+            data_id_in_batch_keys=settings.data_id_in_batch_keys,
+            filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
+            field_spec_replacers=settings.field_spec_replacers)
+        for which in ('train', 'validation', 'test'))
+
+    load_from_path = None
+    if settings.load_from is not None:
+        # noinspection PyCallingNonCallable
+        (load_from_variation, _), load_from_settings = singleton_variation(settings.load_from)
+        # noinspection PyCallingNonCallable
+        load_from_index_run = index_run \
+            if settings.load_from_run_map is None else settings.load_from_run_map(index_run)
+        load_from_path = os.path.join(
+            Paths().model_path,
+            load_from_variation,
+            task_hash(load_from_settings),
+            'run_{}'.format(load_from_index_run))
+
+    train(settings, output_dir, completion_file_path, output_model_path,
+          train_data, validation_data, test_data, device, progress_updater, load_from_path)
+    progress_updater.update_run()
 
 
 def run_variation(
@@ -48,92 +165,32 @@ def run_variation(
             settings: Settings,
             force_cache_miss_set: Optional[set],
             device: torch.device,
-            n_gpu: int,
-            progress_bar=None):
+            progress_updater=None):
 
     if settings.optimization_settings.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
                             settings.optimization_settings.gradient_accumulation_steps))
 
-    # TODO: seems like this is taken care of below?
-    # settings = replace(
-    #   settings, train_batch_size=int(settings.train_batch_size / settings.gradient_accumulation_steps))
+    corpus_dataset_factory, paths = _io_setup(set_name, settings)
 
-    def io_setup():
-        hash_ = task_hash(settings)
-        paths_ = Paths()
-        paths_.model_path = os.path.join(paths_.model_path, set_name, hash_)
-        paths_.result_path = os.path.join(paths_.result_path, set_name, hash_)
-
-        corpus_dataset_factory_ = CorpusDatasetFactory(cache_path=paths_.cache_path)
-
-        if not os.path.exists(paths_.model_path):
-            os.makedirs(paths_.model_path)
-        if not os.path.exists(paths_.result_path):
-            os.makedirs(paths_.result_path)
-
-        return corpus_dataset_factory_, paths_
-
-    corpus_dataset_factory, paths = io_setup()
-
-    if progress_bar is None:
+    progress_bar = None
+    if progress_updater is None:
         progress_bar = tqdm(total=settings.num_runs, desc='Runs')
+        progress_updater = ProgressUpdater(update_run=progress_bar.update)
 
-    for index_run in progress_iterate(range(settings.num_runs), progress_bar):
+    for index_run in range(settings.num_runs):
+        _train_single_run(
+            settings, paths, index_run, device, corpus_dataset_factory, force_cache_miss_set, progress_updater)
 
-        output_dir = os.path.join(paths.result_path, 'run_{}'.format(index_run))
+    if progress_bar is not None:
+        progress_bar.close()
 
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
 
-        completion_file_path = os.path.join(output_dir, 'completed.txt')
-
-        if os.path.exists(completion_file_path):
-            continue
-
-        output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
-
-        seed = set_random_seeds(settings.seed, index_run, n_gpu)
-
-        data_set_paths = list()
-        for corpus in settings.corpora:
-            data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
-                seed,
-                index_run,
-                corpus,
-                settings.preprocessors,
-                settings.get_split_function(corpus.corpus_key, index_run),
-                settings.preprocess_fork_fn,
-                force_cache_miss_set is not None and (
-                        corpus.corpus_key in force_cache_miss_set or '__all__' in force_cache_miss_set),
-                paths,
-                settings.max_sequence_length))
-
-        train_data, validation_data, test_data = (
-            DataIdMultiDataset(
-                which,
-                data_set_paths,
-                settings.all_loss_tasks,
-                data_id_in_batch_keys=settings.data_id_in_batch_keys,
-                filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
-                field_spec_replacers=settings.field_spec_replacers)
-            for which in ('train', 'validation', 'test'))
-
-        load_from_path = None
-        if settings.load_from is not None:
-            # noinspection PyCallingNonCallable
-            (load_from_variation, _), load_from_settings = singleton_variation(settings.load_from)
-            # noinspection PyCallingNonCallable
-            load_from_index_run = index_run \
-                if settings.load_from_run_map is None else settings.load_from_run_map(index_run)
-            load_from_path = os.path.join(
-                Paths().model_path,
-                load_from_variation,
-                task_hash(load_from_settings),
-                'run_{}'.format(load_from_index_run))
-
-        train(settings, output_dir, completion_file_path, output_model_path,
-              train_data, validation_data, test_data, n_gpu, device, load_from_path)
+def _update_batch_total(progress_bar, increment):
+    if progress_bar.total is None:
+        progress_bar.total = increment
+    else:
+        progress_bar.total = progress_bar.total + increment
 
 
 def main():
@@ -151,7 +208,15 @@ def main():
     parser.add_argument('--log_level', action='store', required=False, default='WARNING',
                         help='Sets the log-level. Defaults to WARNING')
 
-    parser.add_argument('--no_cuda', action='store_true', required=False, help='If specified, model will be run on CPU')
+    parser.add_argument('--progress_level', action='store', required=False, default='runs',
+                        help='Sets the resolution of the progress bar. One of (runs, epochs, batches)')
+
+    parser.add_argument('--num_workers', action='store', required=False, default=1, type=int,
+                        help='If 0, model will be run on CPU, If > 1, runs will be executed in parallel on GPUs')
+
+    parser.add_argument('--min_memory_gb', action='store', required=False, default=4, type=int,
+                        help='How many GB must be free on a GPU for a worker to run on that GPU. '
+                             'Ignored if num_workers < 2')
 
     parser.add_argument(
         '--name', action='store', required=False, default='erp', help='Which set to run')
@@ -194,39 +259,75 @@ def main():
         sys.exit(0)
 
     named_settings = named_variations(args.name)
-    progress_bar = tqdm(total=sum(named_settings[k].num_runs for k in named_settings), desc='Runs')
-    for variation, training_variation in named_settings:
-        settings_ = named_settings[(variation, training_variation)]
-        if args.no_cuda:
-            settings_ = replace(settings_, no_cuda=True)
 
-        if settings_.optimization_settings.local_rank == -1 or settings_.no_cuda:
+    total = None
+    if args.progress_level == 'runs':
+        total = sum(named_settings[k].num_runs for k in named_settings)
+        desc = 'Runs'
+    elif args.progress_level == 'epochs':
+        total = sum(named_settings[k].num_runs * named_settings[k].optimization_settings.num_train_epochs
+                    for k in named_settings)
+        desc = 'Epochs'
+    elif args.progress_level == 'batches':
+        # leave total unspecified here, we will dynamically compute it
+        desc = 'Batches'
+    else:
+        raise ValueError('Unknown value for progress_level: {}'.format(args.progress_level))
+
+    if args.num_workers > 1:
+        indices_variation = list()
+        indices_run = list()
+        for index_variation, k in enumerate(named_settings):
+            indices_variation.extend([index_variation] * named_settings[k].num_runs)
+            indices_run.extend(range(named_settings[k].num_runs))
+        with ProgressContext(total=total, desc=desc) as progress_context:
+            for _ in cuda_map_unordered(
+                    min_memory_gb=args.min_memory_gb,
+                    func=_worker_run_variation,
+                    iterables=[
+                        itertools.repeat(args.name, len(indices_variation)),
+                        indices_variation,
+                        indices_run,
+                        itertools.repeat(force_cache_miss_set, len(indices_variation)),
+                        itertools.repeat(args.progress_level)],
+                    max_workers=args.num_workers,
+                    mp_context=progress_context):
+                pass
+    else:
+        progress_bar = tqdm(total=total, desc=desc)
+
+        progress_updater_kwargs = dict()
+        if args.progress_level == 'runs':
+            progress_updater_kwargs['update_run'] = progress_bar.update
+        elif args.progress_level == 'epochs':
+            progress_updater_kwargs['update_epoch'] = progress_bar.update
+        elif args.progress_level == 'batches':
+            progress_updater_kwargs['update_batch'] = progress_bar.update
+            progress_updater_kwargs['update_batch_total'] = lambda increment: _update_batch_total(
+                progress_bar, increment)
+        else:
+            raise ValueError('Unknown progress_level: {}'.format(args.progress_level))
+        progress_updater = ProgressUpdater(**progress_updater_kwargs)
+
+        for variation, training_variation in named_settings:
+            settings_ = named_settings[(variation, training_variation)]
+            if args.num_workers == 0:
+                settings_ = replace(settings_, no_cuda=True)
+
             if not torch.cuda.is_available or settings_.no_cuda:
                 device = torch.device('cpu')
             else:
                 device_id, free = cuda_most_free_device()
                 device = torch.device('cuda', device_id)
                 logger.info('binding to device {} with {} memory free'.format(device_id, free))
-            n_gpu = 1  # torch.cuda.device_count()
-        else:
-            device = torch.device('cuda', settings_.local_rank)
-            n_gpu = 1
-            # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-            # noinspection PyUnresolvedReferences
-            torch.distributed.init_process_group(backend='nccl')
-            if settings_.optimization_settings.fp16:
-                logger.info("16-bits training currently not supported in distributed training")
-                settings_.optimization_settings.fp16 = False  # (see https://github.com/pytorch/pytorch/pull/13496)
-        logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits trainiing: {}".format(
-            device,
-            n_gpu,
-            bool(settings_.optimization_settings.local_rank != -1),
-            settings_.optimization_settings.fp16))
+            logger.info("device: {}, 16-bits trainiing: {}".format(
+                device,
+                settings_.optimization_settings.fp16))
 
-        with cuda_auto_empty_cache_context(device):
-            run_variation(variation, settings_, force_cache_miss_set, device, n_gpu, progress_bar=progress_bar)
+            with cuda_auto_empty_cache_context(device):
+                run_variation(variation, settings_, force_cache_miss_set, device, progress_updater)
 
-    progress_bar.close()
+        progress_bar.close()
 
 
 if __name__ == '__main__':
