@@ -3,9 +3,7 @@ from typing import Iterable, Sequence, Callable, MutableMapping, Mapping, \
     Optional, Union, Tuple, OrderedDict as OrderedDictT, Any
 from inspect import signature
 
-import math
 import numpy as np
-from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.optimizer import Optimizer
 
 from transformers import AdamW
@@ -14,79 +12,11 @@ from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, \
     ResponseKind, NaturalStoriesMakeLeaveStoriesOut, corpus_types, CorpusBase, \
     UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT, SamplerFactory, RandomSamplerFactory
-from .common import SwitchRemember
-from .modeling import critic_types, GraphPart, NamedTargetMaskedLossBase
+from .modeling import critic_types, GraphPart, NamedTargetMaskedLossBase, LearningRateScheduleFactory, \
+    learning_rate_schedules
 
 
-__all__ = ['LearningRateSchedule', 'OptimizationSettings', 'Settings',
-           'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory']
-
-
-@dataclass
-class LearningRateSchedule:
-    schedule: str = 'linear_with_warmup'
-    num_warmup_steps: Optional[Union[int, float]] = 0.1
-    num_cycles: Optional[Union[int, float]] = None
-
-    def _get_schedule_fn(self, num_training_steps):
-        # all schedules other than linear_warmup_rsqrt_decay are copied from
-        # https://github.com/huggingface/transformers/ \
-        # blob/dc17f2a1110aed8d1729e77b0619601e3d96b84e/src/transformers/optimization.py
-        # We copy these here so we can have different num_training_steps for different parts of the model
-        num_warmup_steps = self.num_warmup_steps
-        if isinstance(num_warmup_steps, float) and 0 < num_warmup_steps <= 1.0:
-            num_warmup_steps = int(np.floor(num_warmup_steps * num_training_steps))
-        schedule = SwitchRemember(self.schedule)
-        if schedule == 'constant':
-            def lr_lambda(current_step):
-                return 1.0
-            return lr_lambda
-        elif schedule == 'constant_with_warmup':
-            def lr_lambda(current_step):
-                if current_step < num_warmup_steps:
-                    return float(current_step) / float(max(1.0, num_warmup_steps))
-                return 1.0
-            return lr_lambda
-        elif schedule == 'linear_with_warmup':
-            def lr_lambda(current_step):
-                if current_step < num_warmup_steps:
-                    return float(current_step) / float(max(1, num_warmup_steps))
-                return max(
-                    0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
-                )
-            return lr_lambda
-        elif schedule == 'cosine_with_warmup':
-            def lr_lambda(current_step):
-                if current_step < num_warmup_steps:
-                    return float(current_step) / float(max(1, num_warmup_steps))
-                progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
-            return lr_lambda
-        elif schedule == 'cosine_with_hard_restarts_with_warmup':
-            def lr_lambda(current_step):
-                if current_step < num_warmup_steps:
-                    return float(current_step) / float(max(1, num_warmup_steps))
-                progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-                if progress >= 1.0:
-                    return 0.0
-                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(self.num_cycles) * progress) % 1.0))))
-            return lr_lambda
-        elif schedule == 'linear_warmup_rsqrt_decay':
-            def lr_lambda(current_step: int) -> float:
-                if current_step == 0:
-                    return 0
-                return min(current_step ** -0.5, current_step * num_warmup_steps ** -1.5) / num_warmup_steps ** -0.5
-
-            return lr_lambda
-        else:
-            raise ValueError('Unrecognized schedule: {}. Choices are: {}'.format(
-                schedule.var, ', '.join(schedule.tests)))
-
-    def get_schedule(self, optimizer, optimizer_grouped_parameters, last_epoch=-1):
-        functions = list()
-        for group in optimizer_grouped_parameters:
-            functions.append(self._get_schedule_fn(group['t_total']))
-        return LambdaLR(optimizer, functions, last_epoch)
+__all__ = ['OptimizationSettings', 'Settings', 'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory']
 
 
 def make_optimizer_factory(optimizer_type: type, **kwargs) -> Callable[[Iterable[Mapping[str, Any]], float], Optimizer]:
@@ -139,7 +69,9 @@ class OptimizationSettings:
         make_inner_meta_learn_optimizer_factory(AdamW, betas=(0, None))
     # initial learning rate for Adam
     learning_rate: float = 5e-5
-    learning_rate_schedule: LearningRateSchedule = LearningRateSchedule()
+    learning_rate_head: Optional[float] = None  # if None, uses learning_rate
+    learning_rate_schedule: LearningRateScheduleFactory = \
+        learning_rate_schedules.LinearWithWarmupLearningRateScheduleFactory()
     train_batch_size: int = 32
     predict_batch_size: int = 8
     # When splitting up a long document into chunks, how much stride to take between chunks.

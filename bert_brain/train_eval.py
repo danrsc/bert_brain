@@ -579,16 +579,25 @@ def train(
         for p in non_prediction_head_parameters:
             p.requires_grad = False
 
+    prediction_head_weight_decay_group = {
+        'params': [p for n, p in param_optimizer if not is_no_decay(n) and n.startswith('prediction_head.')],
+        'weight_decay': 0.01,
+        't_total': num_train_steps_prediction_heads}
+    prediction_head_no_decay_group = {
+        'params': [p for n, p in param_optimizer if is_no_decay(n) and n.startswith('prediction_head.')],
+        'weight_decay': 0.0,
+        't_total': num_train_steps_prediction_heads}
+
+    if settings.optimization_settings.learning_rate_head is not None:
+        prediction_head_weight_decay_group['lr'] = settings.optimization_settings.learning_rate_head
+        prediction_head_no_decay_group['lr'] = settings.optimization_settings.learning_rate_head
+
     # noinspection PyUnresolvedReferences
     optimizer_grouped_parameters = [
         # weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if not is_no_decay(n) and n.startswith('prediction_head.')],
-         'weight_decay': 0.01,
-         't_total': num_train_steps_prediction_heads},
+        prediction_head_weight_decay_group,
         # no weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if is_no_decay(n) and n.startswith('prediction_head.')],
-         'weight_decay': 0.0,
-         't_total': num_train_steps_prediction_heads},
+        prediction_head_no_decay_group,
         # weight decay, non-prediction head
         {'params': [p for n, p in param_optimizer if not is_no_decay(n) and not n.startswith('prediction_head.')],
          'weight_decay': 0.01,

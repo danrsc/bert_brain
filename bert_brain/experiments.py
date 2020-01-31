@@ -15,8 +15,9 @@ from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessQuantileDigitize, corpus_types, BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, \
     BatchOneTaskProportionalSamplerFactory
 from .modeling import KeyedLinear, LinearContextualParameterGeneration, PooledFromSequence, \
-    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types
-from .settings import Settings, OptimizationSettings, LearningRateSchedule
+    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types, \
+    learning_rate_schedules
+from .settings import Settings, OptimizationSettings
 
 
 __all__ = [
@@ -652,7 +653,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
                 learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
             loss_tasks=set(),
@@ -682,7 +683,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
                 learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
             loss_tasks=set(),
@@ -724,7 +725,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
                 learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
             loss_tasks=set(),
@@ -776,7 +777,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
                 learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=400),
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8,
                 num_loader_workers=1),
@@ -836,8 +837,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
+                learning_rate_head=1e-3,
                 learning_rate=1e-5,
-                learning_rate_schedule=LearningRateSchedule('linear_warmup_rsqrt_decay', num_warmup_steps=2500),
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
                 num_loader_workers=8),
