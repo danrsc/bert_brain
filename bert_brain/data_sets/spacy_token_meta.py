@@ -412,7 +412,7 @@ def bert_tokenize_with_spacy_meta(
         included_indices.append(idx_group)
         index_word_in_example += 1
         idx_data = get_data_token_index(bert_tokens_with_spacy)
-        true_sequence_length += len(bert_token_groups_with_spacy)
+        true_sequence_length += len(bert_tokens_with_spacy)
         if max_sequence_length is None or len(bert_tokens_with_spacy) + current_sequence_length < max_sequence_length:
             for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
                 index_token_in_sentence += 1

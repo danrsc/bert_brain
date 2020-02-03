@@ -39,7 +39,7 @@ replace_root_logger_handler()
 logger = logging.getLogger(__name__)
 
 
-def _dummy_update():
+def _dummy_update(_=1):
     return
 
 
@@ -49,9 +49,9 @@ def _dummy_update_total(_):
 
 @dataclass(frozen=True)
 class ProgressUpdater:
-    update_batch: Callable[[], None] = _dummy_update
-    update_epoch: Callable[[], None] = _dummy_update
-    update_run: Callable[[], None] = _dummy_update
+    update_batch: Callable[[int], None] = _dummy_update
+    update_epoch: Callable[[int], None] = _dummy_update
+    update_run: Callable[[int], None] = _dummy_update
     update_batch_total: Callable[[int], None] = _dummy_update_total
 
 
@@ -71,11 +71,14 @@ def _worker_run_variation(name, index_variation, index_run, force_cache_miss_set
 
     progress_updater_kwargs = dict()
     if progress_level == 'runs':
-        progress_updater_kwargs['update_run'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_run'] = lambda up: worker_update_progress(
+            up, ignore_if_no_progress_context=True)
     elif progress_level == 'epochs':
-        progress_updater_kwargs['update_epoch'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_epoch'] = lambda up: worker_update_progress(
+            up, ignore_if_no_progress_context=True)
     elif progress_level == 'batches':
-        progress_updater_kwargs['update_batch'] = lambda: worker_update_progress(ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_batch'] = lambda up: worker_update_progress(
+            up, ignore_if_no_progress_context=True)
         progress_updater_kwargs['update_batch_total'] = lambda increment: worker_update_progress_total(
             increment, ignore_if_no_progress_context=True)
     else:
@@ -112,16 +115,24 @@ def _train_single_run(
     completion_file_path = os.path.join(output_dir, 'completed.txt')
 
     if os.path.exists(completion_file_path):
+        progress_updater.update_run()
+        progress_updater.update_epoch(settings.optimization_settings.num_train_epochs)
+        with open(completion_file_path, 'rt') as completion_file:
+            for line in completion_file:
+                completion_info = line.strip().split('\t')
+                if len(completion_info) == 2 and completion_info[0] == 'batches':
+                    num_batches = int(completion_info[1])
+                    progress_updater.update_batch_total(num_batches)
+                    progress_updater.update_batch(num_batches)
         return
 
     output_model_path = os.path.join(paths.model_path, 'run_{}'.format(index_run))
 
-    seed = set_random_seeds(settings.seed, index_run, n_gpu=1)
+    set_random_seeds(settings.seed, index_run, n_gpu=1)
 
     data_set_paths = list()
     for corpus in settings.corpora:
         data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
-            seed,
             index_run,
             corpus,
             settings.preprocessors,

@@ -64,7 +64,6 @@ def _run_occlusion_for_variation(
     data_set_paths = list()
     for corpus in settings.corpora:
         data_set_paths.append(corpus_dataset_factory.maybe_make_data_set_files(
-            seed,
             index_run,
             corpus,
             settings.preprocessors,

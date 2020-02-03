@@ -29,6 +29,7 @@ class OutputResult:
     prediction: Sequence[float]
     target: Sequence[float]
     sequence_type: str
+    is_active_loss: bool
     word_ids: Optional[Sequence[int]]
 
 
@@ -114,6 +115,8 @@ def write_predictions(output_dir, all_results, data_set, settings):
         if any(w is None for w in word_ids) and any(w is not None for w in word_ids):
             raise ValueError('Unable to write a mixture of None and non-None word_ids')
 
+        is_active_loss = key in settings.all_loss_tasks or data_set.response_data_kind(key) in settings.all_loss_tasks
+
         output_dict['predictions'] = np.concatenate(predictions)
         output_dict['target'] = np.concatenate(targets)
         output_dict['masks'] = np.concatenate(masks) if masks[0] is not None else None
@@ -124,6 +127,8 @@ def write_predictions(output_dir, all_results, data_set, settings):
         output_dict['tokens'] = np.array(tokens)
         output_dict['critic'] = type(critic).__name__
         output_dict['sequence_type'] = sequence_type
+        output_dict['is_active_loss'] = is_active_loss
+        output_dict['response_data_kind'] = data_set.response_data_kind(key)
         output_dict['word_ids'] = np.concatenate(word_ids) if word_ids[0] is not None else None
         if critic_kwargs is not None:
             for critic_key in critic_kwargs:
@@ -167,6 +172,7 @@ def read_predictions(output_dir, keys=None):
             tokens = npz['tokens']
             critic_type = npz['critic'].item()
             sequence_type = npz['sequence_type'].item()
+            is_active_loss = npz['is_active_loss'].item() if 'is_active_loss' in npz else None
             word_ids = npz['word_ids']
 
             if word_ids.ndim == 0:
@@ -205,7 +211,7 @@ def read_predictions(output_dir, keys=None):
                 results.append(OutputResult(
                     key, critic_type, critic_kwargs,
                     unique_ids[idx], data_keys[idx], tokens[idx], masks[idx], predictions[idx], target[idx],
-                    sequence_type, word_ids[idx] if word_ids is not None else None))
+                    sequence_type, is_active_loss, word_ids[idx] if word_ids is not None else None))
 
             result[key] = results
 

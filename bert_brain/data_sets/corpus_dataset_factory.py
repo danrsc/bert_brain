@@ -6,6 +6,8 @@ import hashlib
 import pickle
 import logging
 
+import numpy as np
+
 from transformers import BertTokenizer
 from spacy.language import Language
 
@@ -55,7 +57,6 @@ class CorpusDatasetFactory:
 
     def maybe_make_data_set_files(
             self,
-            seed: int,
             index_run: int,
             corpus: CorpusBase,
             preprocess_dict: Optional[PhasePreprocessorMappingT],
@@ -69,6 +70,14 @@ class CorpusDatasetFactory:
         corpus_load_hash = type(self)._hash_arguments(OrderedDict((k, v) for k, v in [
             ('factory', self),
             ('corpus', corpus)]))
+
+        # allow arbitrary type for run_info, as long as it produces a reasonable string
+        # and use it to create a dataset seed for things that need randomization like
+        # splits and preprocessors
+        hash_ = hashlib.sha256('{}'.format(corpus.run_info).encode())
+        seed = np.frombuffer(hash_.digest(), dtype='uint32')
+        random_state = np.random.RandomState(seed)
+        seed = random_state.randint(low=0, high=np.iinfo('uint32').max)
 
         corpus_info_path = os.path.join(corpus.cache_base_path, corpus_load_hash, 'corpus_info.pkl')
         if os.path.exists(corpus_info_path) and not force_cache_miss:

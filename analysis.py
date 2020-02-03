@@ -1,5 +1,4 @@
 import warnings
-from collections import OrderedDict
 
 import numpy as np
 
@@ -21,62 +20,16 @@ output_order = (
     'acc',       # accuracy
     'macc',      # mode accuracy - the accuracy one would get if one picked the mode
     'poma',      # proportion of mode accuracy; < 1 is bad
+    'racc',      # rank accuracy
     'prec',      # precision
     'rec',       # recall
     'f1')
 
 
-def print_variation_results_sliced(
-        paths, variation_set_name, metric='pove',
-        field_precision=2, num_values_per_table=10, **loss_handler_kwargs):
+def print_variation_results(paths, variation_set_name, index_run=None, field_precision=2, **loss_handler_kwargs):
 
     aggregated, count_runs, settings = read_variation_results(
-        paths, variation_set_name, compute_scalar=False, **loss_handler_kwargs)
-
-    values = OrderedDict((name, np.nanmean(aggregated[name].values(metric), axis=0)) for name in aggregated)
-
-    grouped_by_shape = OrderedDict()
-    for name in values:
-        if values[name].shape not in grouped_by_shape:
-            grouped_by_shape[values[name].shape] = [name]
-        else:
-            grouped_by_shape[values[name].shape].append(name)
-
-    print('Variation ({} of {} runs found): {}'.format(
-        count_runs, settings.num_runs, ', '.join(sorted(settings.all_loss_tasks))))
-
-    for shape in grouped_by_shape:
-        num_tables = int(np.ceil(np.prod(shape) / num_values_per_table))
-        for i in range(num_tables):
-            indices = np.arange(num_values_per_table) + i * num_values_per_table
-            indices = indices[indices < np.prod(shape)]
-            indices = np.unravel_index(indices, shape)
-
-            text_grid = TextGrid()
-            text_grid.append_value('name', column_padding=2)
-            # indices is a tuple of arrays, length 1 is a special case
-            for index in indices[0] if len(indices) == 1 else zip(indices):
-                text_grid.append_value('{}'.format(index), line_style=TextWrapStyle.right_justify, column_padding=2)
-            text_grid.next_row()
-            value_format = '{' + ':.{}f'.format(field_precision) + '}'
-            for name in grouped_by_shape[shape]:
-                text_grid.append_value(name, column_padding=2)
-                current_values = values[name][indices]
-                for value in current_values:
-                    text_grid.append_value(
-                        value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
-                text_grid.next_row()
-
-            write_text_grid_to_console(text_grid, width='tight')
-            print('')
-
-    print('')
-    print('')
-
-
-def print_variation_results(paths, variation_set_name, field_precision=2, **loss_handler_kwargs):
-
-    aggregated, count_runs, settings = read_variation_results(paths, variation_set_name, **loss_handler_kwargs)
+        paths, variation_set_name, index_run=index_run, **loss_handler_kwargs)
 
     metrics = list()
     for metric in output_order:
@@ -136,26 +89,6 @@ def default_filter_combine(result_query, x, y):
         return np.logical_or(x >= 0.5, y >= 0.5)
     else:
         return np.full(x.shape, True)
-
-
-def print_min_max(
-        result_queries,
-        key_format='{combined_variation_set_name}, {combined_training_variation}, {key}, {metric}',
-        data_combine_fn=data_combine_subtract,
-        filter_combine_fn=default_filter_combine,
-        key_shorten_fn=None):
-    for result in result_queries:
-        if len(result) == 3:
-            result_query, data_1, data_2 = result
-            data = data_combine_fn(data_1, data_2)
-            if filter_combine_fn is not None:
-                data = np.where(filter_combine_fn(result_query, data_1, data_2), data, np.nan)
-        else:
-            result_query, data = result
-        vmin, vmax = np.nanmin(data), np.nanmax(data)
-        print('{key}, min: {vmin}, max: {vmax}'.format(
-            key=key_format.format(
-                **result_query.as_dict_with_combined_second(key_shorten_fn=key_shorten_fn)), vmin=vmin, vmax=vmax))
 
 
 def min_max_default_group_key_fn(result):

@@ -8,6 +8,7 @@ from functools import partial
 
 import numpy as np
 from scipy.special import logsumexp
+from scipy.stats.mstats import rankdata
 
 from .experiments import singleton_variation, task_hash
 from .modeling import critic_types, NamedTargetMaskedLossBase
@@ -20,8 +21,10 @@ __all__ = [
     'regression_handler',
     'class_handler',
     'bincount_axis',
+    'nan_rank_accuracy',
     'make_prediction_handler',
     'get_field_predictions',
+    'assemble_indexed_predictions',
     'k_vs_k']
 
 
@@ -133,9 +136,6 @@ def _read_variation_parallel_helper(item):
     output_results_by_name = read_predictions(validation_dir)
     run_results = dict()
     for name in output_results_by_name:
-        in_training_variation = name in settings.all_loss_tasks
-        if not in_training_variation:
-            continue
         no_cluster_path = os.path.join(model_dir, '{}_no_cluster_to_disk.npz'.format(name))
         cluster_id_path = os.path.join(model_dir, 'kmeans_clusters_{}.npy'.format(name))
         cluster_ids = None
@@ -148,7 +148,11 @@ def _read_variation_parallel_helper(item):
         output_results = output_results_by_name[name]
         run_aggregated = Aggregator()
         loss = None
+        is_active_loss = True
         for output_result in output_results:
+            if not output_result.is_active_loss:
+                is_active_loss = False
+                break
             if loss is None:
                 loss = output_result.critic_type
             else:
@@ -171,6 +175,9 @@ def _read_variation_parallel_helper(item):
                 output_result.target = np.array(list([no_cluster_data[d] for d in unique_data_ids]))
             run_aggregated.update(output_result, is_sequence=output_result.sequence_type != 'single')
 
+        if not is_active_loss:
+            continue
+
         loss_handler_kwargs = dict(loss_handler_kwargs)
         if isinstance(k_vs_k_feature_axes, dict):
             if name in k_vs_k_feature_axes:
@@ -189,11 +196,13 @@ def _read_variation_parallel_helper(item):
     return index_run, run_results
 
 
-def read_variation_results(paths, variation_name, compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
+def read_variation_results(
+        paths, variation_name, index_run=None, compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
 
     _, settings = singleton_variation(variation_name)
+    runs = range(settings.num_runs) if index_run is None else [index_run]
     task_arguments = [(paths.result_path, paths.model_path, variation_name, i,
-                       compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in range(settings.num_runs)]
+                       compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in runs]
 
     with ThreadPoolExecutor() as ex:
         mapped = ex.map(_read_variation_parallel_helper, task_arguments)
@@ -250,6 +259,18 @@ def nan_pearson(x, y, axis=0, keepdims=False):
     if not keepdims:
         result = np.squeeze(result, axis)
     return result
+
+
+def nan_rank_accuracy(scores, target):
+    ranks = np.where(
+        np.isnan(target),
+        np.nan,
+        np.squeeze(
+            np.take_along_axis(
+                rankdata(-scores, axis=-1),
+                np.expand_dims(np.where(np.isnan(target), 0, target).astype(np.intp), -1), axis=-1),
+            axis=-1))
+    return 1 - (ranks - 1) / (scores.shape[-1] - 1)
 
 
 def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1):
@@ -481,12 +502,12 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         if is_hard_label:
             cross_entropy = np.where(
                 np.isnan(target),
+                np.nan,
                 np.squeeze(
                     np.take_along_axis(
-                        log_softmax,
+                        -log_softmax,
                         np.expand_dims(np.where(np.isnan(target), 0, target).astype(np.intp), -1), axis=-1),
-                    axis=-1),
-                np.nan)
+                    axis=-1))
             cross_entropy = np.nanmean(cross_entropy, axis=0)
             accuracy = (np.sum(np.equal(predicted_class, target), axis=0)
                         / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
@@ -520,8 +541,9 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
             accuracy = np.nanmean(partial_credit, axis=0)
 
         poma = accuracy / mode_accuracy
+        rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
 
-        return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma)
+        return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy)
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True):
@@ -652,11 +674,28 @@ def _find_restricted_distractor_indices(indices_true, pair_examples):
     return indices_distractor
 
 
-def get_field_predictions(paths_obj, variation_set_name, field_name, index_run=None):
+@dataclasses.dataclass
+class FieldPredictions:
+    predictions: np.ndarray
+    masked_target: np.ndarray
+    ids: np.ndarray
+    word_ids: np.ndarray
+
+
+def get_field_predictions(paths_obj, variation_set_name, field_names=None, index_run=None):
     (variation_set_name, _), settings = singleton_variation(variation_set_name)
     output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(settings))
-    aggregator = Aggregator()
     run_iterable = (index_run,) if index_run is not None else range(settings.num_runs)
+
+    if field_names is None:
+        aggregators = OrderedDict()
+        is_single_field = False
+    else:
+        is_single_field = isinstance(field_names, str)
+        if is_single_field:
+            field_names = [field_names]
+        aggregators = OrderedDict((field_name, Aggregator()) for field_name in field_names)
+
     for index_run in run_iterable:
         output_dir_run = os.path.join(output_dir, 'run_{}'.format(index_run))
         if not os.path.exists(os.path.join(output_dir_run, 'completed.txt')):
@@ -664,15 +703,67 @@ def get_field_predictions(paths_obj, variation_set_name, field_name, index_run=N
         validation_dir = os.path.join(output_dir_run, 'validation_predictions')
         if not os.path.exists(validation_dir):
             raise ValueError('Path does not exist: {}'.format(validation_dir))
-        output_results = read_predictions(validation_dir, keys=[field_name])
-        field_results = output_results[field_name]
-        for result in field_results:
-            aggregator.update(result, is_sequence=result.sequence_type != 'single')
+        output_results = read_predictions(validation_dir, keys=field_names)
+        for field_name in output_results:
+            if field_name not in aggregators:
+                aggregators[field_name] = Aggregator()
+            for result in output_results[field_name]:
+                aggregators[field_name].update(result, is_sequence=result.sequence_type != 'single')
 
-    target = np.array(aggregator.values('target'))
-    predictions = np.array(aggregator.values('prediction'))
-    mask = np.array(aggregator.values('mask'))
-    ids = np.array(aggregator.values('unique_id'))
-    word_ids = np.array(aggregator.values('word_ids'))
-    masked_target = np.where(mask, target, np.nan)
-    return predictions, masked_target, ids, word_ids
+    result = OrderedDict()
+    for field_name in aggregators:
+        target = np.array(aggregators[field_name].values('target'))
+        mask = np.array(aggregators[field_name].values('mask'))
+        result[field_name] = FieldPredictions(
+            predictions=np.array(aggregators[field_name].values('prediction')),
+            masked_target=np.where(mask, target, np.nan),
+            ids=np.array(aggregators[field_name].values('unique_id')),
+            word_ids=np.array(aggregators[field_name].values('word_ids')))
+
+    if is_single_field:
+        for field_name in result:
+            return result[field_name]
+    return result
+
+
+def assemble_indexed_predictions(paths_obj, variation_set_name, index_run=None):
+    field_predictions = get_field_predictions(paths_obj, variation_set_name, index_run=index_run)
+    to_assemble = OrderedDict()
+    for key in field_predictions:
+        idx_under = key.rfind('_')
+        if idx_under > 0:
+            main_key = key[:idx_under]
+            index_str = key[idx_under+1:]
+            try:
+                index = int(index_str)
+                if main_key not in to_assemble:
+                    to_assemble[main_key] = list()
+                if index >= len(to_assemble[main_key]):
+                    to_assemble[main_key].extend([None] * (index + 1 - len(to_assemble[main_key])))
+                to_assemble[main_key][index] = field_predictions[key]
+            except ValueError:
+                to_assemble[key] = field_predictions[key]
+        else:
+            to_assemble[key] = field_predictions[key]
+    result = OrderedDict()
+    for key in to_assemble:
+        if not isinstance(to_assemble[key], list):
+            result[key] = to_assemble[key]
+            continue
+        for item in to_assemble[key]:
+            assert(item is not None)
+            indices_sort = np.argsort(item.ids, kind='mergesort')
+            for f in dataclasses.fields(item):
+                setattr(item, f.name, getattr(item, f.name)[indices_sort])
+            assert(np.array_equal(item.ids, to_assemble[key][0].ids))
+        assembled = dict()
+        for f in dataclasses.fields(to_assemble[key][0]):
+            if f.name == 'ids' or f.name == 'word_ids':
+                assembled[f.name] = getattr(to_assemble[key][0], f.name)
+            else:
+                assembled[f.name] = np.concatenate(
+                    list(np.expand_dims(getattr(item, f.name), 1) for item in to_assemble[key]), axis=1)
+                if assembled[f.name].shape[-1] == 1:
+                    assembled[f.name] = np.squeeze(assembled[f.name], axis=-1)
+        result[key] = dataclasses.replace(to_assemble[key][0], **assembled)
+    return result

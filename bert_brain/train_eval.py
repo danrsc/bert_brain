@@ -526,7 +526,8 @@ def train(
         settings.optimization_settings.train_batch_size /
         settings.optimization_settings.gradient_accumulation_steps))
 
-    progress_update.update_batch_total(num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs)
+    num_total_batches = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
+    progress_update.update_batch_total(num_total_batches)
 
     num_train_steps_prediction_heads = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
     num_train_steps_other = num_train_steps_per_epoch * (
@@ -713,7 +714,7 @@ def train(
             for step, batch in iterate_and_update(progress_update.update_batch, enumerate(train_data_loader)):
                 if _train_step(
                         settings,
-                        settings.meta_learn_gradient_loss_tasks if is_meta_learn_active else settings.loss_tasks,
+                        settings.loss_tasks,
                         train_data_set, device, model, batch, step, index_epoch, global_step,
                         loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update):
                     global_step += 1
@@ -752,7 +753,8 @@ def train(
     model.save_pretrained(output_model_path)
 
     with open(completion_file_path, 'wt') as completion_file:
-        completion_file.write('We did it!')
+        completion_file.write('We did it!\n')
+        completion_file.write('batches:\t{}\n'.format(num_total_batches))
 
     # clean up after we're done to try to release CUDA resources to other people when there are no more tasks
     gc.collect()
