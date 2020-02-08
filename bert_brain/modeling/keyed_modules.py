@@ -8,6 +8,7 @@ import torch.nn.functional
 
 from transformers.modeling_bert import gelu_new as gelu
 
+from .utility_modules import LinearWithLayerNorm
 from ..common import NamedSpanEncoder
 from .graph_part import GraphPart
 from .grouping_modules import at_most_one_data_id, GroupConcatFixedGroupSize
@@ -37,7 +38,6 @@ def group_concat_linear(
         pooled_source_name)
     result['{}_linear'.format(name)] = KeyedLinear(
         'group_concat_fixed_group_size_output',
-        is_sequence=False,
         hidden_sizes=hidden_sizes,
         hidden_activation=hidden_activation,
         force_cpu=force_cpu,
@@ -106,29 +106,11 @@ class KeyedBase(GraphPart):
         raise NotImplementedError('{} does not implement instantiate'.format(type(self)))
 
 
-class _HiddenLayer(torch.nn.Module):
-
-    def __init__(self, in_channels, out_channels, activation_function=gelu, should_norm=True):
-        super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
-        self.activation_function = activation_function
-        self.layer_norm = torch.nn.LayerNorm(out_channels, eps=1e-12) if should_norm else None
-
-    def forward(self, x):
-        x = self.linear(x)
-        if self.activation_function is not None:
-            x = self.activation_function(x)
-        if self.layer_norm is not None:
-            return self.layer_norm(x)
-        return x
-
-
 class KeyedLinear(KeyedBase):
 
     def __init__(
             self,
             source_name: Union[str, Tuple[str, ...]],
-            is_sequence: bool,
             hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
             hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
             force_cpu: bool = False,
@@ -138,7 +120,6 @@ class KeyedLinear(KeyedBase):
             should_norm: bool = False):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
-        self.is_sequence = is_sequence
         self.force_cpu = force_cpu
         self.hidden_sizes = hidden_sizes
         self.hidden_activation = hidden_activation
@@ -155,7 +136,8 @@ class KeyedLinear(KeyedBase):
             hidden_modules = list()
             for index_hidden in range(len(hidden_sizes)):
                 current_in = in_channels if index_hidden == 0 else hidden_sizes[index_hidden - 1]
-                hidden_modules.append(_HiddenLayer(current_in, hidden_sizes[index_hidden], self.hidden_activation))
+                hidden_modules.append(
+                    LinearWithLayerNorm(current_in, hidden_sizes[index_hidden], self.hidden_activation))
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
         self.linear = nn.Linear(in_channels, sum(self.splits))
@@ -187,10 +169,7 @@ class KeyedLinear(KeyedBase):
             for key in batch:
                 if isinstance(key, tuple) and key[0] == self.source_name:
                     result[(k,) + key[1:]] = batch[key]
-            if self.is_sequence:
-                p = p.view(p.size()[:2] + self.output_key_to_shape[k])
-            else:
-                p = p.view(p.size()[:1] + self.output_key_to_shape[k])
+            p = p.view(p.size()[:-1] + self.output_key_to_shape[k])
             result[k] = p
 
             if isinstance(self.apply_at_most_one_data_id, dict):

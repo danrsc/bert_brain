@@ -2,10 +2,13 @@ from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn
+from torch import nn
+from transformers.modeling_bert import gelu_new as gelu
+
 from .graph_part import GraphPart
 
 
-__all__ = ['Conv1DCausal', 'PooledFromSequence']
+__all__ = ['Conv1DCausal', 'PooledFromSequence', 'LinearWithLayerNorm']
 
 
 class PooledFromSequence(GraphPart):
@@ -59,3 +62,20 @@ class Conv1DCausal(torch.nn.Module):
         if self.transpose_axes is not None and self.should_transpose_output:
             result = result.permute(*np.argsort(self.transpose_axes))
         return result
+
+
+class LinearWithLayerNorm(torch.nn.Module):
+
+    def __init__(self, in_channels, out_channels, activation_function=gelu, should_norm=True):
+        super().__init__()
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.activation_function = activation_function
+        self.layer_norm = torch.nn.LayerNorm(out_channels, eps=1e-12) if should_norm else None
+
+    def forward(self, x):
+        x = self.linear(x)
+        if self.activation_function is not None:
+            x = self.activation_function(x)
+        if self.layer_norm is not None:
+            return self.layer_norm(x)
+        return x

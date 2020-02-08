@@ -128,6 +128,7 @@ def evaluate(
         #     logger.info("Processing example: %d" % (len(all_results)))
         for k in batch:
             batch[k] = batch[k].to(device)
+        batch['global_step'] = global_step
         with torch.no_grad():
             predictions = model(batch, eval_data_set)
             eval_data_set.just_in_time_targets(batch, predictions)
@@ -281,7 +282,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             if data_set.is_sequence(k):
                 if default_sequence_head is None:
                     default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(
-                        settings.default_sequence_source, True))
+                        settings.default_sequence_source))
                 prediction_head_parts = default_sequence_head
                 prediction_head_parts['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
                 prediction_head_parts['default_sequence_linear'].apply_at_most_one_data_id[k] = \
@@ -290,7 +291,7 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
                 if default_pooled_head is None:
                     default_pooled_head = OrderedDict(
                         default_pooled_linear=KeyedLinear(
-                            settings.default_pooled_source, False, apply_at_most_one_data_id=dict()))
+                            settings.default_pooled_source, apply_at_most_one_data_id=dict()))
                 prediction_head_parts = default_pooled_head
                 prediction_head_parts['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
                 prediction_head_parts['default_pooled_linear'].apply_at_most_one_data_id[k] = \
@@ -348,6 +349,7 @@ def _train_step(
 
     for k in batch:
         batch[k] = batch[k].to(device)
+    batch['global_step'] = global_step
     predictions = model(batch, train_data_set)
     if sampler_to_update is not None and hasattr(sampler_to_update, 'update'):
         sampler_to_update.update(batch, predictions, loss_handlers)
@@ -730,27 +732,23 @@ def train(
     logger.info("  Num split examples = %d", len(validation_data_set))
     logger.info("  Batch size = %d", settings.optimization_settings.predict_batch_size)
 
+    # Save a trained model and the associated configuration
+    if not os.path.exists(output_model_path):
+        os.makedirs(output_model_path)
+    model.save_pretrained(output_model_path)
+
     if len(validation_data_set) > 0:
         all_validation = evaluate(
             settings, model, loss_handlers, train_samplers, device, settings.optimization_settings.num_train_epochs - 1,
             global_step, TaskResults(), validation_data_set, return_detailed=True)
-    else:
-        all_validation = {}
+        write_predictions(
+            os.path.join(output_dir, 'validation_predictions'), all_validation, validation_data_set, settings)
 
     if test_data_set is not None and len(test_data_set) > 0:
         all_test = evaluate(
             settings, model, loss_handlers, train_samplers, device, settings.optimization_settings.num_train_epochs - 1,
             global_step, TaskResults(), test_data_set, return_detailed=True)
-    else:
-        all_test = {}
-
-    write_predictions(os.path.join(output_dir, 'validation_predictions'), all_validation, validation_data_set, settings)
-    write_predictions(os.path.join(output_dir, 'test_predictions'), all_test, test_data_set, settings)
-
-    # Save a trained model and the associated configuration
-    if not os.path.exists(output_model_path):
-        os.makedirs(output_model_path)
-    model.save_pretrained(output_model_path)
+        write_predictions(os.path.join(output_dir, 'test_predictions'), all_test, test_data_set, settings)
 
     with open(completion_file_path, 'wt') as completion_file:
         completion_file.write('We did it!\n')

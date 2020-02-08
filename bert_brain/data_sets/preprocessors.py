@@ -269,10 +269,20 @@ class PreprocessHistogramBinEdgesDigitize:
 
 
 def _quantile_digitize_column(item):
-    data, quantiles, indicator_train, nan_policy = item
+    data, quantiles, indicator_train, nan_policy, bin_edge_policy, seed = item
+    random_state = np.random.RandomState(seed)
     # print(data.shape)
     bin_edges = np.nanquantile(data if indicator_train is None else data[indicator_train], quantiles, axis=0)
-    result = np.digitize(data, bin_edges)
+    if bin_edge_policy == 'left' or bin_edge_policy == 'random':
+        right = False
+    elif bin_edge_policy == 'right':
+        right = True
+    else:
+        raise ValueError('Unknown policy_bin_edge: {}'.format(bin_edge_policy))
+    result = np.digitize(data, bin_edges, right=right)
+    if bin_edge_policy == 'random':
+        for i in range(1, len(bin_edges)):
+            result = np.where(data == bin_edges[i], result - random_state.randint(0, 2), result)
     # print(result.shape)
     if nan_policy == 'propagate':
         return np.where(np.isnan(data), np.nan, result)
@@ -281,7 +291,7 @@ def _quantile_digitize_column(item):
     elif nan_policy == 'assign_last':
         return result  # this is what digitize already does
     else:
-        raise ValueError('Unknown nan_policy: {}'.format(nan_policy))
+        raise ValueError('Unknown policy_nan: {}'.format(nan_policy))
 
 
 @dataclass(frozen=True)
@@ -291,16 +301,19 @@ class PreprocessQuantileDigitize:
     stop_mode: Optional[str] = None
     metadata_example_group_by: Optional[str] = None
     train_on_all: Optional[bool] = False
-    nan_policy: str = 'propagate'
+    policy_nan: str = 'propagate'
+    policy_bin_edge: str = 'random'
 
-    def _quantile_digitize(self, data, indicator_train, quantiles):
+    def _quantile_digitize(self, data, indicator_train, quantiles, random_state):
         shape = data.shape
         data = np.reshape(data, (data.shape[0], -1))
         with ProcessPoolExecutor() as ex:
             result = list(
                 np.expand_dims(c, 1) for c in ex.map(
                     _quantile_digitize_column,
-                    [(data[:, i], quantiles, indicator_train, self.nan_policy) for i in range(data.shape[1])]))
+                    [(data[:, i], quantiles, indicator_train,
+                      self.policy_nan, self.policy_bin_edge, random_state.randint(low=0, high=np.iinfo('uint32').max))
+                     for i in range(data.shape[1])]))
         assert (len(result) == data.shape[1])
         return np.reshape(np.concatenate(result, axis=1), shape)
 
@@ -331,18 +344,18 @@ class PreprocessQuantileDigitize:
                 indicator_group = _indicator_from_examples(len(data), group_examples)
                 group_data = data[indicator_group]
                 group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
-                group_data = self._quantile_digitize(group_data, group_indicator_train, quantiles)
+                group_data = self._quantile_digitize(group_data, group_indicator_train, quantiles, random_state)
                 data[indicator_group] = group_data
                 indicator_not_in_group[indicator_group] = False
             data[indicator_not_in_group] = np.nan
         else:
-            data = self._quantile_digitize(loaded_data_tuple.data, indicator_train, quantiles)
+            data = self._quantile_digitize(loaded_data_tuple.data, indicator_train, quantiles, random_state)
 
         if self.use_one_hot:
             one_hot = np.zeros(data.shape + (len(quantiles) + 1,), np.float64)
-            indices = data if self.nan_policy != 'propagate' else np.where(np.isnan(data), 0, data).astype(np.intp)
+            indices = data if self.policy_nan != 'propagate' else np.where(np.isnan(data), 0, data).astype(np.intp)
             np.put_along_axis(one_hot, np.expand_dims(indices, -1), 1, -1)
-            if self.nan_policy == 'propagate':
+            if self.policy_nan == 'propagate':
                 one_hot = np.where(np.expand_dims(np.isnan(data), -1), np.nan, one_hot)
             data = one_hot
         return replace(loaded_data_tuple, data=data)
