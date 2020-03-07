@@ -4,7 +4,7 @@ import gc
 from functools import partial
 from contextlib import contextmanager
 import queue
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from threading import Thread
 from multiprocessing import get_context
 from multiprocessing.context import BaseContext
@@ -20,8 +20,10 @@ __all__ = ['cuda_map_unordered',
            'DeviceMemoryInfo',
            'ProgressContext',
            'cuda_auto_empty_cache_context',
+           'progress_pool_executor',
            'worker_update_progress',
            'worker_update_progress_total',
+           'worker_write_progress_message',
            'worker_device']
 
 
@@ -69,6 +71,16 @@ def _set_device_id_and_initialize(device_queue, no_available_queue, progress_que
         initializer(*initargs)
 
 
+def _set_progress_queue_and_initialize(progress_queue, initializer, initargs):
+    global _worker_progress_queue
+    _worker_progress_queue = progress_queue
+
+    if initializer is not None:
+        if initargs is None:
+            initargs = ()
+        initializer(*initargs)
+
+
 def worker_device():
     return _worker_device
 
@@ -87,6 +99,14 @@ def worker_update_progress_total(increment, ignore_if_no_progress_context=False)
             return
         raise ValueError('No progress context available')
     _worker_progress_queue.put((_progress_update_total, increment))
+
+
+def worker_write_progress_message(msg, ignore_if_no_progress_context=False):
+    if _worker_progress_queue is None:
+        if ignore_if_no_progress_context:
+            return
+        raise ValueError('No progress context available')
+    _worker_progress_queue.put(msg)
 
 
 def _monitor_devices(max_workers, min_memory, starting_ids, device_queue, no_available_queue):
@@ -172,19 +192,21 @@ def _monitor_progress(progress_t, progress_queue):
                     progress_t.total += p[1]
             else:
                 raise RuntimeError('Invalid value in progress_queue: {}'.format(p))
-        if p < 0:
-            progress_t.n = progress_t.n - p
-            progress_t.refresh()
+        elif isinstance(p, str):
+            tqdm.write(p)
         else:
-            progress_t.update(p)
+            if p < 0:
+                progress_t.n = progress_t.n - p
+                progress_t.refresh()
+            else:
+                progress_t.update(p)
 
 
 class ProgressContext(object):
 
-    def __init__(self, *args, **kwargs):
-        self._args = args
+    def __init__(self, mp_context=None, **kwargs):
         self._kwargs = kwargs
-        self._mp_context = None
+        self._mp_context = mp_context
         self._progress_queue = None
         self._progress_bar = None
 
@@ -201,18 +223,21 @@ class ProgressContext(object):
         return self._progress_bar
 
     def __enter__(self):
-        self._mp_context = get_context('spawn')
+        if self._mp_context is None:
+            self._mp_context = get_context('spawn')
         self._progress_queue = self.mp_context.Queue()
-        self._progress_bar = tqdm(*self._args, **self._kwargs)
-        self._args = None
+        self._progress_bar = tqdm(**self._kwargs)
         self._kwargs = None
         progress_monitor = Thread(target=_monitor_progress, args=(self.progress_bar, self.progress_queue), daemon=True)
         progress_monitor.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def close(self):
         self.progress_bar.close()
         self.progress_queue.put(_progress_stop_sentinel)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 def cuda_map_unordered(
@@ -519,6 +544,19 @@ class CudaPoolExecutor(object):
     def shutdown(self, wait=True):
         self._no_available_queue.put(2)
         self._process_pool_executor.shutdown(wait)
+
+
+@contextmanager
+def progress_pool_executor(mp_context=None, max_workers=None, initializer=None, initargs=(), **progress_kwargs):
+    # for some reason, this does not work with get_context('spawn')
+    with ProgressContext(
+            mp_context=mp_context if mp_context is not None else get_context(), **progress_kwargs) as progress:
+        with ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=progress.mp_context,
+                initializer=_set_progress_queue_and_initialize,
+                initargs=(progress.progress_queue, initializer, initargs)) as ex:
+            yield ex
 
 
 @contextmanager

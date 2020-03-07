@@ -37,6 +37,8 @@ class InputFeatures:
     token_ids: Sequence[int]
     mask: Sequence[int]
     is_stop: Sequence[bool]
+    part_of_speech: Sequence[str]
+    part_of_speech_id: Sequence[int]
     is_begin_word_pieces: Sequence[bool]
     token_lengths: Sequence[int]
     token_probabilities: Sequence[float]
@@ -66,14 +68,15 @@ class KindData:
 
 @dataclass(frozen=True)
 class _ResponseKind:
+    dundee_eye: str
+    generic: str
     hp_fmri: str
     hp_meg: str
+    ns_froi: str
+    ns_reaction_times: str
     ucl_erp: str
     ucl_eye: str
     ucl_self_paced: str
-    ns_reaction_times: str
-    ns_froi: str
-    generic: str
 
 
 ResponseKind = _ResponseKind(**dict((f.name, f.name) for f in dataclasses.fields(_ResponseKind)))

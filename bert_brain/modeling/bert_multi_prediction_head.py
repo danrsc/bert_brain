@@ -61,6 +61,17 @@ class MultiPredictionHead(torch.nn.Module):
         # noinspection PyTypeChecker
         self.head_graph_parts = torch.nn.ModuleDict(modules=[(k, head_graph_parts[k]) for k in head_graph_parts])
 
+    def compute_penalties(self, batch, predictions, loss_dict):
+        result = OrderedDict()
+        for key in self.head_graph_parts:
+            penalties = self.head_graph_parts[key].compute_penalties(batch, predictions, loss_dict)
+            if penalties is not None:
+                for p in penalties:
+                    if p in result:
+                        raise ValueError('Duplicate penalty: {}'.format(p))
+                    result[p] = penalties[p]
+        return result if len(result) > 0 else None
+
     def forward(self, sequence_output, pooled_output, batch, dataset):
         batch_inputs = LazyBertOutputBatch(
             sequence_output,
@@ -161,6 +172,9 @@ class BertMultiPredictionHead(BertPreTrainedModel):
         sequence_output = bert_outputs[2]
         # noinspection PyCallingNonCallable
         return self.prediction_head(sequence_output, pooled_output, batch, dataset)
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        return self.prediction_head.compute_penalties(batch, predictions, loss_dict)
 
     def to(self, *args, **kwargs):
 

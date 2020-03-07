@@ -2,6 +2,8 @@ from .boolean_questions import BooleanQuestions
 from .choice_of_plausible_alternatives import ChoiceOfPlausibleAlternatives
 from .colorless_green import ColorlessGreenCorpus, LinzenAgreementCorpus
 from .commitment_bank import CommitmentBank
+from .dundee import DundeeCorpus
+from .ghent_eye_tracking_corpus import GhentEyeTrackingCorpus
 from .harry_potter import HarryPotterCorpus
 from .multi_sentence_reading_comprehension import MultiSentenceReadingComprehension
 from .natural_stories import NaturalStoriesCorpus
@@ -21,6 +23,8 @@ __all__ = [
     'ColorlessGreenCorpus',
     'LinzenAgreementCorpus',
     'CommitmentBank',
+    'DundeeCorpus',
+    'GhentEyeTrackingCorpus',
     'HarryPotterCorpus',
     'MultiSentenceReadingComprehension',
     'NaturalStoriesCorpus',

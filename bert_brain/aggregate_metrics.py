@@ -13,10 +13,12 @@ from scipy.stats.mstats import rankdata
 from .experiments import singleton_variation, task_hash
 from .modeling import critic_types, NamedTargetMaskedLossBase
 from .result_output import read_predictions
+from .data_sets import DataIdDataset
 
 __all__ = [
     'Aggregator',
     'read_variation_results',
+    'load_switched_corpus',
     'nan_pearson',
     'regression_handler',
     'class_handler',
@@ -194,6 +196,43 @@ def _read_variation_parallel_helper(item):
                 result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
         run_results[name] = result_dict
     return index_run, run_results
+
+
+def load_switched_corpus(variation_name, replacement_corpus, index_run):
+    _, settings = singleton_variation(variation_name)
+    is_found = False
+    for settings_corpus in settings.corpora:
+        if settings_corpus.corpus_key == replacement_corpus.corpus_key:
+            is_found = True
+            break
+    if not is_found:
+        raise ValueError('corpus {} not in settings for {}'.format(replacement_corpus.corpus_key, variation_name))
+
+    from run_variations import _io_setup
+    corpus_dataset_factory, paths = _io_setup(variation_name, settings)
+
+    data_set_path = corpus_dataset_factory.maybe_make_data_set_files(
+        index_run,
+        replacement_corpus,
+        settings.preprocessors,
+        settings.get_split_function(replacement_corpus.corpus_key, index_run),
+        settings.preprocess_fork_fn,
+        False,
+        paths,
+        settings.max_sequence_length)
+
+    train_data, validation_data, test_data = (
+        DataIdDataset(
+            data_set_path,
+            which,
+            DataIdDataset.get_init_metadata(data_set_path).max_sequence_length,
+            settings.all_loss_tasks,
+            data_id_in_batch_keys=settings.data_id_in_batch_keys,
+            filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
+            field_spec_replacers=settings.field_spec_replacers)
+        for which in ('train', 'validation', 'test'))
+
+    return train_data, validation_data, test_data
 
 
 def read_variation_results(

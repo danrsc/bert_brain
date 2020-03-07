@@ -8,7 +8,7 @@ from typing import Optional, Callable, Union, Sequence, Tuple, Any, Mapping
 import numpy as np
 from scipy.stats import boxcox
 from scipy.ndimage.filters import gaussian_filter1d
-from scipy.signal import sosfilt
+from scipy.signal import sosfiltfilt
 from sklearn.decomposition import PCA
 
 from .input_features import InputFeatures, KindData
@@ -732,7 +732,7 @@ class PreprocessCompress:
 @dataclass(frozen=True)
 class PreprocessSoSFilter:
     """
-    Apply scipy.signal.sosfilt to data
+    Apply scipy.signal.sosfiltfilt to data
     sos: iirfilter created with output='sos',
         e.g.
             A high-pass butterworth filter for a sampling rate of 0.5 Hz
@@ -744,7 +744,7 @@ class PreprocessSoSFilter:
     axis: int = 0
 
     def __call__(self, loaded_data_tuple, metadata, random_state):
-        return replace(loaded_data_tuple, data=sosfilt(self.sos, loaded_data_tuple.data, axis=self.axis))
+        return replace(loaded_data_tuple, data=sosfiltfilt(self.sos, loaded_data_tuple.data, axis=self.axis))
 
 
 DataIdPairFnT = Callable[

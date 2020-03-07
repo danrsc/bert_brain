@@ -7,8 +7,11 @@ from .specialized_loss import (
     NamedTargetStopWordAwareKLeastAEEvalUpdate,
     NamedTargetStopWordAwarePearsonDistance,
     NamedTargetStopWordAwareBinaryCrossEntropyWithLogits,
+    NamedTargetStopWordAwareBinaryCrossEntropy,
     NamedTargetStopWordAwareCrossEntropy,
+    NamedTargetStopWordAwareNLL,
     NamedTargetStopWordAwareSoftLabelCrossEntropy,
+    NamedTargetStopWordAwareSoftLabelNLL,
     NamedTargetSingleMSE,
     NamedTargetSingleMAE,
     NamedTargetSingleKLeastSE,
@@ -17,8 +20,11 @@ from .specialized_loss import (
     NamedTargetSingleKLeastAEEvalUpdate,
     NamedTargetSinglePearsonDistance,
     NamedTargetSingleBinaryCrossEntropyWithLogits,
+    NamedTargetSingleBinaryCrossEntropy,
     NamedTargetSingleCrossEntropy,
-    NamedTargetSingleSoftLabelCrossEntropy)
+    NamedTargetSingleNLL,
+    NamedTargetSingleSoftLabelCrossEntropy,
+    NamedTargetSingleSoftLabelNLL)
 
 
 __all__ = [
@@ -30,8 +36,11 @@ __all__ = [
     'NamedTargetStopWordAwareKLeastAEEvalUpdate',
     'NamedTargetStopWordAwarePearsonDistance',
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
+    'NamedTargetStopWordAwareBinaryCrossEntropy',
     'NamedTargetStopWordAwareCrossEntropy',
+    'NamedTargetStopWordAwareNLL',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
+    'NamedTargetStopWordAwareSoftLabelNLL',
     'NamedTargetSingleMSE',
     'NamedTargetSingleMAE',
     'NamedTargetSingleKLeastSE',
@@ -40,5 +49,8 @@ __all__ = [
     'NamedTargetSingleKLeastAEEvalUpdate',
     'NamedTargetSinglePearsonDistance',
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
+    'NamedTargetSingleBinaryCrossEntropy',
     'NamedTargetSingleCrossEntropy',
-    'NamedTargetSingleSoftLabelCrossEntropy']
+    'NamedTargetSingleNLL',
+    'NamedTargetSingleSoftLabelCrossEntropy',
+    'NamedTargetSingleSoftLabelNLL']

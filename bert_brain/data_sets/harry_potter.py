@@ -1,4 +1,5 @@
 import os
+import re
 from collections import OrderedDict
 from itertools import combinations
 import dataclasses
@@ -38,6 +39,9 @@ class _HarryPotterWordFMRI:
 class _DataKindProperties:
     file_name: str
     is_preprocessed: bool = False
+    cluster_key_regex_format: Optional[str] = None
+    joint_data_regex_format: Optional[str] = None
+    subject_data_regex_format: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,7 +184,28 @@ class HarryPotterCorpus(CorpusBase):
     def _fmri_kind_properties(fmri_kind):
         kind_properties = {
             'raw': _DataKindProperties('', is_preprocessed=False),
-            'rank_clustered': _DataKindProperties('harry_potter_fmri_rank_clustered.npz', is_preprocessed=True)}
+            'rank_clustered': _DataKindProperties('harry_potter_fmri_rank_clustered.npz', is_preprocessed=True),
+            'inter_participant_prediction_rank_clustered': _DataKindProperties(
+                'harry_potter_fmri_one_from_all_high_pass_cross_subject_thresh_clustered.npz', is_preprocessed=True,
+                cluster_key_regex_format='clusters_ranked_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='ranked_data_hold_out_{hold_out}',
+                subject_data_regex_format='subject_means_ranked_{subject}_hold_out_{hold_out}'),
+            'inter_participant_prediction_surrogate_rank_clustered': _DataKindProperties(
+                'harry_potter_fmri_one_from_all_high_pass_cross_subject_thresh_clustered.npz', is_preprocessed=True,
+                cluster_key_regex_format='surrogate_clusters_ranked_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='ranked_surrogate_data_hold_out_{hold_out}',
+                subject_data_regex_format='surrogate_subject_means_ranked_{subject}_hold_out_{hold_out}'),
+            'inter_participant_prediction_clustered': _DataKindProperties(
+                'harry_potter_fmri_one_from_all_high_pass_cross_subject_thresh_clustered.npz', is_preprocessed=True,
+                cluster_key_regex_format='clusters_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='data_hold_out_{hold_out}',
+                subject_data_regex_format='subject_means_{subject}_hold_out_{hold_out}'),
+            'inter_participant_prediction_surrogate_clustered': _DataKindProperties(
+                'harry_potter_fmri_one_from_all_high_pass_cross_subject_thresh_clustered.npz', is_preprocessed=True,
+                cluster_key_regex_format='surrogate_clusters_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='surrogate_data_hold_out_{hold_out}',
+                subject_data_regex_format='surrogate_subject_means_{subject}_hold_out_{hold_out}'),
+        }
         if fmri_kind not in kind_properties:
             raise ValueError('Unknown fmri_kind: {}'.format(fmri_kind))
 
@@ -564,17 +589,87 @@ class HarryPotterCorpus(CorpusBase):
 
         return data, block_metadata, None, word_ids
 
-    def _read_preprocessed_fmri_files(self):
+    def _read_preprocessed_fmri_files(self, data_kind_properties):
+        subject_data_regex_format = data_kind_properties.subject_data_regex_format
+        if subject_data_regex_format is None:
+            subject_data_regex_format = 'data_{subject}_hold_out_{hold_out}'
+        joint_data_regex_format = data_kind_properties.joint_data_regex_format
+        if joint_data_regex_format is None:
+            joint_data_regex_format = 'data_hold_out_{hold_out}'
+
+        subject_data_regex = subject_data_regex_format.format(
+            subject='(?P<subject>[^_]+)', hold_out='(?P<hold_out>[^_]+)')
+        joint_data_regex = joint_data_regex_format.format(hold_out='(?P<hold_out>[^_]+)')
+
         with np.load(self.fmri_path, allow_pickle=True) as loaded:
             assert (self.run_info >= 0)
             subjects = set()
             blocks = set()
+            subject_data_keys = dict()
+            joint_data_keys = dict()
             for key in loaded:
-                if key.startswith('data_'):
-                    block = int(key[key.rindex('_') + 1:])
-                    if not key.endswith('_hold_out_{}'.format(block)):
-                        raise ValueError('Unexpected key {} in {}'.format(key, self.fmri_path))
-                    subject = key[len('data_'):-len('_hold_out_{}'.format(block))]
+                match = re.fullmatch(subject_data_regex, key)
+                if match is not None:
+                    subject = match['subject']
+                    block = int(match['hold_out'])
+                    subject_data_keys[(subject, block)] = key
+                    subjects.add(subject)
+                    blocks.add(block)
+                else:
+                    match = re.fullmatch(joint_data_regex, key)
+                    if match is not None:
+                        block = int(match['hold_out'])
+                        joint_data_keys[block] = key
+                        blocks.add(block)
+            subjects = list(sorted(subjects))
+            blocks = list(sorted(blocks))
+            held_out_block = blocks[self.run_info]
+
+            include_joint = True
+            if self.fmri_subjects is not None:
+                include_joint = 'joint' in self.fmri_subjects
+                subjects = [s for s in subjects if s in self.fmri_subjects]
+
+            run_lengths = loaded['run_lengths']
+            splits = np.cumsum(run_lengths)[:-1]
+
+            data = OrderedDict()
+            masks = OrderedDict()
+            for subject in subjects:
+                if (subject, held_out_block) in subject_data_keys:
+                    subject_data = loaded[subject_data_keys[(subject, held_out_block)]]
+                    if np.ndim(subject_data) == 1:
+                        subject_data = np.expand_dims(subject_data, 1)
+                    data[subject] = np.split(subject_data, splits)
+                masks[subject] = get_mask_for_subject(subject)
+            if include_joint and held_out_block in joint_data_keys:
+                joint_data = loaded[joint_data_keys[held_out_block]]
+                if np.ndim(joint_data) == 1:
+                    joint_data = np.expand_dims(joint_data, 1)
+                data['joint'] = np.split(joint_data, splits)
+            return data, masks
+
+    def read_preprocessed_fmri_clusters(self):
+        kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
+        if not kind_properties.is_preprocessed:
+            raise ValueError('{} is not a preprocessed fmri_kind'.format(self.fmri_kind))
+        cluster_key_regex_format = kind_properties.cluster_key_regex_format
+        if cluster_key_regex_format is None:
+            cluster_key_regex_format = 'clusters_{subject}_hold_out_{hold_out}'
+        cluster_regex = cluster_key_regex_format.format(
+            subject='(?P<subject>[^_]+)', hold_out='(?P<hold_out>[^_]+)')
+
+        with np.load(self.fmri_path, allow_pickle=True) as loaded:
+            assert (self.run_info >= 0)
+            subjects = set()
+            blocks = set()
+            subject_cluster_keys = dict()
+            for key in loaded:
+                match = re.fullmatch(cluster_regex, key)
+                if match is not None:
+                    subject = match['subject']
+                    block = int(match['hold_out'])
+                    subject_cluster_keys[(subject, block)] = key
                     subjects.add(subject)
                     blocks.add(block)
             subjects = list(sorted(subjects))
@@ -584,20 +679,17 @@ class HarryPotterCorpus(CorpusBase):
             if self.fmri_subjects is not None:
                 subjects = [s for s in subjects if s in self.fmri_subjects]
 
-            run_lengths = loaded['run_lengths']
-            splits = np.cumsum(run_lengths)[:-1]
-
-            data = OrderedDict()
-            masks = OrderedDict()
+            clusters = OrderedDict()
             for subject in subjects:
-                data[subject] = np.split(
-                    loaded['data_{}_hold_out_{}'.format(subject, held_out_block)], splits)
-                masks[subject] = get_mask_for_subject(subject)
-            return data, masks
+                if (subject, held_out_block) in subject_cluster_keys:
+                    clusters[subject] = loaded[subject_cluster_keys[(subject, held_out_block)]]
+
+            return clusters
 
     def _read_harry_potter_fmri_files(self):
-        if HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed:
-            return self._read_preprocessed_fmri_files()
+        kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
+        if kind_properties.is_preprocessed:
+            return self._read_preprocessed_fmri_files(kind_properties)
 
         # noinspection PyPep8
         subject_runs = dict(
@@ -628,7 +720,7 @@ class HarryPotterCorpus(CorpusBase):
             subject_data = list()
             for run in subject_runs[subject]:
                 functional_file = path_fmt.format(subject=subject, run=run)
-                data = nibabel.load(functional_file).get_data()
+                data = nibabel.load(functional_file).get_fdata()
                 subject_data.append(np.transpose(data))
 
             masks[subject] = get_mask_for_subject(subject)

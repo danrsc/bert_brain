@@ -243,6 +243,8 @@ class CorpusBase:
             'token_ids': FieldSpec(tensor_dtype=torch.long),
             'mask': FieldSpec(tensor_dtype=torch.uint8),
             'is_stop': FieldSpec(fill_value=True, tensor_dtype=torch.bool),
+            'part_of_speech': FieldSpec(fill_value='', tensor_dtype=str),
+            'part_of_speech_id': FieldSpec(tensor_dtype=torch.float),
             'is_begin_word_pieces': FieldSpec(tensor_dtype=torch.bool),
             'token_lengths': FieldSpec(tensor_dtype=torch.long),
             'token_probabilities': FieldSpec(fill_value=-20.),

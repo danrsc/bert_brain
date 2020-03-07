@@ -6,13 +6,14 @@ import numpy as np
 import spacy
 from spacy.language import Language as SpacyLanguage
 from spacy.symbols import ORTH
+from spacy import parts_of_speech
 
 from transformers import BertTokenizer
 
 from .input_features import InputFeatures
 
 __all__ = ['make_tokenizer_model', 'group_by_cum_lengths', 'get_data_token_index',
-           'bert_tokenize_with_spacy_meta', 'ChineseCharDetected']
+           'bert_tokenize_with_spacy_meta', 'ChineseCharDetected', 'parts_of_speech_to_ids']
 
 # word’s class was determined from its PoS tag, where nouns, verbs
 # (including modal verbs), adjectives, and adverbs were considered
@@ -35,7 +36,7 @@ __all__ = ['make_tokenizer_model', 'group_by_cum_lengths', 'get_data_token_index
 # SCONJ	subordinating conjunction	if, while, that
 # SYM	symbol	$, %, §, ©, +, −, ×, ÷, =, :), 😝
 # VERB	verb	run, runs, running, eat, ate, eating
-# X	other	sfpksdpsxmsa
+# X	other
 # SPACE	space
 
 content_pos = {'ADJ', 'ADV', 'AUX', 'NOUN', 'PRON', 'PROPN', 'VERB'}
@@ -45,6 +46,23 @@ def _is_stop(spacy_token):
     if spacy_token is None:
         return False
     return spacy_token.pos_ not in content_pos
+
+
+_pos_ids = dict((n, i) for i, n in enumerate([n_ for n_ in parts_of_speech.IDS if n_ != '']))
+_pos_ids[''] = np.nan
+
+
+def parts_of_speech_to_ids():
+    result = dict(_pos_ids)
+    del result['']
+    return result
+
+
+def _part_of_speech_id(spacy_token):
+    # use this to make the values between 0 and n
+    if spacy_token is None:
+        return np.nan
+    return _pos_ids[spacy_token.pos_]
 
 
 def make_tokenizer_model(model: str = 'en_core_web_md') -> SpacyLanguage:
@@ -316,6 +334,8 @@ def bert_tokenize_with_spacy_meta(
     example_tokens = list()
     example_mask = list()
     example_is_stop = list()
+    example_pos = list()
+    example_pos_id = list()
     example_is_begin_word_pieces = list()
     example_lengths = list()
     example_probs = list()
@@ -332,6 +352,8 @@ def bert_tokenize_with_spacy_meta(
         example_tokens.append(special_token)
         example_mask.append(1)
         example_is_stop.append(True)
+        example_pos.append('')
+        example_pos_id.append(np.nan)
         example_is_begin_word_pieces.append(True)
         example_lengths.append(0)
         example_probs.append(-20.)
@@ -427,6 +449,8 @@ def bert_tokenize_with_spacy_meta(
                 example_tokens.append(t)
                 example_mask.append(1)
                 example_is_stop.append(_is_stop(spacy_token))
+                example_pos.append('' if spacy_token is None else spacy_token.pos_)
+                example_pos_id.append(_part_of_speech_id(spacy_token))
                 example_lengths.append(length)
                 example_probs.append(-20. if spacy_token is None else spacy_token.prob)
                 example_head_location.append(head_location)
@@ -466,6 +490,8 @@ def bert_tokenize_with_spacy_meta(
         token_ids=_readonly(np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens))),
         mask=_readonly(np.array(example_mask)),
         is_stop=_readonly(np.array(example_is_stop)),
+        part_of_speech=tuple(example_pos),
+        part_of_speech_id=_readonly(np.array(example_pos_id)),
         is_begin_word_pieces=_readonly(np.array(example_is_begin_word_pieces)),
         token_lengths=_readonly(np.array(example_lengths)),
         token_probabilities=_readonly(np.array(example_probs)),

@@ -8,12 +8,19 @@ import torch.nn.functional
 
 from transformers.modeling_bert import gelu_new as gelu
 
-from .utility_modules import LinearWithLayerNorm
+from .utility_modules import LinearWithLayerNorm, HiddenReconstructionPenalty, QuasiAttention
 from ..common import NamedSpanEncoder
 from .graph_part import GraphPart
 from .grouping_modules import at_most_one_data_id, GroupConcatFixedGroupSize
 
-__all__ = ['KeyedLinear', 'KeyedCombinedLinear', 'KeyedSingleTargetSpanAttention', 'group_concat_linear']
+
+__all__ = [
+    'KeyedLinear',
+    'KeyedQuasiAttention',
+    'KeyedCombinedLinear',
+    'KeyedSingleTargetSpanAttention',
+    'group_concat_linear',
+    'KeyedConcat']
 
 
 def group_concat_linear(
@@ -113,21 +120,34 @@ class KeyedLinear(KeyedBase):
             source_name: Union[str, Tuple[str, ...]],
             hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
             hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
+            should_norm_hidden: bool = True,
             force_cpu: bool = False,
             output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
             targets: Optional[Union[str, Iterable[str]]] = None,
             apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False,
-            should_norm: bool = False):
+            should_norm: bool = False,
+            activation_fn: Optional[Callable[[Tensor], Tensor]] = None,
+            penultimate_reconstruction_penalty_coefficient: float = 0,
+            penultimate_reconstruction_l1_weight_coefficient: float = 0,
+            penultimate_reconstruction_output_name: str = 'rcn'):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
         self.force_cpu = force_cpu
         self.hidden_sizes = hidden_sizes
         self.hidden_activation = hidden_activation
+        self.should_norm_hidden = should_norm_hidden
         self.hidden = None
         self.linear = None
         self.norm_layers = None
         self.apply_at_most_one_data_id = apply_at_most_one_data_id
         self.should_norm = should_norm
+        self.activation_fn = activation_fn
+        self.penultimate_reconstruction_penalty = HiddenReconstructionPenalty(
+            penultimate_reconstruction_penalty_coefficient,
+            penultimate_reconstruction_l1_weight_coefficient,
+            penultimate_reconstruction_output_name,
+            hidden_activation,
+            should_norm_hidden)
 
     def _instantiate(self, name_to_num_channels):
         in_channels = name_to_num_channels[self.source_name]
@@ -137,7 +157,9 @@ class KeyedLinear(KeyedBase):
             for index_hidden in range(len(hidden_sizes)):
                 current_in = in_channels if index_hidden == 0 else hidden_sizes[index_hidden - 1]
                 hidden_modules.append(
-                    LinearWithLayerNorm(current_in, hidden_sizes[index_hidden], self.hidden_activation))
+                    LinearWithLayerNorm(
+                        current_in,
+                        hidden_sizes[index_hidden], self.hidden_activation, should_norm=self.should_norm_hidden))
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
         self.linear = nn.Linear(in_channels, sum(self.splits))
@@ -146,11 +168,12 @@ class KeyedLinear(KeyedBase):
             result[key] = int(np.prod(self.output_key_to_shape[key]))
         if self.should_norm:
             self.norm_layers = torch.nn.ModuleList(
-                modules=list(torch.nn.LayerNorm(result[k], eps=1e-12) for k in result))
+                modules=list(torch.nn.LayerNorm(result[k]) for k in result))
         for key in name_to_num_channels:
             if isinstance(key, tuple) and key[0] == self.source_name:
                 for result_key in self.output_key_to_shape:
                     result[(result_key,) + key[1:]] = name_to_num_channels[key]
+        self.penultimate_reconstruction_penalty.instantiate(sum(self.splits), in_channels)
         return result
 
     def forward(self, batch):
@@ -161,9 +184,12 @@ class KeyedLinear(KeyedBase):
             x = x.cpu()
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
+        if self.activation_fn is not None:
+            predictions = [self.activation_fn(p) for p in predictions]
         if self.should_norm:
             predictions = [norm(p) for norm, p in zip(self.norm_layers, predictions)]
         result = OrderedDict()
+        result.update(self.penultimate_reconstruction_penalty(torch.cat(predictions, dim=-1), x))
         assert(len(self.output_key_to_shape) == len(predictions))
         for k, p in zip(self.output_key_to_shape, predictions):
             for key in batch:
@@ -187,6 +213,117 @@ class KeyedLinear(KeyedBase):
                 result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
 
         return result
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        return self.penultimate_reconstruction_penalty.compute_penalties(batch, predictions, loss_dict)
+
+
+class KeyedQuasiAttention(KeyedBase):
+
+    def __init__(
+            self,
+            source_name: Union[str, Tuple[str, ...]],
+            hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
+            hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
+            should_norm_hidden: bool = True,
+            force_cpu: bool = False,
+            output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
+            targets: Optional[Union[str, Iterable[str]]] = None,
+            apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False,
+            should_norm: bool = False,
+            activation_fn: Optional[Callable[[Tensor], Tensor]] = None,
+            penultimate_reconstruction_penalty_coefficient: float = 0,
+            penultimate_reconstruction_l1_weight_coefficient: float = 0,
+            penultimate_reconstruction_output_name: str = 'rcn'):
+        super().__init__(output_key_to_shape, targets)
+        self.source_name = source_name
+        self.force_cpu = force_cpu
+        self.hidden_sizes = hidden_sizes
+        self.hidden_activation = hidden_activation
+        self.should_norm_hidden = should_norm_hidden
+        self.hidden = None
+        self.quasi_attention = None
+        self.norm_layers = None
+        self.apply_at_most_one_data_id = apply_at_most_one_data_id
+        self.should_norm = should_norm
+        self.activation_fn = activation_fn
+        self.penultimate_reconstruction_penalty = HiddenReconstructionPenalty(
+            penultimate_reconstruction_penalty_coefficient,
+            penultimate_reconstruction_l1_weight_coefficient,
+            penultimate_reconstruction_output_name,
+            hidden_activation,
+            should_norm_hidden)
+
+    def _instantiate(self, name_to_num_channels):
+        in_channels = name_to_num_channels[self.source_name]
+        if self.hidden_sizes is not None:
+            hidden_sizes = [self.hidden_sizes] if np.ndim(self.hidden_sizes) == 0 else self.hidden_sizes
+            hidden_modules = list()
+            for index_hidden in range(len(hidden_sizes)):
+                current_in = in_channels if index_hidden == 0 else hidden_sizes[index_hidden - 1]
+                hidden_modules.append(
+                    QuasiAttention(
+                        current_in,
+                        hidden_sizes[index_hidden],
+                        activation_function=self.hidden_activation,
+                        should_norm=self.should_norm_hidden))
+            self.hidden = torch.nn.Sequential(*hidden_modules)
+            in_channels = hidden_sizes[-1]
+        self.quasi_attention = QuasiAttention(
+            in_channels, sum(self.splits), activation_function=None, should_norm=False)
+        result = OrderedDict()
+        for key in self.output_key_to_shape:
+            result[key] = int(np.prod(self.output_key_to_shape[key]))
+        if self.should_norm:
+            self.norm_layers = torch.nn.ModuleList(
+                modules=list(torch.nn.LayerNorm(result[k]) for k in result))
+        for key in name_to_num_channels:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                for result_key in self.output_key_to_shape:
+                    result[(result_key,) + key[1:]] = name_to_num_channels[key]
+        self.penultimate_reconstruction_penalty.instantiate(sum(self.splits), in_channels)
+        return result
+
+    def forward(self, batch):
+        x = batch[self.source_name]
+        if self.hidden is not None:
+            x = self.hidden(x)
+        if self.force_cpu:
+            x = x.cpu()
+        predictions = self.quasi_attention(x)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        if self.activation_fn is not None:
+            predictions = [self.activation_fn(p) for p in predictions]
+        if self.should_norm:
+            predictions = [norm(p) for norm, p in zip(self.norm_layers, predictions)]
+        result = OrderedDict()
+        result.update(self.penultimate_reconstruction_penalty(torch.cat(predictions, dim=-1), x))
+        assert(len(self.output_key_to_shape) == len(predictions))
+        for k, p in zip(self.output_key_to_shape, predictions):
+            for key in batch:
+                if isinstance(key, tuple) and key[0] == self.source_name:
+                    result[(k,) + key[1:]] = batch[key]
+            p = p.view(p.size()[:-1] + self.output_key_to_shape[k])
+            result[k] = p
+
+            if isinstance(self.apply_at_most_one_data_id, dict):
+                apply_at_most_one_data_id = self.apply_at_most_one_data_id[k] \
+                    if k in self.apply_at_most_one_data_id else False
+            else:
+                apply_at_most_one_data_id = self.apply_at_most_one_data_id
+
+            if (apply_at_most_one_data_id == 'if_no_target' and k not in batch and (k, 'data_ids') in batch) \
+                    or apply_at_most_one_data_id is True:
+                data_ids = at_most_one_data_id(batch[(k, 'data_ids')])
+                indicator_valid = data_ids >= 0
+                result[k] = result[k][indicator_valid]
+                result[(k, 'data_ids')] = data_ids[indicator_valid]
+                result[(k, 'example_ids')] = torch.arange(len(data_ids), device=data_ids.device)[indicator_valid]
+
+        return result
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        return self.penultimate_reconstruction_penalty.compute_penalties(batch, predictions, loss_dict)
 
 
 class KeyedCombinedLinear(KeyedBase):
@@ -322,3 +459,55 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
             p = p.view(p.size()[:1] + self.output_key_to_shape[k])
             result[k] = p
         return result
+
+
+class KeyedConcat(GraphPart):
+
+    def __init__(
+            self,
+            source_names: Iterable[Union[str, Tuple[str, ...]]],
+            output_name: str,
+            activation_fn: Optional[Callable[[Tensor], Tensor]] = None):
+        super().__init__()
+        self.source_names = OrderedDict((k, None) for k in source_names)
+        self.output_name = output_name
+        self.activation_fn = activation_fn
+
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
+        source_names = OrderedDict()
+        for source in self.source_names:
+            if source in placeholder_name_to_fields:
+                for field in placeholder_name_to_fields[source]:
+                    if field not in self.source_names:
+                        source_names[field] = None
+            else:
+                source_names[source] = None
+        self.source_names = source_names
+
+    def instantiate(self, name_to_num_channels):
+        num_channels = 0
+        source_names = OrderedDict()
+        for source in self.source_names:
+            source_names[source] = name_to_num_channels[source]
+            num_channels += int(np.prod(name_to_num_channels[source]))
+        self.source_names = source_names
+        result = OrderedDict()
+        result[self.output_name] = num_channels
+        return result
+
+    def forward(self, batch):
+        result = list()
+        for source in self.source_names:
+            num_channels = self.source_names[source]
+            if np.ndim(num_channels) > 0:
+                result.append(
+                    batch[source].view(batch[source].size()[:-len(num_channels)] + (int(np.prod(num_channels)),)))
+            elif num_channels == 1 and len(batch[source].size()) == 1:
+                result.append(batch[source].view(batch[source].size() + (1,)))
+            else:
+                result.append(batch[source])
+        output = OrderedDict()
+        output[self.output_name] = torch.cat(result, dim=-1)
+        if self.activation_fn is not None:
+            output[self.output_name] = self.activation_fn(output[self.output_name])
+        return output

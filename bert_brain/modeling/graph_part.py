@@ -14,3 +14,6 @@ class GraphPart(Module):
 
     def instantiate(self, name_to_num_channels):
         raise NotImplementedError('{} does not implement instantiate'.format(type(self)))
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        return None

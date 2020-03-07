@@ -8,7 +8,7 @@ from transformers.modeling_bert import gelu_new as gelu
 from .graph_part import GraphPart
 
 
-__all__ = ['Conv1DCausal', 'PooledFromSequence', 'LinearWithLayerNorm']
+__all__ = ['Conv1DCausal', 'PooledFromSequence', 'LinearWithLayerNorm', 'QuasiAttention', 'HiddenReconstructionPenalty']
 
 
 class PooledFromSequence(GraphPart):
@@ -70,7 +70,7 @@ class LinearWithLayerNorm(torch.nn.Module):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels)
         self.activation_function = activation_function
-        self.layer_norm = torch.nn.LayerNorm(out_channels, eps=1e-12) if should_norm else None
+        self.layer_norm = torch.nn.LayerNorm(out_channels) if should_norm else None
 
     def forward(self, x):
         x = self.linear(x)
@@ -79,3 +79,96 @@ class LinearWithLayerNorm(torch.nn.Module):
         if self.layer_norm is not None:
             return self.layer_norm(x)
         return x
+
+
+class QuasiAttention(torch.nn.Module):
+
+    def __init__(self, in_channels, out_channels, bias=True, activation_function=gelu, should_norm=False):
+        super().__init__()
+        self.attention = nn.Parameter(torch.randn(in_channels, out_channels, requires_grad=True), requires_grad=True)
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_channels, requires_grad=True), requires_grad=True)
+        else:
+            self.register_parameter('bias', None)
+        self.activation_function = activation_function
+        self.layer_norm = torch.nn.LayerNorm(out_channels) if should_norm else None
+
+    def forward(self, x):
+        weights = nn.functional.softmax(self.attention, 0)
+        x = torch.matmul(x, weights)
+        if self.bias is not None:
+            x = x + self.bias
+        if self.activation_function is not None:
+            x = self.activation_function(x)
+        if self.layer_norm is not None:
+            return self.layer_norm(x)
+        return x
+
+
+class HiddenReconstructionPenalty(torch.nn.Module):
+
+    def __init__(
+            self,
+            penultimate_reconstruction_penalty_coefficient: float,
+            penultimate_reconstruction_l1_weight_coefficient: float,
+            penultimate_reconstruction_output_name: str = 'rcn',
+            activation_fn=None,
+            should_norm=False):
+        super().__init__()
+        self.penultimate_reconstruction_output_name = penultimate_reconstruction_output_name
+        self.penultimate_reconstruction_penalty_coefficient = penultimate_reconstruction_penalty_coefficient
+        self.penultimate_reconstruction_l1_weight_coefficient = penultimate_reconstruction_l1_weight_coefficient
+        if self.penultimate_reconstruction_penalty_coefficient < 0:
+            raise ValueError('penultimate_reconstruction_penalty_coefficient must be >= 0')
+        if self.penultimate_reconstruction_l1_weight_coefficient < 0:
+            raise ValueError('penultimate_reconstruction_l1_weight_coefficient must be >= 0')
+        if self.penultimate_reconstruction_penalty_coefficient == 0 \
+                and self.penultimate_reconstruction_l1_weight_coefficient > 0:
+            raise ValueError('penultimate_reconstruction_l1_weight_coefficient can only be > 0 '
+                             'if penultimate_reconstruction_penalty_coefficient > 0')
+        self.activation_fn = activation_fn
+        self.should_norm = should_norm
+        self.reconstruction_linear = None
+
+    def instantiate(self, in_channels, out_channels):
+        if self.penultimate_reconstruction_penalty_coefficient > 0:
+            self.reconstruction_linear = LinearWithLayerNorm(
+                in_channels, out_channels, self.activation_fn, self.should_norm)
+
+    def forward(self, source, target):
+        result = OrderedDict()
+        if self.reconstruction_linear is not None:
+            reconstruction = self.reconstruction_linear(source)
+            result[self.penultimate_reconstruction_output_name] = reconstruction - target
+        return result
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        result = OrderedDict()
+        if self.penultimate_reconstruction_l1_weight_coefficient > 0:
+            # weighting by the loss is problematic for 2 reasons:
+            # 1) the losses can have different scales (1000-way classification vs. binary vs. mse)
+            # 2) it is unclear how to handle the absence of a loss in a batch...set to 1?
+
+            # split_weights = torch.split(self.reconstruction_linear.linear.weight, self.splits, -1)
+            # assert(len(split_weights) == len(self.output_key_to_shape))
+            # for k, w in zip(self.output_key_to_shape, split_weights):
+            #     if k in loss_dict:
+            #         loss_weight, loss = loss_dict[k]
+            #         no_valid_inputs = isinstance(loss, str) and loss == 'no_valid_inputs'
+            #         if not no_valid_inputs:
+            #             scale = loss * self.penultimate_reconstruction_l1_weight_coefficient
+            #             result['l1_{}_{}'.format(self.penultimate_reconstruction_output_name, k)] = \
+            #                 loss_weight, scale * torch.sum(torch.abs(w))
+
+            # for now we just use a total l1
+            result['l1_{}'.format(self.penultimate_reconstruction_output_name)] = (
+                1,
+                self.penultimate_reconstruction_l1_weight_coefficient * torch.sum(
+                    torch.abs(self.reconstruction_linear.linear.weight)))
+        if self.penultimate_reconstruction_penalty_coefficient > 0:
+            result[self.penultimate_reconstruction_output_name] = (
+                1,
+                self.penultimate_reconstruction_penalty_coefficient
+                * torch.sum(predictions[self.penultimate_reconstruction_output_name] ** 2)
+                / predictions[self.penultimate_reconstruction_output_name].size()[0])
+        return result if len(result) > 0 else None

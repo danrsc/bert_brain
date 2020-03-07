@@ -21,7 +21,8 @@ from .result_output import write_predictions, write_loss_curve
 logger = logging.getLogger(__name__)
 
 
-__all__ = ['evaluate', 'train', 'TaskResult', 'TaskResults', 'setup_prediction_heads_and_losses']
+__all__ = [
+    'evaluate', 'train', 'TaskResult', 'TaskResults', 'setup_prediction_heads_and_losses']
 
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
@@ -267,43 +268,69 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
 
     default_sequence_head = None
     default_pooled_head = None
+    reachable_head_graph_parts = set()
     for k in prediction_shapes:
         kind = data_set.response_data_kind(k) if data_set.is_response_data(k) else None
         corpus_key = data_set.data_set_key_for_field(k)
         prediction_head_parts = None
         if k in settings.head_graph_parts:
             prediction_head_parts = settings.head_graph_parts[k]
+            reachable_head_graph_parts.add(k)
         elif kind in settings.head_graph_parts:
             prediction_head_parts = settings.head_graph_parts[kind]
+            reachable_head_graph_parts.add(kind)
         elif corpus_key in settings.head_graph_parts:
             prediction_head_parts = settings.head_graph_parts[corpus_key]
+            reachable_head_graph_parts.add(corpus_key)
 
         if prediction_head_parts is None:
             if data_set.is_sequence(k):
                 if default_sequence_head is None:
                     default_sequence_head = OrderedDict(default_sequence_linear=KeyedLinear(
-                        settings.default_sequence_source))
-                prediction_head_parts = default_sequence_head
-                prediction_head_parts['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
-                prediction_head_parts['default_sequence_linear'].apply_at_most_one_data_id[k] = \
+                        settings.default_sequence_source, apply_at_most_one_data_id=dict()))
+                default_sequence_head['default_sequence_linear'].output_key_to_shape[k] = prediction_shapes[k]
+                default_sequence_head['default_sequence_linear'].apply_at_most_one_data_id[k] = \
                     'if_no_target' if data_set.is_just_in_time_field(k) else False
             else:
                 if default_pooled_head is None:
                     default_pooled_head = OrderedDict(
                         default_pooled_linear=KeyedLinear(
                             settings.default_pooled_source, apply_at_most_one_data_id=dict()))
-                prediction_head_parts = default_pooled_head
-                prediction_head_parts['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
-                prediction_head_parts['default_pooled_linear'].apply_at_most_one_data_id[k] = \
+                default_pooled_head['default_pooled_linear'].output_key_to_shape[k] = prediction_shapes[k]
+                default_pooled_head['default_pooled_linear'].apply_at_most_one_data_id[k] = \
                     'if_no_target' if data_set.is_just_in_time_field(k) else False
 
-        for key in prediction_head_parts:
+    # now add all reachable parts to the graph first in the order specified in experiments.py,
+    # followed by the default parts
+    for head_key in settings.head_graph_parts:
+        if head_key in reachable_head_graph_parts:
+            for key in settings.head_graph_parts[head_key]:
+                if key not in graph_parts:
+                    graph_parts[key] = settings.head_graph_parts[head_key][key]
+                    graph_parts[key].resolve_placeholders(
+                        placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
+                else:
+                    if id(graph_parts[key]) != id(settings.head_graph_parts[head_key][key]):
+                        raise ValueError('Duplicate graph_part name: {}'.format(key))
+
+    if default_sequence_head is not None:
+        for key in default_sequence_head:
             if key not in graph_parts:
-                graph_parts[key] = prediction_head_parts[key]
+                graph_parts[key] = default_sequence_head[key]
                 graph_parts[key].resolve_placeholders(
                     placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
             else:
-                if id(graph_parts[key]) != id(prediction_head_parts[key]):
+                if id(graph_parts[key]) != id(default_sequence_head[key]):
+                    raise ValueError('Duplicate graph_part name: {}'.format(key))
+
+    if default_pooled_head is not None:
+        for key in default_pooled_head:
+            if key not in graph_parts:
+                graph_parts[key] = default_pooled_head[key]
+                graph_parts[key].resolve_placeholders(
+                    placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
+            else:
+                if id(graph_parts[key]) != id(default_pooled_head[key]):
                     raise ValueError('Duplicate graph_part name: {}'.format(key))
 
     token_supplemental_key_to_shape = OrderedDict()
@@ -359,25 +386,30 @@ def _train_step(
          (h.weight,
           h(False, index_epoch, global_step, batch, predictions, apply_weight=False))) for h in loss_handlers)
 
+    penalties = model.compute_penalties(batch, predictions, loss_dict)
+
     loss = None
     losses_to_write = OrderedDict()
-    for data_key in loss_dict:
-        weight, data_loss = loss_dict[data_key]
-        no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
-        kind = train_data_set.response_data_kind(data_key)
-        if (data_key in loss_tasks or kind in loss_tasks) and not no_valid_inputs:
-            current = weight * data_loss
-            losses_to_write[data_key] = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
-            if loss is None:
-                loss = current
-            else:
-                loss += current
-        train_result = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
-        train_results.add_result(
-            data_key,
-            index_epoch,
-            global_step,
-            train_result)
+    for is_penalty, term_dict in [(False, loss_dict), (True, penalties)]:
+        if term_dict is None:
+            continue
+        for data_key in term_dict:
+            weight, data_loss = term_dict[data_key]
+            no_valid_inputs = isinstance(data_loss, str) and data_loss == 'no_valid_inputs'
+            kind = train_data_set.response_data_kind(data_key) if not is_penalty else None
+            if (is_penalty or data_key in loss_tasks or kind in loss_tasks) and not no_valid_inputs:
+                current = weight * data_loss
+                losses_to_write[data_key] = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
+                if loss is None:
+                    loss = current
+                else:
+                    loss += current
+            train_result = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
+            train_results.add_result(
+                data_key,
+                index_epoch,
+                global_step,
+                train_result)
 
     if loss is not None:
         if len(losses_to_write) < 4:

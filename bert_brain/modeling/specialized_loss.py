@@ -14,8 +14,11 @@ __all__ = [
     'masked_absolute_error',
     'masked_pearsons_distance',
     'masked_cross_entropy',
+    'masked_negative_log_likelihood',
     'masked_binary_cross_entropy_with_logits',
+    'masked_binary_cross_entropy',
     'masked_soft_label_cross_entropy',
+    'masked_soft_label_negative_log_likelihood',
     'stop_word_and_target_not_nan_mask',
     'NamedTargetMaskedLossBase',
     'NamedTargetStopWordAwareMSE',
@@ -26,8 +29,11 @@ __all__ = [
     'NamedTargetStopWordAwareKLeastAEEvalUpdate',
     'NamedTargetStopWordAwarePearsonDistance',
     'NamedTargetStopWordAwareBinaryCrossEntropyWithLogits',
+    'NamedTargetStopWordAwareBinaryCrossEntropy',
     'NamedTargetStopWordAwareCrossEntropy',
+    'NamedTargetStopWordAwareNLL',
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
+    'NamedTargetStopWordAwareSoftLabelNLL',
     'NamedTargetSingleMSE',
     'NamedTargetSingleMAE',
     'NamedTargetSingleKLeastSE',
@@ -36,8 +42,11 @@ __all__ = [
     'NamedTargetSingleKLeastAEEvalUpdate',
     'NamedTargetSinglePearsonDistance',
     'NamedTargetSingleBinaryCrossEntropyWithLogits',
+    'NamedTargetSingleBinaryCrossEntropy',
     'NamedTargetSingleCrossEntropy',
+    'NamedTargetSingleNLL',
     'NamedTargetSingleSoftLabelCrossEntropy',
+    'NamedTargetSingleSoftLabelNLL',
     'KLeastSEHalvingEpochs',
     'DetailedResult']
 
@@ -130,7 +139,14 @@ def masked_pearsons_distance(mask, predictions, target, sequence_axis=1):
 
 
 def masked_cross_entropy(mask, predictions, target):
+    return _masked_cross_entropy(mask, predictions, target, use_nll=False)
 
+
+def masked_negative_log_likelihood(mask, predictions, target):
+    return _masked_cross_entropy(mask, predictions, target, use_nll=True)
+
+
+def _masked_cross_entropy(mask, predictions, target, use_nll):
     valid_count = mask.sum().item()
     if valid_count == 0:
         raise NoValidInputs()
@@ -140,7 +156,24 @@ def masked_cross_entropy(mask, predictions, target):
     valid_indices = torch.squeeze(torch.nonzero(flat_mask), dim=1)
     predictions = predictions[valid_indices]
     target = target[valid_indices].type(torch.long)
-    loss = torch.nn.functional.cross_entropy(predictions, target, reduction='none')
+    if use_nll:
+        loss = torch.nn.functional.nll_loss(predictions, target, reduction='none')
+    else:
+        loss = torch.nn.functional.cross_entropy(predictions, target, reduction='none')
+    result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
+    result.masked_scatter_(mask, loss)
+    return result, valid_count
+
+
+def masked_binary_cross_entropy(mask, predictions, target, weight=None):
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        raise NoValidInputs()
+    loss = torch.nn.functional.binary_cross_entropy(
+        torch.masked_select(predictions, mask),
+        torch.masked_select(target, mask),
+        reduction='none',
+        weight=weight)
     result = torch.zeros(mask.size(), dtype=loss.dtype, device=loss.device)
     result.masked_scatter_(mask, loss)
     return result, valid_count
@@ -179,6 +212,31 @@ def masked_soft_label_cross_entropy(mask, predictions, target):
         safer_input = predictions
 
     softmax = torch.nn.functional.log_softmax(safer_input, dim=-1)
+    terms = -softmax * target
+    cross_entropy = terms.sum(dim=-1)
+    if mask is not None:
+        cross_entropy = _values_or_zeros(mask, cross_entropy)
+    else:
+        valid_count = np.prod(cross_entropy.size())
+    return cross_entropy, valid_count
+
+
+def masked_soft_label_negative_log_likelihood(mask, predictions, target):
+    # note we just assume that the target values sum to 1 along axis=-1
+    if mask is not None:
+        valid_count = mask.sum().item()
+        if valid_count == 0:
+            raise NoValidInputs()
+    else:
+        valid_count = None
+
+    # set up -20 in the prediction where the mask is False;
+    if mask is not None:
+        softmax = -20 * torch.ones_like(predictions)
+        softmax.masked_scatter_(mask.view(mask.size() + (1,)), predictions)
+    else:
+        softmax = predictions
+
     terms = -softmax * target
     cross_entropy = terms.sum(dim=-1)
     if mask is not None:
@@ -395,6 +453,9 @@ class NamedTargetMaskedLossBase:
             return (loss,) + result[1:]
         return loss
 
+    def _get_predicted_and_target(self, batch, prediction_dict):
+        return prediction_dict[self.field], batch[self.field]
+
     def __call__(
             self,
             is_eval,
@@ -421,8 +482,7 @@ class NamedTargetMaskedLossBase:
             else:
                 return result
 
-        predictions = prediction_dict[self.field]
-        target = batch[self.field]
+        predictions, target = self._get_predicted_and_target(batch, prediction_dict)
         target = target.to(predictions.device)
         mask = self._get_mask(is_eval, epoch, global_step, batch, predictions, target)
 
@@ -777,6 +837,30 @@ class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
 
 
 @dataclass(frozen=True)
+class NamedTargetStopWordAwareNLL(_NamedTargetStopWordAwareLoss):
+    num_classes: Optional[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.num_classes is None:
+            raise ValueError('num_classes is required')
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_negative_log_likelihood(mask, predictions, target)
+
+    def shape_adjust(self, shape):
+        return shape + (self.num_classes,)
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordAwareLoss):
     pos_weight: Optional[float] = None
 
@@ -792,11 +876,43 @@ class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordA
         return 1.0
 
 
+
+@dataclass(frozen=True)
+class NamedTargetStopWordAwareBinaryCrossEntropy(_NamedTargetStopWordAwareLoss):
+    pos_weight: Optional[float] = None
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_binary_cross_entropy(mask, predictions, target, self.pos_weight)
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+
 @dataclass(frozen=True)
 class NamedTargetStopWordAwareSoftLabelCrossEntropy(_NamedTargetStopWordAwareLoss):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+
+@dataclass(frozen=True)
+class NamedTargetStopWordAwareSoftLabelNLL(_NamedTargetStopWordAwareLoss):
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_soft_label_negative_log_likelihood(mask, predictions, target)
 
     @classmethod
     def is_classification_loss(cls):
@@ -1036,10 +1152,49 @@ class NamedTargetSingleCrossEntropy(NamedTargetMaskedLossBase):
 
 
 @dataclass(frozen=True)
+class NamedTargetSingleNLL(NamedTargetMaskedLossBase):
+    num_classes: Optional[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.num_classes is None:
+            raise ValueError('num_classes is required')
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_negative_log_likelihood(mask, predictions, target)
+
+    def shape_adjust(self, shape):
+        return shape + (self.num_classes,)
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+
+@dataclass(frozen=True)
 class NamedTargetSingleSoftLabelCrossEntropy(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_soft_label_cross_entropy(mask, predictions, target)
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleSoftLabelNLL(NamedTargetMaskedLossBase):
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_soft_label_negative_log_likelihood(mask, predictions, target)
 
     @classmethod
     def uncertainty_weight(cls) -> float:
@@ -1056,6 +1211,22 @@ class NamedTargetSingleBinaryCrossEntropyWithLogits(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
+
+    @classmethod
+    def uncertainty_weight(cls) -> float:
+        return 1.0
+
+    @classmethod
+    def is_classification_loss(cls):
+        return True
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleBinaryCrossEntropy(NamedTargetMaskedLossBase):
+    pos_weight: Optional[float] = None
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        return masked_binary_cross_entropy(mask, predictions, target, self.pos_weight)
 
     @classmethod
     def uncertainty_weight(cls) -> float:

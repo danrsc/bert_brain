@@ -8,6 +8,7 @@ from torch import nn
 import torch.nn.functional
 
 from .graph_part import GraphPart
+from .utility_modules import HiddenReconstructionPenalty
 
 
 __all__ = ['LinearContextualParameterGeneration', 'ContextualBottleneckSum', 'ContextAttention',
@@ -47,7 +48,8 @@ class LinearContextualParameterGeneration(GraphPart):
             context_id_source_name,
             num_contexts,
             embedding_size,
-            inner_graph_parts: OrderedDict):
+            inner_graph_parts: OrderedDict,
+            use_softmax_embedding=False):
         super().__init__()
         self.context_id_source_name = context_id_source_name
         self.num_contexts = num_contexts
@@ -57,6 +59,7 @@ class LinearContextualParameterGeneration(GraphPart):
         self._splits = None
         self.generator = None
         self.embedding = None
+        self.softmax = nn.Softmax(dim=-1) if use_softmax_embedding else None
 
     def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
         if self.num_contexts == 'num_response_data_fields':
@@ -64,6 +67,17 @@ class LinearContextualParameterGeneration(GraphPart):
         for key in self.inner_graph_parts:
             self.inner_graph_parts[key].resolve_placeholders(
                 placeholder_name_to_fields, field_shapes, num_response_data_fields)
+
+    def compute_penalties(self, batch, predictions, loss_dict):
+        result = OrderedDict()
+        for key in self.inner_graph_parts:
+            penalties = self.inner_graph_parts[key].compute_penalties(batch, predictions, loss_dict)
+            if penalties is not None:
+                for p in penalties:
+                    if p in result:
+                        raise ValueError('Duplicate penalty: {}'.format(p))
+                    result[p] = penalties[p]
+        return result if len(result) > 0 else None
 
     def instantiate(self, name_to_num_channels):
         # noinspection PyTypeChecker
@@ -119,7 +133,8 @@ class LinearContextualParameterGeneration(GraphPart):
         self._splits = [int(np.prod(self._generated_parameters[k][2])) for k in self._generated_parameters]
 
         self.generator = torch.nn.Linear(self.embedding_size, sum(self._splits))
-        self.embedding = torch.nn.Embedding(self.num_contexts, self.embedding_size, max_norm=1)
+        self.embedding = torch.nn.Embedding(
+            self.num_contexts, self.embedding_size, max_norm=None if self.softmax is not None else 1)
 
         return name_to_num_channels
 
@@ -129,6 +144,8 @@ class LinearContextualParameterGeneration(GraphPart):
         if not torch.all(context_id == context_id[0]):
             raise ValueError('Expected a single context_id per batch')
         context_embedding = self.embedding(context_id[0])
+        if self.softmax is not None:
+            context_embedding = self.softmax(context_embedding / np.sqrt(context_embedding.size()[-1]))
         parameters = self.generator(context_embedding)
         parameters = torch.split(parameters, self._splits, dim=-1)
         assert(len(parameters) == len(self._generated_parameters))
@@ -170,7 +187,7 @@ class ContextualBottleneckSum(GraphPart):
             bottleneck_source_name,
             output_name,
             softmax_weights=False,
-            softmax_temperature_schedule_fn: Optional[Callable[[int], float]]=None):
+            softmax_temperature_schedule_fn: Optional[Callable[[int], float]] = None):
 
         super().__init__()
         self.context_id_source_name = context_id_source_name
@@ -187,11 +204,13 @@ class ContextualBottleneckSum(GraphPart):
 
     def instantiate(self, name_to_num_channels):
         input_shape = name_to_num_channels[self.bottleneck_source_name]
-        if np.ndim(input_shape) == 0:
-            raise ValueError('Expected a 1d shape from {}'.format(self.bottleneck_source_name))
-        if len(input_shape) != 2:
+        if np.ndim(input_shape) == 0 or len(input_shape) == 1:
+            num_bottlenecks = input_shape
+            num_channels = 1
+        elif len(input_shape) == 2:
+            num_channels, num_bottlenecks = input_shape
+        else:
             raise ValueError('Expected a shape with len 2 from {}'.format(self.bottleneck_source_name))
-        num_channels, num_bottlenecks = input_shape
         self.embedding = torch.nn.Embedding(
             self.num_contexts, num_bottlenecks, max_norm=None if self.softmax is not None else 1)
         result = OrderedDict()
