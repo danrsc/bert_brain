@@ -1,15 +1,17 @@
 from collections import OrderedDict
 import warnings
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
-from scipy.spatial.distance import cdist
+from scipy.spatial.distance import pdist, cdist, squareform
 from scipy.optimize import linear_sum_assignment
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, SpectralClustering
+from sklearn.decomposition import FastICA, PCA
 from tqdm.auto import tqdm
 from bottleneck import nanrankdata
 
 from kernel_ridge_cv_module import kernel_ridge_cv
+from multi_set_linear_kernel_cca import multi_set_kcca_cv
+from bert_brain import modified_gram_schmidt
 
 
 def eps_standardize(x, axis=0, eps=1e-12):
@@ -21,83 +23,6 @@ def _tuple_key(k):
     if isinstance(k, str):
         return k,
     return k
-
-
-def pair_predict_ensemble_kernel_ridge_cv_correlation(
-        fmri_subject_data_partitions, alpha_candidates, max_workers=None):
-    num_partitions = None
-    for s in fmri_subject_data_partitions:
-        if num_partitions is None:
-            num_partitions = len(fmri_subject_data_partitions[s])
-        elif num_partitions != len(fmri_subject_data_partitions[s]):
-            raise ValueError('Data partitions inconsistent across subjects')
-
-    all_predictions = list()
-    full_result = dict()
-    for hold_out in range(num_partitions):
-        print('starting hold out {}'.format(hold_out))
-        all_predictions.append(dict())
-
-        train_data = dict((s, list(r for i, r in enumerate(fmri_subject_data_partitions[s]) if i != hold_out))
-                          for s in fmri_subject_data_partitions)
-
-        pairs = list()
-        for s1 in fmri_subject_data_partitions:
-            for s2 in fmri_subject_data_partitions:
-                if s1 != s2:
-                    pairs.append((s1, s2))
-
-        if max_workers is not None and max_workers < 2:
-            for result, (s1, s2) in tqdm(zip(map(
-                    kernel_ridge_cv,
-                    [train_data[s1] for s1, s2 in pairs],
-                    [train_data[s2] for s1, s2 in pairs],
-                    [fmri_subject_data_partitions[s1][hold_out] for s1, s2 in pairs],
-                    [fmri_subject_data_partitions[s2][hold_out] for s1, s2 in pairs],
-                    [alpha_candidates for _ in pairs],
-                    [-1 for _ in pairs]), pairs), total=len(pairs)):
-                full_result[(s1, s2, hold_out)] = result
-                prediction = full_result[(s1, s2, hold_out)][1]
-                if s2 not in all_predictions[-1]:
-                    all_predictions[-1][s2] = list()
-                all_predictions[-1][s2].append(np.expand_dims(prediction, 0))
-        else:
-            with ProcessPoolExecutor(max_workers=max_workers) as ex:
-                for result, (s1, s2) in tqdm(zip(ex.map(
-                        kernel_ridge_cv,
-                        [train_data[s1] for s1, s2 in pairs],
-                        [train_data[s2] for s1, s2 in pairs],
-                        [fmri_subject_data_partitions[s1][hold_out] for s1, s2 in pairs],
-                        [fmri_subject_data_partitions[s2][hold_out] for s1, s2 in pairs],
-                        [alpha_candidates for _ in pairs],
-                        [-1 for _ in pairs]), pairs), total=len(pairs)):
-                    full_result[(s1, s2, hold_out)] = result
-                    prediction = full_result[(s1, s2, hold_out)][1]
-                    if s2 not in all_predictions[-1]:
-                        all_predictions[-1][s2] = list()
-                    all_predictions[-1][s2].append(np.expand_dims(prediction, 0))
-
-        for subject in all_predictions[-1]:
-            # take the mean prediction over the other subjects
-            all_predictions[-1][subject] = np.mean(np.concatenate(all_predictions[-1][subject]), axis=0)
-
-    correlations = dict()
-    for hold_out in range(len(all_predictions) + 1):
-        if hold_out == len(all_predictions):
-            for subject in all_predictions[0]:
-                y_hat = np.concatenate(list(all_predictions[i][subject] for i in range(len(all_predictions))))
-                y = np.concatenate(fmri_subject_data_partitions[subject])
-                correlations[subject] = np.nanmean(eps_standardize(y) * eps_standardize(y_hat), axis=0)
-        else:
-            for subject in all_predictions[hold_out]:
-                y_hat = all_predictions[hold_out][subject]
-                y = fmri_subject_data_partitions[subject][hold_out]
-                correlations[(subject, hold_out)] = np.nanmean(eps_standardize(y) * eps_standardize(y_hat), axis=0)
-
-    correlations = OrderedDict((k, correlations[k]) for k in sorted(correlations, key=_tuple_key))
-    full_result = OrderedDict((k, full_result[k]) for k in sorted(full_result, key=_tuple_key))
-
-    return correlations, full_result
 
 
 def _progress_iterate(progress, iterable):
@@ -121,22 +46,27 @@ class _ValidArrHelper:
         for index_partition in range(num_partitions):
             for subject in data:
                 is_finite = np.isfinite(data[subject][index_partition])
-                subject_bad_rows = np.any(np.logical_not(is_finite), axis=1)
-                if np.any(np.logical_and(subject_bad_rows, np.any(is_finite, axis=1))):
-                    raise ValueError('Rows must have all finite values or all nan values')
+                current_valid_rows = np.any(is_finite, axis=1)
+                current_valid_columns = np.any(is_finite, axis=0)
+                if np.any(np.logical_not(is_finite[current_valid_rows][:, current_valid_columns])):
+                    raise ValueError('Could not find finite sub-matrix')
                 if index_partition not in valid_rows:
-                    valid_rows[index_partition] = np.logical_not(subject_bad_rows)
-                elif not np.array_equal(valid_rows[index_partition], np.logical_not(subject_bad_rows)):
+                    valid_rows[index_partition] = current_valid_rows
+                elif not np.array_equal(valid_rows[index_partition], current_valid_rows):
                     raise ValueError('All subjects must have the same nan rows')
-                subject_bad_columns = np.any(np.logical_not(is_finite[valid_rows[index_partition]]), axis=0)
-                if np.any(np.logical_and(subject_bad_columns, np.any(is_finite[valid_rows[index_partition]], axis=0))):
-                    raise ValueError('Columns must have all finite values or all nan values')
                 if subject not in valid_columns:
-                    valid_columns[subject] = np.logical_not(subject_bad_columns)
+                    valid_columns[subject] = current_valid_columns
                 else:
-                    valid_columns[subject] = np.logical_and(valid_columns[subject], np.logical_not(subject_bad_columns))
+                    valid_columns[subject] = current_valid_columns
         self.valid_rows = valid_rows
         self.valid_columns = valid_columns
+
+    @property
+    def num_partitions(self):
+        return len(self.valid_rows)
+
+    def row_count(self, index_partition):
+        return len(self.valid_rows[index_partition])
 
     def compress(self, arr, index_partition, subject):
         return arr[self.valid_rows[index_partition]][:, self.valid_columns[subject]]
@@ -156,7 +86,106 @@ class _ValidArrHelper:
         return arr
 
 
-def one_from_all_kernel_ridge_cv_correlation(fmri_subject_data_partitions, alpha_candidates, mid_range_warn_level=0.05):
+def residual_from_twice_masked_data_with_ica_input(
+        data,
+        mask_x,
+        mask_y,
+        ica_components=10,
+        max_iter=5000,
+        tol=5e-4):
+    d = np.reshape(data, (len(data), -1))
+    mask_x = np.reshape(mask_x, -1)
+    mask_y = np.reshape(mask_y, -1)
+    bad_rows = np.any(np.logical_not(np.isfinite(d)), axis=1)
+    if np.any(np.logical_and(bad_rows, np.any(np.isfinite(d), axis=1))):
+        raise ValueError('Rows must have all finite values or all infinite values')
+    valid_rows = np.logical_not(bad_rows)
+    d = d[valid_rows]
+    x = d[:, mask_x]
+    y = d[:, mask_y]
+    x = eps_standardize(x)
+    ica = FastICA(n_components=ica_components, max_iter=max_iter, tol=tol)
+    x = ica.fit_transform(x)
+    x = np.concatenate([x, np.ones((len(x), 1), dtype=x.dtype)], axis=1)
+    solution, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+    y_hat = np.dot(x, solution)
+
+    y_hat_ = np.full((len(valid_rows), y_hat.shape[1]), np.nan, dtype=y_hat.dtype)
+    y_hat_[valid_rows] = y_hat
+    y_hat = y_hat_
+    d = np.copy(data)
+    d = np.reshape(d, (len(d), -1))
+    d[:, mask_y] = d[:, mask_y] - y_hat
+    return np.reshape(d, data.shape)
+
+
+def multi_set_kernel_cca_hold_out_projection(
+        fmri_subject_data_partitions, hold_out, regularization_candidates, num_components,
+        target_fmri_subject_data_predictions=None,
+        show_cv_corr=False):
+
+    valid_arr_helper = _ValidArrHelper(fmri_subject_data_partitions)
+    target_valid_arr_helper = valid_arr_helper
+    if target_fmri_subject_data_predictions is not None:
+        target_valid_arr_helper = _ValidArrHelper(target_fmri_subject_data_predictions)
+
+    cca_train = OrderedDict(
+        (s,
+         list(valid_arr_helper.compress(d, i, s)
+              for i, d in enumerate(fmri_subject_data_partitions[s]) if i != hold_out))
+        for s in fmri_subject_data_partitions)
+    if hold_out is None:
+        cca_validation = None
+    else:
+        cca_validation = OrderedDict(
+            (s, valid_arr_helper.compress(fmri_subject_data_partitions[s][hold_out], hold_out, s))
+            for s in fmri_subject_data_partitions)
+
+    kcca_result = multi_set_kcca_cv(
+        cca_train, regularization_candidates, num_components, cca_validation, show_cv_corr=show_cv_corr)
+    if cca_validation is None:
+        train_components = kcca_result
+        validation_components = None
+    else:
+        train_components, validation_components = kcca_result
+
+    projected_data = OrderedDict()
+    for s in train_components:
+        x = np.concatenate(
+            [train_components[s], np.ones((len(train_components[s]), 1), train_components[s].dtype)], axis=1)
+        y = cca_train[s]
+        if target_fmri_subject_data_predictions is not None:
+            y = list(target_valid_arr_helper.compress(d, i, s)
+                     for i, d in enumerate(target_fmri_subject_data_predictions[s]) if i != hold_out)
+        solution, _, _, _ = np.linalg.lstsq(x, np.concatenate(y), rcond=None)
+        splits = np.cumsum(list(len(c) for c in y))[:-1]
+        projection = np.split(x @ solution, splits)
+        projected_data[s] = list()
+        for _ in range(target_valid_arr_helper.num_partitions):
+            projected_data[s].append(None)
+
+        for i, p in zip([i for i in range(target_valid_arr_helper.num_partitions) if i != hold_out], projection):
+            projected_data[s][i] = target_valid_arr_helper.fill(p, i, s)
+
+        if hold_out is not None:
+            x = np.concatenate(
+                [validation_components[s],
+                 np.ones((len(validation_components[s]), 1), validation_components[s].dtype)], axis=1)
+            y = cca_validation[s]
+            if target_fmri_subject_data_predictions is not None:
+                y = target_valid_arr_helper.compress(target_fmri_subject_data_predictions[s][hold_out], hold_out, s)
+            solution, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+            projected_data[s][hold_out] = target_valid_arr_helper.fill(x @ solution, hold_out, s)
+    return projected_data
+
+
+def one_from_all_kernel_ridge_cv_correlation(
+        fmri_subject_data_partitions,
+        alpha_candidates,
+        mid_range_warn_level=0.05,
+        use_cca_projection=False,
+        cca_regularization_candidates=1 - np.linspace(1e-7, 1e-5, 20),
+        cca_num_components=None):
     num_partitions = None
     for s in fmri_subject_data_partitions:
         if num_partitions is None:
@@ -174,32 +203,53 @@ def one_from_all_kernel_ridge_cv_correlation(fmri_subject_data_partitions, alpha
 
     progress = tqdm(total=num_partitions * len(fmri_subject_data_partitions))
 
+    validation_data = OrderedDict()
+    projected_data = list()
     for hold_out in range(num_partitions):
         all_predictions.append(dict())
 
-        for subject in _progress_iterate(progress, fmri_subject_data_partitions):
+        if use_cca_projection:
+            if cca_regularization_candidates is None:
+                raise ValueError('cca_regularization_candidates must be specified if using cca_projection')
+            data_partitions = multi_set_kernel_cca_hold_out_projection(
+                fmri_subject_data_partitions, hold_out, cca_regularization_candidates, cca_num_components)
+            projected_data.append(data_partitions)
+        else:
+            data_partitions = fmri_subject_data_partitions
+
+        for subject in _progress_iterate(progress, data_partitions):
             other = list()
             self = list()
             for index_partition in range(num_partitions):
                 if index_partition == hold_out:
                     continue
                 other.append(list())
-                for s2 in fmri_subject_data_partitions:
+                for s2 in data_partitions:
                     if s2 == subject:
                         continue
                     other[-1].append(valid_arr_helper.compress(
-                        fmri_subject_data_partitions[s2][index_partition], index_partition, s2))
+                        data_partitions[s2][index_partition], index_partition, s2))
                 other[-1] = np.concatenate(other[-1], axis=1)
-                self.append(valid_arr_helper.compress(
-                    fmri_subject_data_partitions[subject][index_partition], index_partition, subject))
+                self_partition = valid_arr_helper.compress(
+                    data_partitions[subject][index_partition], index_partition, subject)
+                self.append(self_partition)
             other_validation = np.concatenate(list(
-                valid_arr_helper.compress(fmri_subject_data_partitions[s2][hold_out], hold_out, s2)
-                for s2 in fmri_subject_data_partitions if s2 != subject), axis=1)
+                valid_arr_helper.compress(data_partitions[s2][hold_out], hold_out, s2)
+                for s2 in data_partitions if s2 != subject), axis=1)
+
+            if subject not in validation_data:
+                validation_data[subject] = list()
+
+            validation_data[subject].append(data_partitions[subject][hold_out])
+
+            self_validation = valid_arr_helper.compress(
+                data_partitions[subject][hold_out], hold_out, subject)
+
             mse, y_hat, selected_alpha = kernel_ridge_cv(
                 other,
                 self,
                 other_validation,
-                valid_arr_helper.compress(fmri_subject_data_partitions[subject][hold_out], hold_out, subject),
+                self_validation,
                 alpha_candidates)
 
             indicator_less_max = np.max(alpha_candidates) > selected_alpha
@@ -228,19 +278,40 @@ def one_from_all_kernel_ridge_cv_correlation(fmri_subject_data_partitions, alpha
     for hold_out in range(len(all_predictions) + 1):
         if hold_out == len(all_predictions):
             for subject in all_predictions[0]:
-                y_hat = np.concatenate(list(all_predictions[i][subject] for i in range(len(all_predictions))))
-                y = np.concatenate(fmri_subject_data_partitions[subject])
+                y_hat = list()
+                y = list()
+                for i in range(len(all_predictions)):
+                    y_hat.append(all_predictions[i][subject])
+                    y_partition = validation_data[subject][i]
+                    y.append(y_partition)
+                y_hat = np.concatenate(y_hat)
+                y = np.concatenate(y)
                 correlations[subject] = np.nanmean(eps_standardize(y) * eps_standardize(y_hat), axis=0)
         else:
             for subject in all_predictions[hold_out]:
                 y_hat = all_predictions[hold_out][subject]
-                y = fmri_subject_data_partitions[subject][hold_out]
+                y = validation_data[subject][hold_out]
                 correlations[(subject, hold_out)] = np.nanmean(eps_standardize(y) * eps_standardize(y_hat), axis=0)
 
     correlations = OrderedDict((k, correlations[k]) for k in sorted(correlations, key=_tuple_key))
     full_result = OrderedDict((k, full_result[k]) for k in sorted(full_result, key=_tuple_key))
 
+    if use_cca_projection:
+        return correlations, full_result, projected_data
+
     return correlations, full_result
+
+
+def means_of_clusters(clusters, data):
+    data = data[:, clusters >= 0]
+    clusters = clusters[clusters >= 0]
+    num_clusters = np.max(clusters) + 1
+    # compute the means within cluster for all data (including test data)
+    segments = np.reshape(
+        np.expand_dims(np.arange(len(data)), 1) * num_clusters + np.expand_dims(clusters, 0), -1)
+
+    clustered_data = np.bincount(segments, weights=np.reshape(data, -1)) / np.bincount(segments)
+    return np.reshape(clustered_data, (len(data), num_clusters))
 
 
 def cluster_predictable_voxels(
@@ -330,12 +401,7 @@ def cluster_predictable_voxels(
             offset += np.sum(include_indicators[subject])
             full_clusters[subject] = subject_clusters
 
-        # compute the means within cluster for all data (including test data)
-        segments = np.reshape(
-            np.expand_dims(np.arange(len(joint_data)), 1) * num_clusters + np.expand_dims(clusters, 0), -1)
-
-        clustered_data = np.bincount(segments, weights=np.reshape(joint_data, -1)) / np.bincount(segments)
-        clustered_data = np.reshape(clustered_data, (len(joint_data), num_clusters))
+        clustered_data = means_of_clusters(clusters, joint_data)
 
         if hold_out - 1 in output_data:
             # try to number the clusters consistently across folds (just for better visualization)
@@ -361,3 +427,476 @@ def cluster_predictable_voxels(
     output_means = OrderedDict((k, output_means[k]) for k in sorted(output_means))
 
     return output_clusters, output_data, output_means
+
+
+def _is_local_maxima(x, order=1):
+    indicator = np.full(x.shape, True)
+    offsets_1d = [np.arange(-order, order + 1)] * len(x.shape)
+    mesh = np.meshgrid(*offsets_1d)
+    offsets = np.concatenate(list(np.reshape(m, (-1, 1)) for m in mesh), axis=1)
+    offsets = offsets[np.logical_not(np.all(offsets == 0, axis=1))]
+
+    indices = list(np.arange(x.shape[axis]) for axis in range(np.ndim(x)))
+
+    for offset in offsets:
+        shifted = x
+        for axis, (ind, s) in enumerate(zip(indices, offset)):
+            shifted = np.take(shifted, ind + s, mode='clip', axis=axis)
+        indicator = np.logical_and(indicator, x >= shifted)
+
+    return indicator
+
+
+def is_local_maxima_from_value_dict(value_dict, masks, min_value=None, order=1):
+    indicator_dict = type(value_dict)()
+    for key in value_dict:
+        if isinstance(key, tuple):
+            subject, hold_out = key
+        else:
+            subject = key
+
+        v = np.full(masks[subject].shape, -np.inf)
+        v[masks[subject]] = value_dict[key]
+        indicator_dict[key] = _is_local_maxima(v, order=order)[masks[subject]]
+
+        if min_value is not None:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
+                indicator_dict[key] = np.logical_and(indicator_dict[key], value_dict[key] >= min_value)
+
+    return indicator_dict
+
+
+def joint_cluster_local_maxima(
+        indicator_local_maxima_dict, data, correlations, correlation_threshold,
+        num_clusters, num_init, which_hold_out=None):
+    grouped_keys = dict()
+    for key in indicator_local_maxima_dict:
+        if isinstance(key, tuple):
+            _, hold_out = key
+        else:
+            hold_out = -1
+        if which_hold_out is not None and hold_out != which_hold_out:
+            continue
+        if hold_out not in grouped_keys:
+            grouped_keys[hold_out] = list()
+        grouped_keys[hold_out].append(key)
+
+    output_clusters = dict()
+    output_data = dict()
+    for hold_out in grouped_keys:
+        valid_rows = None
+        joint_train_data = list()
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+            indicator_local_maxima = indicator_local_maxima_dict[key]
+            train_data = np.concatenate(
+                list(r for i, r in enumerate(data[subject]) if i != hold_out))
+            train_data = train_data[:, indicator_local_maxima]
+            is_finite = np.isfinite(train_data)
+            subject_bad_rows = np.any(np.logical_not(is_finite), axis=1)
+            if np.any(np.logical_and(subject_bad_rows, np.any(is_finite, axis=1))):
+                raise ValueError('Rows must have all finite values or all nan values')
+            if valid_rows is None:
+                valid_rows = np.logical_not(subject_bad_rows)
+            elif not np.array_equal(valid_rows, np.logical_not(subject_bad_rows)):
+                raise ValueError('All subjects must have the same nan rows')
+
+            train_data = train_data[valid_rows]
+            train_data = eps_standardize(train_data)
+
+            joint_train_data.append(train_data)
+
+        num_maxima = sum(t.shape[1] for t in joint_train_data)
+        self_affinity = np.zeros((num_maxima, num_maxima), dtype=joint_train_data[0].dtype)
+        offset = 0
+        for t in joint_train_data:
+            self_affinity[offset:offset + t.shape[1], offset:offset + t.shape[1]] = 1 + np.corrcoef(t, rowvar=False)
+            offset += t.shape[1]
+        joint_train_data = np.concatenate(joint_train_data, axis=1)
+        affinity = 1 + np.corrcoef(joint_train_data, rowvar=False)
+        affinity = affinity - self_affinity
+
+        spectral = SpectralClustering(n_clusters=num_clusters, n_init=num_init, affinity='precomputed')
+        labels = spectral.fit_predict(affinity)
+
+        # compute the mean within label
+        label_means = means_of_clusters(labels, joint_train_data)
+        output_data[hold_out] = label_means
+
+        # assign the voxels to a label
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+            train_data = np.concatenate(
+                list(r for i, r in enumerate(data[subject]) if i != hold_out))
+            is_finite = np.isfinite(train_data)
+            subject_bad_rows = np.any(np.logical_not(is_finite), axis=1)
+            if np.any(np.logical_and(subject_bad_rows, np.any(is_finite, axis=1))):
+                raise ValueError('Rows must have all finite values or all nan values')
+            if valid_rows is None:
+                valid_rows = np.logical_not(subject_bad_rows)
+            elif not np.array_equal(valid_rows, np.logical_not(subject_bad_rows)):
+                raise ValueError('All subjects must have the same nan rows')
+
+            train_data = train_data[valid_rows]
+            train_data = eps_standardize(train_data)
+
+            labels_key = np.argmin(cdist(
+                train_data[:, correlations[key] >= correlation_threshold].T,
+                label_means.T), axis=1)
+
+            output_clusters[key] = np.full(correlations[key].shape, -1, dtype=labels.dtype)
+            output_clusters[key][correlations[key] >= correlation_threshold] = labels_key
+
+    output_data = OrderedDict((k, output_data[k]) for k in sorted(output_data))
+    output_clusters = OrderedDict((k, output_clusters[k]) for k in sorted(output_clusters))
+
+    return output_clusters, output_data
+
+
+def ordered_gram_schmidt(x, sort_values):
+    if len(sort_values) != x.shape[1]:
+        raise ValueError('Expected len(sort_values) to match x.shape[1]')
+    sorter = np.argsort(sort_values)
+    inverse = np.argsort(sorter)
+    return modified_gram_schmidt(x[:, sorter])[:, inverse]
+
+
+def gram_schmidt_joint_cluster_local_maxima(
+        indicator_local_maxima_dict, data, correlations, correlation_threshold,
+        num_clusters, num_init, which_hold_out=None):
+    grouped_keys = dict()
+    for key in indicator_local_maxima_dict:
+        if isinstance(key, tuple):
+            _, hold_out = key
+        else:
+            hold_out = -1
+        if which_hold_out is not None and hold_out != which_hold_out:
+            continue
+        if hold_out not in grouped_keys:
+            grouped_keys[hold_out] = list()
+        grouped_keys[hold_out].append(key)
+
+    output_clusters = dict()
+    output_data = dict()
+    for hold_out in grouped_keys:
+        valid_rows = None
+        joint_train_data = list()
+        joint_train_data_correlations = list()
+        non_zero_maxima = list()
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+            indicator_local_maxima = indicator_local_maxima_dict[key]
+            indicator_local_maxima = np.logical_and(indicator_local_maxima, correlations[key] >= correlation_threshold)
+            train_data = np.concatenate(
+                list(r for i, r in enumerate(data[subject]) if i != hold_out))
+            train_data = train_data[:, indicator_local_maxima]
+            is_finite = np.isfinite(train_data)
+            subject_bad_rows = np.any(np.logical_not(is_finite), axis=1)
+            if np.any(np.logical_and(subject_bad_rows, np.any(is_finite, axis=1))):
+                raise ValueError('Rows must have all finite values or all nan values')
+            if valid_rows is None:
+                valid_rows = np.logical_not(subject_bad_rows)
+            elif not np.array_equal(valid_rows, np.logical_not(subject_bad_rows)):
+                raise ValueError('All subjects must have the same nan rows')
+
+            train_data = train_data[valid_rows]
+            train_data_gs = ordered_gram_schmidt(train_data, -correlations[key][indicator_local_maxima])
+            non_zero = np.sum(train_data_gs, axis=0) != 0
+            train_data = train_data[:, non_zero]
+            train_data_gs = train_data_gs[:, non_zero]
+            joint_train_data.append(train_data_gs)
+            non_zero_maxima.append(train_data)
+            joint_train_data_correlations.append(correlations[key][indicator_local_maxima][non_zero])
+
+        joint_train_data = np.concatenate(joint_train_data, axis=1)
+        joint_train_data_correlations = np.concatenate(joint_train_data_correlations, axis=1)
+        non_zero_maxima = np.concatenate(non_zero_maxima, axis=1)
+        affinity = joint_train_data.T @ joint_train_data
+
+        spectral = SpectralClustering(n_clusters=num_clusters, n_init=num_init, affinity='precomputed')
+        labels = spectral.fit_predict(affinity)
+
+        # compute the mean within label
+        label_means = means_of_clusters(labels, joint_train_data)
+        label_mean_correlation = np.bincount(labels, weights=joint_train_data_correlations / np.bincount(labels))
+
+        # re-orthogonalize
+        label_means = ordered_gram_schmidt(label_means, -label_mean_correlation)
+        output_data[hold_out] = label_means
+
+        # find the dot-product of the original maxima with clusters
+        maxima_dot = label_means.T @ non_zero_maxima
+
+        # assign the voxels to a label
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+            train_data = np.concatenate(
+                list(r for i, r in enumerate(data[subject]) if i != hold_out))
+            is_finite = np.isfinite(train_data)
+            subject_bad_rows = np.any(np.logical_not(is_finite), axis=1)
+            if np.any(np.logical_and(subject_bad_rows, np.any(is_finite, axis=1))):
+                raise ValueError('Rows must have all finite values or all nan values')
+            if valid_rows is None:
+                valid_rows = np.logical_not(subject_bad_rows)
+            elif not np.array_equal(valid_rows, np.logical_not(subject_bad_rows)):
+                raise ValueError('All subjects must have the same nan rows')
+
+            train_data = train_data[valid_rows]
+            train_dot = label_means.T @ train_data
+
+            # find the nearest neighbor in the dot product space
+            labels_key = labels[np.argmin(cdist(train_dot.T, maxima_dot.T), axis=1)]
+            output_clusters[key] = np.where(correlations[key] >= correlation_threshold, labels_key, -1)
+
+    output_data = OrderedDict((k, output_data[k]) for k in sorted(output_data))
+    output_clusters = OrderedDict((k, output_clusters[k]) for k in sorted(output_clusters))
+
+    return output_clusters, output_data
+
+
+def _nearest(x, k):
+    indices_sort = np.argsort(-x, axis=1)
+    indices_sort = indices_sort[:, :k]
+    indices_sort_b = np.tile(
+        np.expand_dims(np.arange(indices_sort.shape[0]), 1), (1, indices_sort.shape[1]))
+    indices_sort = np.reshape(indices_sort, -1)
+    indices_sort_b = np.reshape(indices_sort_b, -1)
+    indicator_nearest = np.full_like(x, False)
+    indicator_nearest[(indices_sort, indices_sort_b)] = True
+    indicator_nearest[(indices_sort_b, indices_sort)] = True
+    return indicator_nearest
+
+
+def _valid_rows(x):
+    is_finite = np.isfinite(x)
+    bad_rows = np.any(np.logical_not(is_finite), axis=1)
+    if np.any(np.logical_and(bad_rows, np.any(is_finite, axis=1))):
+        raise ValueError('Rows must have all finite values or all nan values')
+    return np.logical_not(bad_rows)
+
+
+def _fill_rows(x, valid_rows, split=True, fill_value=np.nan):
+    if split:
+        splits = np.cumsum(list(np.sum(v) for v in valid_rows))[:-1]
+        x = np.split(x, splits)
+    else:
+        x = [x]
+        valid_rows = [valid_rows]
+    result = list()
+    for x_, v in zip(x, valid_rows):
+        result.append(np.full((len(v),) + x_.shape[1:], fill_value=fill_value, dtype=x_.dtype))
+        result[-1][v] = x_
+    if not split:
+        result = result[0]
+    return result
+
+
+def residual_directions(
+        indicator_local_maxima_dict,
+        data,
+        num_pca_components,
+        num_spectral_components,
+        num_spectral_init=10,
+        num_iter=3,
+        which_hold_out=None):
+    grouped_keys = dict()
+    for key in indicator_local_maxima_dict:
+        if isinstance(key, tuple):
+            _, hold_out = key
+        else:
+            hold_out = -1
+        if which_hold_out is not None and hold_out != which_hold_out:
+            continue
+        if hold_out not in grouped_keys:
+            grouped_keys[hold_out] = list()
+        grouped_keys[hold_out].append(key)
+
+    result = dict()
+    for hold_out in grouped_keys:
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+
+            valid_rows = list(_valid_rows(r) for r in data[subject])
+            compressed = list(r[v] for r, v in zip(data[subject], valid_rows))
+            train = np.concatenate(list(r for i, r in enumerate(compressed) if i != hold_out))
+            all_data = np.concatenate(compressed)
+
+            maxima = train[:, indicator_local_maxima_dict[key]]
+            full_maxima = all_data[:, indicator_local_maxima_dict[key]]
+            labels = np.arange(maxima.shape[1])
+            maxima_residual = None
+            full_maxima_residual = None
+            for _ in range(num_iter):
+                maxima_residual = np.full_like(maxima, np.nan)
+                full_maxima_residual = np.full_like(full_maxima, np.nan)
+                for i in np.unique(labels):
+                    indicator_x = labels != i
+                    indicator_y = labels == i
+
+                    pca = PCA(n_components=num_pca_components)
+                    other = pca.fit_transform(maxima[:, indicator_x])
+
+                    other = np.concatenate([other, np.ones((len(other), 1), dtype=other.dtype)], axis=1)
+                    solution, _, _, _ = np.linalg.lstsq(other, maxima[:, indicator_y], rcond=None)
+                    maxima_residual[:, indicator_y] = maxima[:, indicator_y] - other @ solution
+
+                    other_full = pca.transform(full_maxima[:, indicator_x])
+                    other_full = np.concatenate(
+                        [other_full, np.ones((len(other_full), 1), dtype=other_full.dtype)], axis=1)
+                    full_maxima_residual[:, indicator_y] = full_maxima[:, indicator_y] - other_full @ solution
+
+                affinity = 1 - squareform(pdist(maxima_residual.T, metric='cosine'))
+                indicator_nearest = _nearest(affinity, num_spectral_components)
+                affinity = np.where(indicator_nearest, affinity, 0)
+                spectral = SpectralClustering(
+                    n_clusters=num_spectral_components, n_init=num_spectral_init, affinity='precomputed')
+                labels = spectral.fit_predict(affinity)
+
+            # choose a centroid
+            indicator_centroids = np.full(np.sum(indicator_local_maxima_dict[key]), False)
+            for i in np.unique(labels):
+                indicator_label = labels == i
+                affinity = 1 - squareform(pdist(maxima_residual[:, indicator_label].T, metric='cosine'))
+                indicator_max = np.full(len(affinity), False)
+                indicator_max[np.argmax(np.sum(affinity, axis=1))] = True
+                indicator_centroids[indicator_label] = indicator_max
+
+            train_centroids = maxima[:, indicator_centroids]
+            full_centroids = full_maxima_residual[:, indicator_centroids]
+
+            full_centroid_residuals = np.full_like(full_centroids, np.nan)
+            for i in range(train_centroids.shape[1]):
+                indicator_x = np.arange(train_centroids.shape[1]) != i
+                other = np.concatenate(
+                    [train_centroids[:, indicator_x], np.ones((len(train_centroids), 1), dtype=train_centroids.dtype)],
+                    axis=1)
+                solution, _, _, _ = np.linalg.lstsq(other, train_centroids[:, i], rcond=None)
+                other = np.concatenate(
+                    [full_centroids[:, indicator_x], np.ones((len(full_centroids), 1), dtype=full_centroids.dtype)],
+                    axis=1)
+                full_centroid_residuals[:, i] = full_centroids[:, i] - other @ solution
+
+            result[key] = _fill_rows(full_centroid_residuals, valid_rows)
+
+    result = OrderedDict((k, result[k]) for k in sorted(result))
+    return result
+
+
+def joint_cluster_maxima_residual(maxima_residuals, data, num_components, which_hold_out=None, num_spectral_init=10):
+    grouped_keys = dict()
+    for key in maxima_residuals:
+        if isinstance(key, tuple):
+            _, hold_out = key
+        else:
+            hold_out = -1
+        if which_hold_out is not None and hold_out != which_hold_out:
+            continue
+        if hold_out not in grouped_keys:
+            grouped_keys[hold_out] = list()
+        grouped_keys[hold_out].append(key)
+
+    result = dict()
+    components = dict()
+    for hold_out in grouped_keys:
+
+        valid_rows = None
+        joint_train_data = list()
+        joint_train_maxima_residuals = list()
+        joint_full_maxima_residuals = list()
+
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+
+            v = list(_valid_rows(r) for r in data[subject])
+            if valid_rows is None:
+                valid_rows = v
+            else:
+                if len(valid_rows) != len(v):
+                    raise ValueError('All subjects must have the same nan rows')
+                for v_, have in zip(v, valid_rows):
+                    if not np.array_equal(v_, have):
+                        raise ValueError('All subjects must have the same nan rows')
+
+            compressed = list(r[v] for r, v in zip(data[subject], valid_rows))
+            train = np.concatenate(list(r for i, r in enumerate(compressed) if i != hold_out))
+
+            full_maxima = list(r[v] for r, v in zip(maxima_residuals[key], valid_rows))
+            train_maxima = np.concatenate(list(r for i, r in enumerate(full_maxima) if i != hold_out))
+
+            joint_train_data.append(train)
+            joint_train_maxima_residuals.append(train_maxima)
+            joint_full_maxima_residuals.append(np.concatenate(full_maxima))
+
+        maxima_counts = list(m.shape[1] for m in joint_train_maxima_residuals)
+        joint_train_maxima_residuals = np.concatenate(joint_train_maxima_residuals, axis=1)
+        joint_full_maxima_residuals = np.concatenate(joint_full_maxima_residuals, axis=1)
+
+        affinity = 1 - squareform(pdist(joint_train_maxima_residuals.T, metric='cosine'))
+        # set block diagonal to 0
+        offset = 0
+        for m in maxima_counts:
+            affinity[offset:offset + m, offset:offset + m] = 0
+            offset += m
+
+        indicator_nearest = _nearest(affinity, num_components)
+        affinity = np.where(indicator_nearest, affinity, 0)
+
+        spectral = SpectralClustering(n_clusters=num_components, n_init=num_spectral_init, affinity='precomputed')
+        labels = spectral.fit_predict(affinity)
+
+        train_components = means_of_clusters(labels, joint_train_maxima_residuals)
+        full_components = means_of_clusters(labels, joint_full_maxima_residuals)
+        full_component_residuals = np.full_like(full_components, np.nan)
+        train_component_residuals = np.full_like(train_components, np.nan)
+        for i in range(train_components.shape[1]):
+            indicator_x = np.arange(train_components.shape[1]) != i
+            other = np.concatenate(
+                [train_components[:, indicator_x], np.ones((len(train_components), 1), dtype=train_components.dtype)],
+                axis=1)
+            solution, _, _, _ = np.linalg.lstsq(other, train_components[:, i], rcond=None)
+            train_component_residuals[:, i] = train_components[:, i] - other @ solution
+            other = np.concatenate(
+                [full_components[:, indicator_x], np.ones((len(full_components), 1), dtype=full_components.dtype)],
+                axis=1)
+            full_component_residuals[:, i] = full_components[:, i] - other @ solution
+
+        train_components = train_component_residuals
+        full_components = full_component_residuals
+
+        if hold_out - 1 in components:
+            # try to number the clusters consistently across folds (just for better visualization)
+            last_clustered_data = components[hold_out - 1]
+            last_clustered_data = np.concatenate(list(r[v] for r, v in zip(last_clustered_data, valid_rows)))
+            distances = cdist(full_components.T, last_clustered_data.T, metric='cosine')
+            _, new_numbers = linear_sum_assignment(distances)
+            sorter = np.argsort(new_numbers)
+            full_components = full_components[:, sorter]
+            train_components = train_components[:, sorter]
+
+        components[hold_out] = _fill_rows(full_components, valid_rows)
+
+        for key, train in zip(grouped_keys[hold_out], joint_train_data):
+            result[key] = labels[np.argmin(cdist(train.T, train_components.T, metric='cosine'), axis=1)]
+
+    result = OrderedDict((k, result[k]) for k in maxima_residuals)
+    components = OrderedDict((k, components[k]) for k in sorted(components))
+    return components, result

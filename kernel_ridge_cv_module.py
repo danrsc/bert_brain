@@ -84,7 +84,10 @@ def kernel_ridge_cv(
     train_sigma = np.std(x_train, axis=0, keepdims=True)
     indicator_valid = train_sigma[0] > 1e-12
     x_train = x_train[:, indicator_valid]
-    x_validation = x_validation[:, indicator_valid]
+    if x_validation is None:
+        x_validation = x_train
+    else:
+        x_validation = x_validation[:, indicator_valid]
     train_mu = train_mu[:, indicator_valid]
     train_sigma = train_sigma[:, indicator_valid]
 
@@ -95,7 +98,10 @@ def kernel_ridge_cv(
     y_sigma = np.std(y_train, axis=0, keepdims=True)
 
     y_train = np.divide(y_train - y_mu, y_sigma, where=y_sigma > 1e-12)
-    y_validation = np.divide(y_validation - y_mu, y_sigma, where=y_sigma > 1e-12)
+    if y_validation is None:
+        y_validation = y_train
+    else:
+        y_validation = np.divide(y_validation - y_mu, y_sigma, where=y_sigma > 1e-12)
 
     x_validation = x_validation @ x_train.T
     x_train = x_train @ x_train.T

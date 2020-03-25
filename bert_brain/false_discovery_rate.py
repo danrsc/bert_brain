@@ -1,7 +1,56 @@
 import numpy as np
 
 
-__all__ = ['fdr_correction']
+__all__ = ['fdr_correction', 'negative_tail_fdr_threshold']
+
+
+def negative_tail_fdr_threshold(x, chance_level, alpha=0.05, axis=-1):
+    """
+    The idea of this is to assume that the noise distribution around the known chance level is symmetric. We can then
+    estimate how many of the values at a given level above the chance level are due to noise based on how many values
+    there are at the symmetric below chance level.
+    Args:
+        x: The data
+        chance_level: The known chance level for this metric.
+            For example, if the metric is correlation, this could be 0.
+        alpha: Significance level
+        axis: Which axis contains the distribution of values
+
+    Returns:
+        The threshold at which only alpha of the values are due to noise, according to this estimation method
+    """
+    noise_values = np.where(x <= chance_level, x, np.inf)
+    # sort ascending, i.e. from most extreme to least extreme
+    noise_values = np.sort(noise_values, axis=axis)
+    noise_values = np.where(np.isfinite(noise_values), noise_values, np.nan)
+
+    mixed_values = np.where(x > chance_level, x, -np.inf)
+    # sort descending, i.e. from most extreme to least extreme
+    mixed_values = np.sort(-mixed_values, axis=axis)
+    mixed_values = np.where(np.isfinite(mixed_values), mixed_values, np.nan)
+
+    # arange gives the number of values which are more extreme in a sorted array
+    num_more_extreme = np.arange(x.shape[axis])
+    # if we take these to be the mixed counts, then multiplying by alpha (after including the value itself)
+    # gives us the maximum noise counts, which we can use as an index
+    # we also add 1 at the end to include the item at that level
+    noise_counts = np.ceil(alpha * (num_more_extreme + 1)).astype(np.intp) + 1
+
+    # filter out illegal indexes
+    indicator_valid = noise_counts < noise_values.shape[axis]
+
+    noise_values_at_counts = np.take(noise_values, noise_counts[indicator_valid], axis=axis)
+    mixed_values_at_counts = np.take(mixed_values, np.arange(mixed_values.shape[axis])[indicator_valid], axis=axis)
+
+    # if the (abs) mixed value is greater than the (abs) noise value, we would have to move to the left on the noise
+    # counts to get to the mixed value (i.e. the threshold), which is in the direction of decreasing counts. Therefore
+    # at this threshold, the fdr is less than alpha
+    noise_values_at_counts = np.abs(noise_values_at_counts - chance_level)
+    mixed_values_at_counts = np.abs(mixed_values_at_counts - chance_level)
+    thresholds = np.where(mixed_values_at_counts >= noise_values_at_counts, mixed_values_at_counts, np.nan)
+    # take the minimum value where this holds
+    thresholds = np.nanmin(thresholds, axis=axis)
+    return thresholds
 
 
 def fdr_correction(p_values, alpha=0.05, method='by', axis=None):
