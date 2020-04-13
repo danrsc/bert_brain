@@ -124,6 +124,8 @@ def evaluate(
     total_count = 0
     losses_to_write = OrderedDict()
     losses_to_write_counts = OrderedDict()
+    metrics_to_write = OrderedDict()
+    metrics_to_write_counts = OrderedDict()
     for batch in eval_data_loader:
         # if len(all_results) % 1000 == 0:
         #     logger.info("Processing example: %d" % (len(all_results)))
@@ -133,24 +135,24 @@ def evaluate(
         with torch.no_grad():
             predictions = model(batch, eval_data_set)
             eval_data_set.just_in_time_targets(batch, predictions)
-            loss_result = OrderedDict(
-                (h.field,
-                 (h.weight,
-                  h(True, epoch, global_step, batch, predictions,
-                    return_detailed=return_detailed, apply_weight=False, as_numpy=True, reduction='none')))
-                for h in loss_handlers)
-            if return_detailed:
-                loss_dict = OrderedDict()
-                for k in loss_result:
-                    weight, (summary, detailed) = loss_result[k]
-                    loss_dict[k] = weight, summary
-                    if k not in all_results:
-                        all_results[k] = list()
-                    all_results[k].extend(detailed)
-            else:
-                loss_dict = loss_result
-            for data_key in loss_dict:
-                weight, (data_loss, data_valid_count) = loss_dict[data_key]
+            loss_result = OrderedDict()
+            metric_result = OrderedDict()
+            for loss_handler in loss_handlers:
+                handler_result = loss_handler(
+                    True, epoch, global_step, batch, predictions,
+                    return_detailed=return_detailed, apply_weight=False, as_numpy=True, reduction='none')
+                if return_detailed:
+                    handler_result, detailed_result = handler_result
+                    if loss_handler.field not in all_results:
+                        all_results[loss_handler.field] = list()
+                    all_results[loss_handler.field].extend(detailed_result)
+                handler_result, additional_metrics = handler_result
+                loss_result[loss_handler.field] = (loss_handler.weight, handler_result)
+                for k in additional_metrics:
+                    metric_result['{}.{}'.format(loss_handler.field, k)] = additional_metrics[k]
+
+            for data_key in loss_result:
+                weight, (data_loss, data_valid_count) = loss_result[data_key]
                 if data_key not in losses_to_write:
                     losses_to_write[data_key] = 0
                     losses_to_write_counts[data_key] = 0
@@ -167,6 +169,16 @@ def evaluate(
                         total_loss += current
                         total_count += data_valid_count
 
+            for data_key in metric_result:
+                data_loss, data_valid_count = metric_result[data_key]
+                if data_key not in metrics_to_write:
+                    metrics_to_write[data_key] = 0
+                    metrics_to_write_counts[data_key] = 0
+                if data_valid_count > 0:
+                    current = np.sum(data_loss)
+                    metrics_to_write[data_key] += current
+                    metrics_to_write_counts[data_key] += data_valid_count
+
     for h in loss_handlers:
         if hasattr(h, 'after_eval_batches'):
             h.after_eval_batches(epoch, global_step)
@@ -177,6 +189,13 @@ def evaluate(
         else:
             losses_to_write[k] /= losses_to_write_counts[k]
         eval_results.add_result(k, epoch, global_step, losses_to_write[k])
+
+    for k in metrics_to_write:
+        if metrics_to_write_counts[k] == 0:
+            metrics_to_write[k] = np.nan
+        else:
+            metrics_to_write[k] /= metrics_to_write_counts[k]
+        eval_results.add_result(k, epoch, global_step, metrics_to_write[k])
 
     if total_count > 0:
         if len(losses_to_write) < 4:
@@ -381,10 +400,15 @@ def _train_step(
     if sampler_to_update is not None and hasattr(sampler_to_update, 'update'):
         sampler_to_update.update(batch, predictions, loss_handlers)
     train_data_set.just_in_time_targets(batch, predictions)
-    loss_dict = OrderedDict(
-        (h.field,
-         (h.weight,
-          h(False, index_epoch, global_step, batch, predictions, apply_weight=False))) for h in loss_handlers)
+    loss_dict = OrderedDict()
+    metric_result = OrderedDict()
+    for loss_handler in loss_handlers:
+        handler_result, additional_metrics = loss_handler(
+            False, index_epoch, global_step, batch, predictions, apply_weight=False)
+        loss_dict[loss_handler.field] = (loss_handler.weight, handler_result)
+        for metric in additional_metrics:
+            metric_result['{}.{}'.format(loss_handler.field, metric)] = \
+                additional_metrics[metric].detach().cpu().numpy().item()
 
     penalties = model.compute_penalties(batch, predictions, loss_dict)
 
@@ -410,6 +434,9 @@ def _train_step(
                 index_epoch,
                 global_step,
                 train_result)
+
+    for metric in metric_result:
+        train_results.add_result(metric, index_epoch, global_step, metric_result[metric])
 
     if loss is not None:
         if len(losses_to_write) < 4:

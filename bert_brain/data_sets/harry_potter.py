@@ -40,6 +40,8 @@ class _DataKindProperties:
     file_name: str
     is_preprocessed: bool = False
     cluster_key_regex_format: Optional[str] = None
+    mixing_key_regex_format: Optional[str] = None
+    bias_key_regex_format: Optional[str] = None
     joint_data_regex_format: Optional[str] = None
     subject_data_regex_format: Optional[str] = None
 
@@ -205,6 +207,24 @@ class HarryPotterCorpus(CorpusBase):
                 cluster_key_regex_format='surrogate_clusters_{subject}_hold_out_{hold_out}',
                 joint_data_regex_format='surrogate_data_hold_out_{hold_out}',
                 subject_data_regex_format='surrogate_subject_means_{subject}_hold_out_{hold_out}'),
+            'local_maxima_clustered': _DataKindProperties(
+                'harry_potter_fmri_maxima_residual_cluster.npz', is_preprocessed=True,
+                cluster_key_regex_format='clusters_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='data_hold_out_{hold_out}'),
+            'local_maxima_projection_clustered': _DataKindProperties(
+                'harry_potter_fmri_projected_maxima_residual_cluster.npz', is_preprocessed=True,
+                cluster_key_regex_format='clusters_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='data_hold_out_{hold_out}'),
+            'cca_ica': _DataKindProperties(
+                'harry_potter_fmri_cca_ica.npz', is_preprocessed=True,
+                mixing_key_regex_format='mixing_{subject}_hold_out_{hold_out}',
+                bias_key_regex_format='bias_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='data_hold_out_{hold_out}'),
+            'rank_cca_ica': _DataKindProperties(
+                'harry_potter_fmri_rank_cca_ica.npz', is_preprocessed=True,
+                mixing_key_regex_format='mixing_{subject}_hold_out_{hold_out}',
+                bias_key_regex_format='bias_{subject}_hold_out_{hold_out}',
+                joint_data_regex_format='data_hold_out_{hold_out}')
         }
         if fmri_kind not in kind_properties:
             raise ValueError('Unknown fmri_kind: {}'.format(fmri_kind))
@@ -649,6 +669,22 @@ class HarryPotterCorpus(CorpusBase):
                 data['joint'] = np.split(joint_data, splits)
             return data, masks
 
+    @staticmethod
+    def _match_keys(regex_format, key_iterable):
+        regex = regex_format.format(subject='(?P<subject>[^_]+)', hold_out='(?P<hold_out>[^_]+)')
+        result = dict()
+        subjects = set()
+        blocks = set()
+        for key in key_iterable:
+            match = re.fullmatch(regex, key)
+            if match is not None:
+                subject = match['subject']
+                block = int(match['hold_out'])
+                result[(subject, block)] = key
+                subjects.add(subject)
+                blocks.add(block)
+        return result, subjects, blocks
+
     def read_preprocessed_fmri_clusters(self):
         kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
         if not kind_properties.is_preprocessed:
@@ -656,22 +692,10 @@ class HarryPotterCorpus(CorpusBase):
         cluster_key_regex_format = kind_properties.cluster_key_regex_format
         if cluster_key_regex_format is None:
             cluster_key_regex_format = 'clusters_{subject}_hold_out_{hold_out}'
-        cluster_regex = cluster_key_regex_format.format(
-            subject='(?P<subject>[^_]+)', hold_out='(?P<hold_out>[^_]+)')
 
         with np.load(self.fmri_path, allow_pickle=True) as loaded:
             assert (self.run_info >= 0)
-            subjects = set()
-            blocks = set()
-            subject_cluster_keys = dict()
-            for key in loaded:
-                match = re.fullmatch(cluster_regex, key)
-                if match is not None:
-                    subject = match['subject']
-                    block = int(match['hold_out'])
-                    subject_cluster_keys[(subject, block)] = key
-                    subjects.add(subject)
-                    blocks.add(block)
+            subject_cluster_keys, subjects, blocks = type(self)._match_keys(cluster_key_regex_format, loaded)
             subjects = list(sorted(subjects))
             blocks = list(sorted(blocks))
             held_out_block = blocks[self.run_info]
@@ -685,6 +709,40 @@ class HarryPotterCorpus(CorpusBase):
                     clusters[subject] = loaded[subject_cluster_keys[(subject, held_out_block)]]
 
             return clusters
+
+    def read_preprocessed_fmri_mixing(self):
+        kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
+        if not kind_properties.is_preprocessed:
+            raise ValueError('{} is not a preprocessed fmri_kind'.format(self.fmri_kind))
+        mixing_key_regex_format = kind_properties.mixing_key_regex_format
+        bias_key_regex_format = kind_properties.bias_key_regex_format
+        if mixing_key_regex_format is None:
+            mixing_key_regex_format = 'mixing_{subject}_hold_out_{hold_out}'
+        if bias_key_regex_format is None:
+            bias_key_regex_format = 'bias_{subject}_hold_out_{hold_out}'
+
+        with np.load(self.fmri_path, allow_pickle=True) as loaded:
+            assert (self.run_info >= 0)
+            mixing_keys, subjects, blocks = type(self)._match_keys(mixing_key_regex_format, loaded)
+            bias_keys, subjects_, blocks_ = type(self)._match_keys(bias_key_regex_format, loaded)
+            subjects.update(subjects_)
+            blocks.update(blocks_)
+            subjects = list(sorted(subjects))
+            blocks = list(sorted(blocks))
+            held_out_block = blocks[self.run_info]
+
+            if self.fmri_subjects is not None:
+                subjects = [s for s in subjects if s in self.fmri_subjects]
+
+            mixing = OrderedDict()
+            bias = OrderedDict()
+            for subject in subjects:
+                if (subject, held_out_block) in mixing_keys:
+                    mixing[subject] = loaded[mixing_keys[(subject, held_out_block)]]
+                if (subject, held_out_block) in bias_keys:
+                    bias[subject] = loaded[bias_keys[(subject, held_out_block)]]
+
+            return mixing, bias
 
     def _read_harry_potter_fmri_files(self):
         kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)

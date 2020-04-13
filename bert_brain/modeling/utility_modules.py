@@ -8,7 +8,13 @@ from transformers.modeling_bert import gelu_new as gelu
 from .graph_part import GraphPart
 
 
-__all__ = ['Conv1DCausal', 'PooledFromSequence', 'LinearWithLayerNorm', 'QuasiAttention', 'HiddenReconstructionPenalty']
+__all__ = [
+    'Conv1DCausal',
+    'PooledFromSequence',
+    'PooledFromKTokens',
+    'LinearWithLayerNorm',
+    'QuasiAttention',
+    'HiddenReconstructionPenalty']
 
 
 class PooledFromSequence(GraphPart):
@@ -33,6 +39,47 @@ class PooledFromSequence(GraphPart):
     def forward(self, batch):
         result = OrderedDict()
         x = batch[self.source_name][:, 0]
+        result[self.output_name] = x if self.transform_fn is None else self.transform_fn(x)
+        for key in batch:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                result[(self.output_name,) + key[1:]] = batch[key]
+        return result
+
+
+class PooledFromKTokens(GraphPart):
+
+    def __init__(self, num_tokens, source_name, output_name, transform_fn=None, use_first_k=False):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.use_first_k = use_first_k
+        self.source_name = source_name
+        self.output_name = output_name
+        self.transform_fn = transform_fn
+
+    def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
+        pass
+
+    def instantiate(self, name_to_num_channels):
+        result = OrderedDict()
+        result[self.output_name] = name_to_num_channels[self.source_name] * self.num_tokens
+        for key in name_to_num_channels:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                result[(self.output_name,) + key[1:]] = name_to_num_channels[key]
+        return result
+
+    def forward(self, batch):
+        result = OrderedDict()
+        if self.use_first_k:
+            x = batch[self.source_name][:, :self.num_tokens]
+        else:
+            x = batch[self.source_name][:, -self.num_tokens:]
+        pad_size = self.num_tokens - x.size(1)
+        if pad_size > 0:
+            if self.use_first_k:
+                x = torch.nn.functional.pad(x, [0, pad_size, 0, 0])
+            else:
+                x = torch.nn.functional.pad(x, [pad_size, 0, 0, 0])
+        x = torch.reshape(x, (x.size()[0], -1))
         result[self.output_name] = x if self.transform_fn is None else self.transform_fn(x)
         for key in batch:
             if isinstance(key, tuple) and key[0] == self.source_name:

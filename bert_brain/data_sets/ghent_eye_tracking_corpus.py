@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from itertools import groupby
+from typing import Sequence, Optional
 import csv
 
 import numpy as np
@@ -14,6 +15,7 @@ __all__ = ['GhentEyeTrackingCorpus']
 @dataclass(frozen=True)
 class GhentEyeTrackingCorpus(CorpusBase):
     path: str = path_attribute_field('geco_path')
+    active_fields: Optional[Sequence[str]] = None
 
     def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
         participants = dict()
@@ -67,7 +69,16 @@ class GhentEyeTrackingCorpus(CorpusBase):
             ids = list(sorted(to_flatten))
 
             result = dict()
+
+            if self.active_fields is not None:
+                lower_keys = [k.lower() for k in all_keys]
+                for k in self.active_fields:
+                    if k not in lower_keys:
+                        raise ValueError('Unknown active_field: {}'.format(k))
+
             for k in all_keys:
+                if self.active_fields is not None and k.lower() not in self.active_fields:
+                    continue
                 values = list()
                 is_int = True
                 for id_ in ids:
@@ -94,8 +105,7 @@ class GhentEyeTrackingCorpus(CorpusBase):
                                 parsed = float(raw)
                         values[-1].append(parsed)
                 result[k] = np.array(values)
-                if result[k].dtype == 'float32':
-                    result[k] = np.where(result[k] < 0, np.nan, result[k])
+                result[k] = np.where(result[k] < 0, np.nan, result[k])
                 result[k].setflags(write=False)
 
             return ids, result
@@ -107,6 +117,7 @@ class GhentEyeTrackingCorpus(CorpusBase):
         offset = 0
         examples = list()
         for (part_id, trial_id), group_word_ids in groupby(word_ids, key=lambda wid: (wid[0], wid[1])):
+            group_word_ids = list(group_word_ids)
             examples.append(example_manager.add_example(
                 (part_id, trial_id),
                 words=[id_to_word[w] for w in group_word_ids],

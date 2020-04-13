@@ -19,6 +19,7 @@ __all__ = [
     'PreprocessDetrend',
     'PreprocessHistogramBinEdgesDigitize',
     'PreprocessQuantileDigitize',
+    'PreprocessRankData',
     'PreprocessBaseline',
     'PreprocessFeatureStandardize',
     'PreprocessFeatureNormalize',
@@ -638,6 +639,59 @@ class PreprocessMakeBinary:
             raise ValueError('Unrecognized policy_nan: {}'.format(self.policy_nan))
 
         return replace(loaded_data_tuple, data=indicator.astype(self.dtype))
+
+
+@dataclass(frozen=True)
+class PreprocessRankData:
+    stop_mode: Optional[str] = None
+    metadata_example_group_by: Optional[str] = None
+    train_on_all: Optional[bool] = False
+
+    @staticmethod
+    def _rankdata(data, indicator_train):
+        valid_train_values = data
+        if indicator_train is not None:
+            valid_train_values = data[indicator_train]
+
+        if len(valid_train_values) == 0:
+            raise ValueError('No training values')
+
+        valid_train_values = np.sort(valid_train_values, axis=0)
+        shape = data.shape
+        valid_train_values = np.reshape(valid_train_values, (-1, 1))
+        data = np.reshape(data, (-1, 1))
+        for i in range(data.shape[1]):
+            data[:, i] = np.searchsorted(valid_train_values[:, i], data[:, i])
+        return np.reshape(data, shape)
+
+    def __call__(self, loaded_data_tuple, metadata, random_state):
+        train_examples = loaded_data_tuple.train
+        if self.train_on_all:
+            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+        indicator_train = _indicator_from_examples(
+            len(loaded_data_tuple.data), train_examples, self.stop_mode)
+
+        if self.metadata_example_group_by is not None:
+            if metadata is None or self.metadata_example_group_by not in metadata:
+                raise ValueError('metadata_example_group_by {} not found in metadata'.format(
+                    self.metadata_example_group_by))
+            data = np.copy(loaded_data_tuple.data)
+            grouped_examples = _unsorted_group_by(
+                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
+            indicator_not_in_group = np.full(len(data), True)
+            for group, group_examples in grouped_examples:
+                indicator_group = _indicator_from_examples(len(data), group_examples)
+                group_data = data[indicator_group]
+                group_indicator_train = indicator_train[indicator_group] if indicator_train is not None else None
+                group_data = type(self)._rankdata(group_data, group_indicator_train)
+                data[indicator_group] = group_data
+                indicator_not_in_group[indicator_group] = False
+            data[indicator_not_in_group] = np.nan
+        else:
+            data = type(self)._rankdata(loaded_data_tuple.data, indicator_train)
+
+        return replace(loaded_data_tuple, data=data)
 
 
 @dataclass(frozen=True)

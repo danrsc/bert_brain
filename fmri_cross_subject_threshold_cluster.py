@@ -119,6 +119,71 @@ def residual_from_twice_masked_data_with_ica_input(
     return np.reshape(d, data.shape)
 
 
+def multi_set_ica(
+        fmri_subject_data_partitions, indicator_train_dict, hold_out, num_components,
+        max_iter=200, tol=1e-4):
+
+    valid_rows = None
+    for s in fmri_subject_data_partitions:
+        v = [_valid_rows(r) for r in fmri_subject_data_partitions[s]]
+        if valid_rows is None:
+            valid_rows = v
+        else:
+            if len(valid_rows) != len(v):
+                raise ValueError('Inconsistent valid rows across subjects')
+            for have, r in zip(valid_rows, v):
+                if not np.array_equal(have, r):
+                    raise ValueError('Inconsistent valid rows across subjects')
+
+    ica_train = OrderedDict(
+        (s,
+         np.concatenate(list(
+             r[v] for i, (r, v) in enumerate(zip(fmri_subject_data_partitions[s], valid_rows)) if i != hold_out)))
+        for s in fmri_subject_data_partitions)
+    if hold_out is None:
+        ica_validation = None
+    else:
+        ica_validation = OrderedDict(
+            (s, fmri_subject_data_partitions[s][hold_out][valid_rows[hold_out]])
+            for s in fmri_subject_data_partitions)
+
+    ica = FastICA(n_components=num_components, max_iter=max_iter, tol=tol)
+    train_sources = ica.fit_transform(np.concatenate(
+        list(ica_train[s][:, indicator_train_dict[s]] for s in ica_train), axis=1))
+    validation_sources = None
+    if ica_validation is not None:
+        validation_sources = ica.transform(np.concatenate(
+            list(ica_validation[s][:, indicator_train_dict[s]] for s in ica_validation), axis=1))
+
+    sources = list()
+    for _ in range(len(valid_rows)):
+        sources.append(None)
+    train_split = _fill_rows(train_sources, list(v for i, v in enumerate(valid_rows) if i != hold_out))
+    for i, t in zip([idx for idx in range(len(valid_rows)) if idx != hold_out], train_split):
+        sources[i] = t
+    if hold_out is not None:
+        sources[hold_out] = validation_sources
+
+    valid_arr_helper = _ValidArrHelper(fmri_subject_data_partitions)
+
+    x = np.concatenate([train_sources, np.ones((len(train_sources), 1), dtype=train_sources.dtype)], axis=1)
+
+    mixing = OrderedDict()
+    bias = OrderedDict()
+
+    for s in fmri_subject_data_partitions:
+        y = list(valid_arr_helper.compress(d, i, s)
+                 for i, d in enumerate(fmri_subject_data_partitions[s]) if i != hold_out)
+        solution, _, _, _ = np.linalg.lstsq(x, np.concatenate(y), rcond=None)
+        # fill the mixing matrix with nan where y is nan
+        filled = np.full((len(solution), len(valid_arr_helper.valid_columns[s])), np.nan)
+        filled[:, valid_arr_helper.valid_columns[s]] = solution
+        mixing[s] = filled[:-1]
+        bias[s] = filled[-1]
+
+    return sources, mixing, bias
+
+
 def multi_set_kernel_cca_hold_out_projection(
         fmri_subject_data_partitions, hold_out, regularization_candidates, num_components,
         target_fmri_subject_data_predictions=None,

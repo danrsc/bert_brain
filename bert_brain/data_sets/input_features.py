@@ -77,6 +77,7 @@ class _ResponseKind:
     ucl_erp: str
     ucl_eye: str
     ucl_self_paced: str
+    geco: str
 
 
 ResponseKind = _ResponseKind(**dict((f.name, f.name) for f in dataclasses.fields(_ResponseKind)))

@@ -11,6 +11,7 @@ from torch.utils.data import TensorDataset
 from torch.utils.data.dataloader import default_collate
 # noinspection PyProtectedMember
 from torch._six import container_abcs
+from tqdm.auto import tqdm
 
 from ..common import SwitchRemember
 from .input_features import FieldSpec, InputFeatures
@@ -199,7 +200,10 @@ class DataIdDataset(torch.utils.data.Dataset):
 
         for response_data_key in prepared_data.data:
             self_data_kinds[response_data_key] = prepared_data.data[response_data_key].kind
-            for data_id, item in enumerate(prepared_data.data[response_data_key].data):
+            for data_id, item in tqdm(
+                    enumerate(prepared_data.data[response_data_key].data),
+                    desc=response_data_key,
+                    total=len(prepared_data.data[response_data_key].data)):
                 data_file_path = os.path.join(
                     path, DataIdDataset.data_file_format.format(
                         data_set_key=data_set_key, response_data_key=response_data_key, data_id=data_id))
@@ -219,7 +223,10 @@ class DataIdDataset(torch.utils.data.Dataset):
 
         if metadata is not None:
             for metadata_key in metadata:
-                for data_id, item in enumerate(metadata[metadata_key]):
+                for data_id, item in tqdm(
+                        enumerate(metadata[metadata_key]),
+                        desc=metadata_key,
+                        total=len(metadata[metadata_key])):
                     metadata_file_path = os.path.join(path, DataIdDataset.metadata_file_format.format(
                         data_set_key=data_set_key, metadata_key=metadata_key, data_id=data_id))
                     with open(metadata_file_path, 'wb') as metadata_file:
@@ -228,7 +235,7 @@ class DataIdDataset(torch.utils.data.Dataset):
         for which in ('train', 'test', 'validation'):
             examples = DataIdDataset._get_examples(which, prepared_data)
             self_unique_ids[which] = dict()
-            for index_example, example in enumerate(examples):
+            for index_example, example in tqdm(enumerate(examples), desc=which, total=len(examples)):
                 example_values = dataclasses.asdict(example)
                 if self_field_specs is None:
                     self_field_specs = OrderedDict()

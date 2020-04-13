@@ -7,10 +7,7 @@ from typing import Sequence, Union, Optional, Hashable, Tuple, Any
 import numpy as np
 import torch
 
-from spacy.language import Language as SpacyLanguage
-from transformers import BertTokenizer
-
-from .spacy_token_meta import bert_tokenize_with_spacy_meta
+from .spacy_token_meta import BertSpacyTokenAligner
 from .input_features import InputFeatures, FieldSpec, RawData
 
 
@@ -21,15 +18,13 @@ class CorpusExampleUnifier:
 
     def __init__(
             self,
-            spacy_tokenize_model: SpacyLanguage,
-            bert_tokenizer: BertTokenizer,
+            bert_spacy_token_aligner: BertSpacyTokenAligner,
             max_sequence_length: Optional[int] = None):
-        self.spacy_tokenize_model = spacy_tokenize_model
-        self.bert_tokenizer = bert_tokenizer
         self._examples = OrderedDict()
         self._seen_data_keys = OrderedDict()
         self.max_sequence_length = max_sequence_length
         self._true_max_sequence_length = 0
+        self.token_aligner = bert_spacy_token_aligner
 
     @property
     def true_max_sequence_length(self):
@@ -107,8 +102,7 @@ class CorpusExampleUnifier:
         Returns:
             The InputFeatures instance associated with the example
         """
-        input_features, included_indices, true_sequence_length = bert_tokenize_with_spacy_meta(
-            self.spacy_tokenize_model, self.bert_tokenizer,
+        input_features, included_indices, true_sequence_length = self.token_aligner.align(
             len(self._examples), words, sentence_ids, data_key, data_ids,
             start, stop,
             start_sequence_2, stop_sequence_2,
@@ -156,12 +150,13 @@ class CorpusExampleUnifier:
                             have[k], current[k], 'mismatch between duplicate example keys. {}'.format(k))
             if not allow_duplicates:
                 return None
-            if data_key is not None:
-                if isinstance(data_key, str):
-                    data_key = [data_key]
-                for k in data_key:
-                    self._seen_data_keys[k] = True
-                    self._examples[example_key].data_ids[k] = input_features.data_ids[k]
+
+        if data_key is not None:
+            if isinstance(data_key, str):
+                data_key = [data_key]
+            for k in data_key:
+                self._seen_data_keys[k] = True
+                self._examples[example_key].data_ids[k] = input_features.data_ids[k]
 
         if return_included_indices:
             return self._examples[example_key], included_indices
@@ -267,10 +262,9 @@ class CorpusBase:
 
     def load(
             self,
-            spacy_tokenizer_model: SpacyLanguage,
-            bert_tokenizer: BertTokenizer,
+            bert_spacy_token_aligner: BertSpacyTokenAligner,
             max_sequence_length: Optional[int] = None) -> Tuple[RawData, int]:
-        example_manager = CorpusExampleUnifier(spacy_tokenizer_model, bert_tokenizer, max_sequence_length)
+        example_manager = CorpusExampleUnifier(bert_spacy_token_aligner, max_sequence_length)
         result = self._load(example_manager)
         CorpusBase._populate_default_field_specs(result)
         return result, example_manager.true_max_sequence_length

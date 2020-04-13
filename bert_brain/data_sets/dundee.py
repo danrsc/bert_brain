@@ -100,7 +100,7 @@ class DundeeCorpus(CorpusBase):
             response_data={
                 'dun_fst_pst': KindData(ResponseKind.dundee_eye, _readonly(reading_time_first_pass)),
                 'dun_go_pst': KindData(ResponseKind.dundee_eye, _readonly(reading_time_go_past)),
-                'dun_rt_bnt': KindData(ResponseKind.dundee_eye, _readonly(reading_time_right_bounded))},
+                'dun_rt_bnd': KindData(ResponseKind.dundee_eye, _readonly(reading_time_right_bounded))},
             validation_proportion_of_train=0.25,
             metadata={
                 'line_pos': _readonly(line_pos),

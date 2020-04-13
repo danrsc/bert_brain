@@ -10,6 +10,7 @@ from . import data_id_dataset
 from . import data_id_multidataset
 from . import data_preparer
 from . import dundee
+from . import edge_probing
 from . import fmri_example_builders
 from . import ghent_eye_tracking_corpus
 from . import harry_potter
@@ -39,6 +40,7 @@ from .data_id_dataset import *
 from .data_id_multidataset import *
 from .data_preparer import *
 from .dundee import *
+from .edge_probing import *
 from .fmri_example_builders import *
 from .ghent_eye_tracking_corpus import *
 from .harry_potter import *
@@ -59,11 +61,11 @@ from .word_in_context import *
 __all__ = [
     'syntactic_dependency', 'boolean_questions', 'choice_of_plausible_alternatives', 'colorless_green',
     'commitment_bank', 'corpus_base', 'corpus_dataset_factory', 'corpus_types', 'data_id_dataset',
-    'data_id_multidataset', 'data_preparer', 'dundee', 'fmri_example_builders', 'ghent_eye_tracking_corpus',
-    'harry_potter', 'input_features', 'multi_sentence_reading_comprehension', 'natural_stories', 'preprocessors',
-    'reading_comprehension_with_common_sense_reasoning', 'recognizing_textual_entailment', 'samplers',
-    'spacy_token_meta', 'stanford_sentiment_treebank', 'university_college_london_corpus', 'what_you_can_cram',
-    'winograd_schema_challenge', 'word_in_context']
+    'data_id_multidataset', 'data_preparer', 'dundee', 'edge_probing', 'fmri_example_builders',
+    'ghent_eye_tracking_corpus', 'harry_potter', 'input_features', 'multi_sentence_reading_comprehension',
+    'natural_stories', 'preprocessors', 'reading_comprehension_with_common_sense_reasoning',
+    'recognizing_textual_entailment', 'samplers', 'spacy_token_meta', 'stanford_sentiment_treebank',
+    'university_college_london_corpus', 'what_you_can_cram', 'winograd_schema_challenge', 'word_in_context']
 __all__.extend(syntactic_dependency.__all__)
 __all__.extend(boolean_questions.__all__)
 __all__.extend(choice_of_plausible_alternatives.__all__)
@@ -75,6 +77,7 @@ __all__.extend(data_id_dataset.__all__)
 __all__.extend(data_id_multidataset.__all__)
 __all__.extend(data_preparer.__all__)
 __all__.extend(dundee.__all__)
+__all__.extend(edge_probing.__all__)
 __all__.extend(fmri_example_builders.__all__)
 __all__.extend(ghent_eye_tracking_corpus.__all__)
 __all__.extend(harry_potter.__all__)

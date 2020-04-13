@@ -300,7 +300,11 @@ class DataPreparer:
             for response_k in current_response_keys:
                 if phase_steps[response_k] is not None:
                     for step in phase_steps[response_k][index_phase]:
-                        processed = self._run_step(step, result, metadata, random_state, dataset_path, response_k)
+                        try:
+                            processed = self._run_step(step, result, metadata, random_state, dataset_path, response_k)
+                        except ValueError:
+                            print('Error while processing {}'.format(response_k))
+                            raise
                         _reconcile_view(result, processed, response_k)
             if index_phase < len(phases):
                 phase_change_step = phase_change_steps[phases[index_phase]]

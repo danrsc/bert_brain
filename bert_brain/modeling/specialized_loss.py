@@ -193,6 +193,50 @@ def masked_binary_cross_entropy_with_logits(mask, predictions, target, pos_weigh
     return result, valid_count
 
 
+def masked_binary_accuracy(mask, predictions, target, is_logits=True):
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        return torch.zeros(mask.size(), dtype=torch.bool, device=mask.device), valid_count
+    predictions = torch.masked_select(predictions, mask)
+    target = torch.masked_select(target, mask)
+
+    target_positive = target > 0
+    target_negative = target == 0
+
+    if is_logits:
+        predictions_positive = predictions >= 0
+        predictions_negative = predictions < 0
+    else:
+        predictions_positive = predictions >= 0.5
+        predictions_negative = predictions < 0.5
+
+    acc = (predictions_positive & target_positive) | (predictions_negative & target_negative)
+
+    result = torch.zeros(mask.size(), dtype=acc.dtype, device=acc.device)
+    result.masked_scatter_(mask, acc)
+    return result, valid_count
+
+
+def masked_accuracy(mask, predictions, target):
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        return torch.zeros(mask.size(), dtype=torch.bool, device=mask.device), valid_count
+    predictions = predictions.reshape(np.prod(predictions.size()[:-1]), predictions.size()[-1])
+    target = target.view(-1)
+    flat_mask = mask.view(-1)
+    valid_indices = torch.squeeze(torch.nonzero(flat_mask), dim=1)
+    predictions = predictions[valid_indices]
+    target = target[valid_indices].type(torch.long)
+
+    predicted_class = torch.argmax(predictions, dim=-1)
+
+    acc = predicted_class == target
+
+    result = torch.zeros(mask.size(), dtype=acc.dtype, device=acc.device)
+    result.masked_scatter_(mask, acc)
+    return result, valid_count
+
+
 def masked_soft_label_cross_entropy(mask, predictions, target):
     # note we just assume that the target values sum to 1 along axis=-1
     if mask is not None:
@@ -473,9 +517,9 @@ class NamedTargetMaskedLossBase:
 
         if self.field not in batch:
             if reduction == 'mean' or reduction == 'sum':
-                result = 'no_valid_inputs'
+                result = 'no_valid_inputs', {}
             else:
-                result = 'no_valid_inputs', 0
+                result = ('no_valid_inputs', 0), {}
             if return_detailed:
                 detailed_result = list()
                 return result, detailed_result
@@ -486,22 +530,38 @@ class NamedTargetMaskedLossBase:
         target = target.to(predictions.device)
         mask = self._get_mask(is_eval, epoch, global_step, batch, predictions, target)
 
+        if reduction == 'mean' or reduction == 'sum':
+            result = 'no_valid_inputs'
+        else:
+            result = 'no_valid_inputs', 0
+
+        has_valid_inputs = False
         try:
             result, valid_count = self._masked_loss(is_eval, epoch, global_step, mask, predictions, target)
+            has_valid_inputs = True
+        except NoValidInputs:
+            valid_count = 0
+
+        additional_metrics = {}
+
+        if has_valid_inputs:
             if self.uncertainty_log_sigma_squared_field is not None:
                 if self.uncertainty_log_sigma_squared_field not in prediction_dict:
                     raise ValueError('log_sigma_squared not found in predictions. Looking for field: {}'.format(
                         self.uncertainty_log_sigma_squared_field))
                 result = type(self)._uncertainty_loss(prediction_dict[self.uncertainty_log_sigma_squared_field], result)
             result = _masked_reduce(result, valid_count, reduction, as_numpy)
-        except NoValidInputs:
-            if reduction == 'mean' or reduction == 'sum':
-                result = 'no_valid_inputs'
-            else:
-                result = 'no_valid_inputs', 0
+            additional_metrics = self._masked_metrics(is_eval, epoch, global_step, mask, predictions, target)
+            reduced_metrics = type(additional_metrics)()
+            for metric in additional_metrics:
+                reduced_metrics[metric] = _masked_reduce(
+                    additional_metrics[metric][0], additional_metrics[metric][1], reduction, as_numpy)
+            additional_metrics = reduced_metrics
 
         if apply_weight:
             result = self.apply_weight(result)
+
+        result = result, additional_metrics
 
         if return_detailed:
 
@@ -581,6 +641,9 @@ class NamedTargetMaskedLossBase:
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         raise NotImplementedError('{} does not implement _masked_loss'.format(type(self)))
+
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {}
 
     @classmethod
     def uncertainty_weight(cls) -> float:
@@ -824,6 +887,9 @@ class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
 
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_accuracy(mask, predictions, target)}
+
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
@@ -848,6 +914,9 @@ class NamedTargetStopWordAwareNLL(_NamedTargetStopWordAwareLoss):
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_negative_log_likelihood(mask, predictions, target)
 
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_accuracy(mask, predictions, target)}
+
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
@@ -867,6 +936,9 @@ class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordA
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_binary_accuracy(mask, predictions, target)}
+
     @classmethod
     def is_classification_loss(cls):
         return True
@@ -876,13 +948,15 @@ class NamedTargetStopWordAwareBinaryCrossEntropyWithLogits(_NamedTargetStopWordA
         return 1.0
 
 
-
 @dataclass(frozen=True)
 class NamedTargetStopWordAwareBinaryCrossEntropy(_NamedTargetStopWordAwareLoss):
     pos_weight: Optional[float] = None
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy(mask, predictions, target, self.pos_weight)
+
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_binary_accuracy(mask, predictions, target, is_logits=False)}
 
     @classmethod
     def is_classification_loss(cls):
@@ -1139,6 +1213,9 @@ class NamedTargetSingleCrossEntropy(NamedTargetMaskedLossBase):
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_cross_entropy(mask, predictions, target)
 
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_accuracy(mask, predictions, target)}
+
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
 
@@ -1162,6 +1239,9 @@ class NamedTargetSingleNLL(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_negative_log_likelihood(mask, predictions, target)
+
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_accuracy(mask, predictions, target)}
 
     def shape_adjust(self, shape):
         return shape + (self.num_classes,)
@@ -1212,6 +1292,9 @@ class NamedTargetSingleBinaryCrossEntropyWithLogits(NamedTargetMaskedLossBase):
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy_with_logits(mask, predictions, target, self.pos_weight)
 
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_binary_accuracy(mask, predictions, target)}
+
     @classmethod
     def uncertainty_weight(cls) -> float:
         return 1.0
@@ -1227,6 +1310,9 @@ class NamedTargetSingleBinaryCrossEntropy(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_binary_cross_entropy(mask, predictions, target, self.pos_weight)
+
+    def _masked_metrics(self, is_eval, epoch, global_step, mask, predictions, target):
+        return {'acc': masked_binary_accuracy(mask, predictions, target, is_logits=False)}
 
     @classmethod
     def uncertainty_weight(cls) -> float:

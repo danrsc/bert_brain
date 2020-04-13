@@ -61,6 +61,24 @@ class Paths:
     verb_tense_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'past_present.txt'))
     word_content_path: Optional[str] = _path_field(os.path.join('what_you_can_cram', 'word_content.txt'))
 
+    # Edge probing
+    edge_probing_base = os.path.join('jiant_edge_probing', 'edges')
+    part_of_speech_conll_2012_path: Optional[str] = _path_field(
+        os.path.join(edge_probing_base, 'ontonotes', 'const', 'pos'))
+    constituents_conll_2012_path: Optional[str] = _path_field(
+        os.path.join(edge_probing_base, 'ontonotes', 'const', 'nonterminal'))
+    semantic_role_label_conll_2012_path: Optional[str] = _path_field(
+        os.path.join(edge_probing_base, 'ontonotes', 'srl'))
+    named_entity_recognition_conll_2012_path: Optional[str] = _path_field(
+        os.path.join(edge_probing_base, 'ontonotes', 'ner'))
+    coreference_conll_2012_path: Optional[str] = _path_field(
+        os.path.join(edge_probing_base, 'ontonotes', 'coref'))
+    dependencies_english_web_path: Optional[str] = _path_field(os.path.join(edge_probing_base, 'dep_ewt'))
+    definite_pronoun_resolution_path: Optional[str] = _path_field(os.path.join(edge_probing_base, 'dpr'))
+    sem_eval_path: Optional[str] = _path_field(os.path.join(edge_probing_base, 'semeval'))
+    semantic_proto_roles_1_path: Optional[str] = _path_field(os.path.join(edge_probing_base, 'spr1'))
+    semantic_proto_roles_2_path: Optional[str] = _path_field(os.path.join(edge_probing_base, 'spr2'))
+
     def __post_init__(self):
         for f in fields(self):
             if f.name == 'pre_trained_path' and getattr(self, f.name) is None:

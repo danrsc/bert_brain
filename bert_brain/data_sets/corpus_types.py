@@ -15,6 +15,9 @@ from .winograd_schema_challenge import WinogradSchemaChallenge
 from .word_in_context import WordInContext
 from .what_you_can_cram import BigramShift, CoordinationInversion, ObjectNumber, SemanticOddManOut, SentenceLength, \
     SubjectNumber, TopConstituents, TreeDepth, VerbTense, WordContent
+from .edge_probing import PartOfSpeechConll2012, SimplifiedPartOfSpeechConll2012, ConstituentsConll2012, \
+    SemanticRoleLabelConll2012, NamedEntityRecognitionConll2012, CoreferenceResolutionConll2012, \
+    DependenciesEnglishWeb, DefinitePronounResolution, SemEval, SemanticProtoRoles1, SemanticProtoRoles2
 
 
 __all__ = [
@@ -43,4 +46,15 @@ __all__ = [
     'TopConstituents',
     'TreeDepth',
     'VerbTense',
-    'WordContent']
+    'WordContent',
+    'PartOfSpeechConll2012',
+    'SimplifiedPartOfSpeechConll2012',
+    'ConstituentsConll2012',
+    'SemanticRoleLabelConll2012',
+    'NamedEntityRecognitionConll2012',
+    'CoreferenceResolutionConll2012',
+    'DependenciesEnglishWeb',
+    'DefinitePronounResolution',
+    'SemEval',
+    'SemanticProtoRoles1',
+    'SemanticProtoRoles2']

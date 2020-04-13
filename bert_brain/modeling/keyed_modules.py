@@ -19,6 +19,7 @@ __all__ = [
     'KeyedQuasiAttention',
     'KeyedCombinedLinear',
     'KeyedSingleTargetSpanAttention',
+    'KeyedSingleTargetSpanMaxPool',
     'group_concat_linear',
     'KeyedConcat']
 
@@ -450,6 +451,54 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
             attention_probabilities = torch.nn.functional.softmax(attention_logits + span_mask, dim=-1)
             # -> (batch, channels)
             span_embeddings.append(torch.sum(attention_probabilities * attention_input, dim=1))
+        prediction_input = torch.cat(span_embeddings, dim=2)
+        predictions = self.linear(prediction_input)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        assert (len(self.output_key_to_shape) == len(predictions))
+        result = OrderedDict()
+        for k, p in zip(self.output_key_to_shape, predictions):
+            p = p.view(p.size()[:1] + self.output_key_to_shape[k])
+            result[k] = p
+        return result
+
+
+class KeyedSingleTargetSpanMaxPool(KeyedBase):
+
+    def __init__(
+            self,
+            num_spans,
+            sequence_source_name,
+            span_source_name,
+            output_key_to_shape=None,
+            targets=None):
+        super().__init__(output_key_to_shape, targets)
+        self.num_spans = num_spans
+        self.sequence_source_name = sequence_source_name
+        self.span_source_name = span_source_name
+        self.linear = None
+        self.named_span_encoder = NamedSpanEncoder(range(num_spans))
+
+    def _instantiate(self, name_to_num_channels):
+        in_sequence_channels = name_to_num_channels[self.sequence_source_name]
+        self.linear = torch.nn.Linear(in_sequence_channels * self.num_spans, sum(self.splits))
+
+        result = OrderedDict(self.output_key_to_shape)
+        for key in name_to_num_channels:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                for result_key in self.output_key_to_shape:
+                    result[(result_key,) + key[1:]] = name_to_num_channels[key]
+        return result
+
+    def forward(self, batch):
+        span_ids = batch[self.span_source_name]
+        span_indicators = self.named_span_encoder.torch_span_indicators(span_ids)
+        span_embeddings = list()
+        for index_span, span_name in enumerate(span_indicators):
+            span_indicator = torch.unsqueeze(span_indicators[span_name], dim=2)
+            span_values = -torch.inf * torch.ones_like(batch[self.sequence_source_name])
+            span_values.masked_scatter_(
+                span_indicator, torch.masked_select(batch[self.sequence_source_name], span_indicator))
+            span_embeddings.append(torch.max(span_values, dim=1))
         prediction_input = torch.cat(span_embeddings, dim=2)
         predictions = self.linear(prediction_input)
         predictions = torch.split(predictions, self.splits, dim=-1)

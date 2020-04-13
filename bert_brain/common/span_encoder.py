@@ -1,5 +1,6 @@
 from collections import OrderedDict
 
+import numpy as np
 import torch
 
 
@@ -18,6 +19,8 @@ class NamedSpanEncoder:
         self.frozen_names = frozen_names
 
     def encode(self, active_names):
+        if np.ndim(active_names) == 0:
+            active_names = [active_names]
         result = 0
         for name in active_names:
             if name not in self.names:

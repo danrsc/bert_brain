@@ -1,4 +1,5 @@
 from string import punctuation
+from dataclasses import dataclass, field
 from typing import Union, Sequence, Optional, Tuple
 
 import numpy as np
@@ -13,7 +14,7 @@ from transformers import BertTokenizer
 from .input_features import InputFeatures
 
 __all__ = ['make_tokenizer_model', 'group_by_cum_lengths', 'get_data_token_index',
-           'bert_tokenize_with_spacy_meta', 'ChineseCharDetected', 'parts_of_speech_to_ids']
+           'BertSpacyTokenAligner', 'ChineseCharDetected', 'parts_of_speech_to_ids']
 
 # word’s class was determined from its PoS tag, where nouns, verbs
 # (including modal verbs), adjectives, and adverbs were considered
@@ -247,262 +248,313 @@ def is_chinese_character(cp):
     return False
 
 
-def bert_tokenize_with_spacy_meta(
-        spacy_model: SpacyLanguage,
-        bert_tokenizer: BertTokenizer,
-        unique_id: int,
-        words: Sequence[str],
-        sentence_ids: Sequence[int],
-        data_key: Optional[Union[str, Sequence[str]]],
-        data_ids: Optional[Sequence[int]],
-        start: int = 0,
-        stop: Optional[int] = None,
-        start_sequence_2: Optional[int] = None,
-        stop_sequence_2: Optional[int] = None,
-        start_sequence_3: Optional[int] = None,
-        stop_sequence_3: Optional[int] = None,
-        multipart_id: Optional[int] = None,
-        span_ids: Optional[Sequence[int]] = None,
-        is_apply_data_offset_entire_group: bool = False,
-        max_sequence_length: Optional[int] = None) -> Tuple[InputFeatures, np.array, int]:
-    """
-    Uses spacy to get information such as part of speech, probability of word, etc. and aligns the tokenization from
-    spacy with the bert tokenization.
-    Args:
-        spacy_model: The spacy model to use for spacy tokenization, part of speech analysis, etc. Generally from
-            make_tokenizer_model()
-        bert_tokenizer: The bert tokenizer to use. Usually from corpus_loader.make_bert_tokenizer()
-        unique_id: The unique id for this example
-        words: The words in this example. Generally a sentence, but it doesn't have to be.
-        sentence_ids: For each word, identifies which sentence the word belongs to. Used to compute
-            index_word_in_sentence
-        data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
-        data_ids: Sequence[Int]. Describes an indices into a separate data array for each word. For example, if the
-            first word in words corresponds to fMRI image 17 in a separate data array, and the second word corresponds
-            to image 19, then this parameter could start with [17, 19, ...].
-        start: Offset where the actual input features should start. It is best to compute spacy meta on full sentences,
-            then slice the resulting tokens. start and end are used to slice words, sentence_ids, data_key and data_ids
-        stop: Exclusive end point for the actual input features. If None, the full length is used
-        start_sequence_2: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
-            like question answering where type_id=0 is the question and type_id=1 is the answer. If None, assumes
-            the entire input is sequence 1.
-        stop_sequence_2: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
-            like question answering where type_id=0 is the question and type_id=1 is the answer. If None, assumes
-            the entire input is sequence 1.
-        start_sequence_3: Used for bert to combine 3 sequences as a single input. Generally this is used for tasks
-            like question answering with a context. type_id=0 is the context and type_id=1 is the question and
-            answer
-        stop_sequence_3: Used for bert to combine 3 sequences as a single input. Generally this is used for tasks
-            like question answering with a context. type_id=0 is the context and type_id=1 is the question and answer
-        multipart_id: Used to express that this example needs to be in the same batch as other examples sharing the
-            same multipart_id to be evaluated
-        span_ids: Bit-encoded span identifiers which indicate which spans each word belongs to when spans are labeled
-            in the input. If not given, no span ids will be set on the returned InputFeatures instance.
-        is_apply_data_offset_entire_group: If a word is broken into multiple tokens, generally a single token is
-            heuristically chosen as the 'main' token corresponding to that word. The data_id it is assigned is given
-            by data offset, while all the tokens that are not the main token in the group are assigned -1. If this
-            parameter is set to True, then all of the multiple tokens corresponding to a word are assigned the same
-            data_id, and none are set to -1. This can be a better option for fMRI where the predictions are not at
-            the word level, but rather at the level of an image containing multiple words.
-        max_sequence_length: If specified, each sub-sequence will be truncated to this length
-    Returns:
-        An InputFeatures instance
-    """
+class _BertSpacyTokenizeCache:
+    def __init__(self):
+        self.words = None
+        self.bert_token_groups = None
+        self.spacy_token_groups = None
+        self.bert_token_groups_with_spacy = None
 
-    sent = ''
-    cum_lengths = list()
+    def match(self, words):
+        if self.words is None:
+            return False
+        if len(words) != len(self.words):
+            return False
+        for w1, w2 in zip(words, self.words):
+            if w1 != w2:
+                return False
+        return True
 
-    bert_token_groups = list()
-    for w in words:
+    def cache(self, words, bert_token_groups, spacy_token_groups, bert_token_groups_with_spacy):
+        self.words = words
+        self.bert_token_groups = bert_token_groups
+        self.spacy_token_groups = spacy_token_groups
+        self.bert_token_groups_with_spacy = bert_token_groups_with_spacy
 
-        for c in w:
-            # noinspection PyProtectedMember
-            if is_chinese_character(ord(c)):
-                raise ChineseCharDetected(w)
 
-        if len(sent) > 0:
-            sent += ' '
-        sent += str(w)
-        cum_lengths.append(len(sent))
-        bert_token_groups.append(bert_tokenizer.tokenize(w))
+@dataclass(frozen=True)
+class BertSpacyTokenAligner:
+    model_tokenizer_name: str = 'bert-base-uncased'
+    spacy_language_name: str = 'en_core_web_md'
+    cache_path: str = None
+    model_tokenizer: BertTokenizer = field(init=False, repr=False, compare=False)
+    spacy_language: SpacyLanguage = field(init=False, repr=False, compare=False)
+    _align_cache: _BertSpacyTokenizeCache = field(init=False, repr=False, compare=False)
 
-    spacy_token_groups = group_by_cum_lengths(cum_lengths, spacy_model(sent))
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            'model_tokenizer',
+            BertTokenizer.from_pretrained(self.model_tokenizer_name, cache_dir=self.cache_path, do_lower_case=True))
+        object.__setattr__(
+            self,
+            'spacy_language',
+            make_tokenizer_model(self.spacy_language_name))
+        object.__setattr__(self, '_align_cache', _BertSpacyTokenizeCache())
 
-    # bert bert_erp_tokenization does not seem to care whether we do word-by-word or not; it is simple whitespace
-    # splitting etc., then sub-word tokens are created from that
+    def align(
+            self,
+            unique_id: int,
+            words: Sequence[str],
+            sentence_ids: Sequence[int],
+            data_key: Optional[Union[str, Sequence[str]]],
+            data_ids: Optional[Sequence[int]],
+            start: int = 0,
+            stop: Optional[int] = None,
+            start_sequence_2: Optional[int] = None,
+            stop_sequence_2: Optional[int] = None,
+            start_sequence_3: Optional[int] = None,
+            stop_sequence_3: Optional[int] = None,
+            multipart_id: Optional[int] = None,
+            span_ids: Optional[Sequence[int]] = None,
+            is_apply_data_offset_entire_group: bool = False,
+            max_sequence_length: Optional[int] = None) -> Tuple[InputFeatures, np.array, int]:
+        """
+        Uses spacy to get information such as part of speech, probability of word, etc. and aligns the
+        tokenization from spacy with the bert tokenization.
+        Args:
+            unique_id: The unique id for this example
+            words: The words in this example. Generally a sentence, but it doesn't have to be.
+            sentence_ids: For each word, identifies which sentence the word belongs to. Used to compute
+                index_word_in_sentence
+            data_key: A key (or multiple keys) to designate which response data set(s) data_ids references
+            data_ids: Sequence[Int]. Describes an indices into a separate data array for each word. For example, if the
+                first word in words corresponds to fMRI image 17 in a separate data array, and the second word
+                corresponds to image 19, then this parameter could start with [17, 19, ...].
+            start: Offset where the actual input features should start. It is best to compute spacy meta on full
+                sentences, then slice the resulting tokens. start and end are used to slice words, sentence_ids,
+                data_key and data_ids
+            stop: Exclusive end point for the actual input features. If None, the full length is used
+            start_sequence_2: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
+                like question answering where type_id=0 is the question and type_id=1 is the answer. If None, assumes
+                the entire input is sequence 1.
+            stop_sequence_2: Used for bert to combine 2 sequences as a single input. Generally this is used for tasks
+                like question answering where type_id=0 is the question and type_id=1 is the answer. If None, assumes
+                the entire input is sequence 1.
+            start_sequence_3: Used for bert to combine 3 sequences as a single input. Generally this is used for tasks
+                like question answering with a context. type_id=0 is the context and type_id=1 is the question and
+                answer
+            stop_sequence_3: Used for bert to combine 3 sequences as a single input. Generally this is used for tasks
+                like question answering with a context. type_id=0 is the context and type_id=1 is the question and
+                answer
+            multipart_id: Used to express that this example needs to be in the same batch as other examples sharing the
+                same multipart_id to be evaluated
+            span_ids: Bit-encoded span identifiers which indicate which spans each word belongs to when spans are
+                labeled in the input. If not given, no span ids will be set on the returned InputFeatures instance.
+            is_apply_data_offset_entire_group: If a word is broken into multiple tokens, generally a single token is
+                heuristically chosen as the 'main' token corresponding to that word. The data_id it is assigned is given
+                by data offset, while all the tokens that are not the main token in the group are assigned -1. If this
+                parameter is set to True, then all of the multiple tokens corresponding to a word are assigned the same
+                data_id, and none are set to -1. This can be a better option for fMRI where the predictions are not at
+                the word level, but rather at the level of an image containing multiple words.
+            max_sequence_length: If specified, each sub-sequence will be truncated to this length
+        Returns:
+            An InputFeatures instance
+        """
+        if self._align_cache.match(words):
+            bert_token_groups = self._align_cache.bert_token_groups
+            spacy_token_groups = self._align_cache.spacy_token_groups
+            bert_token_groups_with_spacy = self._align_cache.bert_token_groups_with_spacy
+        else:
+            sent = ''
+            cum_lengths = list()
 
-    example_tokens = list()
-    example_mask = list()
-    example_is_stop = list()
-    example_pos = list()
-    example_pos_id = list()
-    example_is_begin_word_pieces = list()
-    example_lengths = list()
-    example_probs = list()
-    example_head_location = list()
-    example_token_head = list()
-    example_type_ids = list()
-    example_data_ids = list()
-    example_span_ids = list() if span_ids is not None else None
-    example_index_word_in_example = list()
-    example_index_token_in_sentence = list()
-    included_indices = list()
+            bert_token_groups = list()
+            for w in words:
 
-    def _append_special_token(special_token, index_word_in_example_, index_token_in_sentence_, type_id_):
-        example_tokens.append(special_token)
-        example_mask.append(1)
-        example_is_stop.append(True)
-        example_pos.append('')
-        example_pos_id.append(np.nan)
-        example_is_begin_word_pieces.append(True)
-        example_lengths.append(0)
-        example_probs.append(-20.)
-        example_head_location.append(np.nan)
-        example_token_head.append('[PAD]')
-        example_type_ids.append(type_id_)
-        example_data_ids.append(-1)
-        if span_ids is not None:
-            example_span_ids.append(0)
-        example_index_word_in_example.append(index_word_in_example_)
-        example_index_token_in_sentence.append(index_token_in_sentence_)
+                for c in w:
+                    # noinspection PyProtectedMember
+                    if is_chinese_character(ord(c)):
+                        raise ChineseCharDetected(w)
 
-    type_id = 0
+                if len(sent) > 0:
+                    sent += ' '
+                sent += str(w)
+                cum_lengths.append(len(sent))
+                bert_token_groups.append(self.model_tokenizer.tokenize(w))
 
-    _append_special_token(
-        '[CLS]', index_word_in_example_=0, index_token_in_sentence_=0, type_id_=type_id)
+            spacy_token_groups = group_by_cum_lengths(cum_lengths, self.spacy_language(sent))
 
-    index_token_in_sentence = 0
-    index_word_in_example = 0
-    last_sentence_id = None
+            bert_token_groups_with_spacy = list()
+            for spacy_token_group, bert_token_group, word in zip(spacy_token_groups, bert_token_groups, words):
+                bert_token_groups_with_spacy.append(
+                    align_spacy_meta(spacy_token_group, bert_token_group, word, self.model_tokenizer))
 
-    bert_token_groups_with_spacy = list()
-    for spacy_token_group, bert_token_group, word in zip(spacy_token_groups, bert_token_groups, words):
-        bert_token_groups_with_spacy.append(align_spacy_meta(spacy_token_group, bert_token_group, word, bert_tokenizer))
+            self._align_cache.cache(words, bert_token_groups, spacy_token_groups, bert_token_groups_with_spacy)
 
-    if start < 0:
-        start = len(words) + start
-    if stop is None:
-        stop = len(words)
-    elif stop < 0:
-        stop = len(words) + stop
+        # bert bert_erp_tokenization does not seem to care whether we do word-by-word or not; it is simple whitespace
+        # splitting etc., then sub-word tokens are created from that
 
-    sequences = [(start, stop)]
+        example_tokens = list()
+        example_mask = list()
+        example_is_stop = list()
+        example_pos = list()
+        example_pos_id = list()
+        example_is_begin_word_pieces = list()
+        example_lengths = list()
+        example_probs = list()
+        example_head_location = list()
+        example_token_head = list()
+        example_type_ids = list()
+        example_data_ids = list()
+        example_span_ids = list() if span_ids is not None else None
+        example_index_word_in_example = list()
+        example_index_token_in_sentence = list()
+        included_indices = list()
 
-    if start_sequence_2 is not None and start_sequence_2 < 0:
-        start_sequence_2 = len(words) + start_sequence_2
-    if stop_sequence_2 is not None and stop_sequence_2 < 0:
-        stop_sequence_2 = len(words) + stop_sequence_2
+        def _append_special_token(special_token, index_word_in_example_, index_token_in_sentence_, type_id_):
+            example_tokens.append(special_token)
+            example_mask.append(1)
+            example_is_stop.append(True)
+            example_pos.append('')
+            example_pos_id.append(np.nan)
+            example_is_begin_word_pieces.append(True)
+            example_lengths.append(0)
+            example_probs.append(-20.)
+            example_head_location.append(np.nan)
+            example_token_head.append('[PAD]')
+            example_type_ids.append(type_id_)
+            example_data_ids.append(-1)
+            if span_ids is not None:
+                example_span_ids.append(0)
+            example_index_word_in_example.append(index_word_in_example_)
+            example_index_token_in_sentence.append(index_token_in_sentence_)
 
-    if start_sequence_2 is not None:
-        if start_sequence_2 < stop:
-            raise ValueError('start_sequence_2 ({}) < stop ({})'.format(start_sequence_2, stop))
-        if stop_sequence_2 is None:
-            stop_sequence_2 = len(words)
-        sequences.append((start_sequence_2, stop_sequence_2))
+        type_id = 0
 
-    if start_sequence_3 is not None and start_sequence_3 < 0:
-        start_sequence_3 = len(words) + start_sequence_3
-    if stop_sequence_3 is not None and stop_sequence_3 < 0:
-        stop_sequence_3 = len(words) + stop_sequence_3
+        _append_special_token(
+            '[CLS]', index_word_in_example_=0, index_token_in_sentence_=0, type_id_=type_id)
 
-    if stop_sequence_3 is not None:
-        if stop_sequence_2 is None or start_sequence_3 < stop_sequence_2:
-            raise ValueError('start_sequence_3 ({}) < stop_sequence_2 ({})'.format(start_sequence_3, stop_sequence_2))
-        if stop_sequence_3 is None:
-            stop_sequence_3 = len(words)
-        sequences.append((start_sequence_3, stop_sequence_3))
+        index_token_in_sentence = 0
+        index_word_in_example = 0
+        last_sentence_id = None
 
-    idx_sequence = 0
-    current_sequence_length = 0
-    true_sequence_length = 0
-    max_true_sequence_length = 0
-    for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
-        if last_sentence_id is None or sentence_ids[idx_group] != last_sentence_id:
-            index_token_in_sentence = -1
-        last_sentence_id = sentence_ids[idx_group]
-        if idx_group >= sequences[idx_sequence][1]:
-            if idx_sequence + 1 < len(sequences):
-                idx_sequence += 1
-                current_sequence_length = 0
-                max_true_sequence_length = max(true_sequence_length, max_true_sequence_length)
-                true_sequence_length = 0
-            else:
-                break
-        if idx_group < sequences[idx_sequence][0]:
-            continue
-        assert(sequences[idx_sequence][0] <= idx_group < sequences[idx_sequence][1])
-        included_indices.append(idx_group)
-        index_word_in_example += 1
-        idx_data = get_data_token_index(bert_tokens_with_spacy)
-        true_sequence_length += len(bert_tokens_with_spacy)
-        if max_sequence_length is None or len(bert_tokens_with_spacy) + current_sequence_length < max_sequence_length:
-            for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
-                index_token_in_sentence += 1
-                current_sequence_length += 1
-                idx_head_group = _get_syntactic_head_group(spacy_token, bert_token_groups_with_spacy)
-                head_token = '[PAD]'
-                head_location = np.nan
-                if idx_head_group is not None:
-                    idx_head_data_token = get_data_token_index(bert_token_groups_with_spacy[idx_head_group])
-                    head_token = bert_token_groups_with_spacy[idx_head_group][idx_head_data_token][0]
-                    head_location = idx_head_group - idx_group
-                example_tokens.append(t)
-                example_mask.append(1)
-                example_is_stop.append(_is_stop(spacy_token))
-                example_pos.append('' if spacy_token is None else spacy_token.pos_)
-                example_pos_id.append(_part_of_speech_id(spacy_token))
-                example_lengths.append(length)
-                example_probs.append(-20. if spacy_token is None else spacy_token.prob)
-                example_head_location.append(head_location)
-                example_token_head.append(head_token)
-                is_continue_word_piece = t.startswith('##')
-                example_is_begin_word_pieces.append(not is_continue_word_piece)
-                example_type_ids.append(type_id)
-                if span_ids is not None:
-                    example_span_ids.append(span_ids[idx_group])
-                example_index_word_in_example.append(index_word_in_example)
-                example_index_token_in_sentence.append(index_token_in_sentence)
-                # we follow the BERT paper and always use the first word-piece as the labeled one
-                data_id = -1
-                if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
-                    data_id = data_ids[idx_group]
-                example_data_ids.append(data_id)
-        if idx_group == sequences[idx_sequence][1]:
-            _append_special_token('[SEP]', index_word_in_example + 1, index_token_in_sentence + 1, type_id)
+        if start < 0:
+            start = len(words) + start
+        if stop is None:
+            stop = len(words)
+        elif stop < 0:
+            stop = len(words) + stop
+
+        sequences = [(start, stop)]
+
+        if start_sequence_2 is not None and start_sequence_2 < 0:
+            start_sequence_2 = len(words) + start_sequence_2
+        if stop_sequence_2 is not None and stop_sequence_2 < 0:
+            stop_sequence_2 = len(words) + stop_sequence_2
+
+        if start_sequence_2 is not None:
+            if start_sequence_2 < stop:
+                raise ValueError('start_sequence_2 ({}) < stop ({})'.format(start_sequence_2, stop))
+            if stop_sequence_2 is None:
+                stop_sequence_2 = len(words)
+            sequences.append((start_sequence_2, stop_sequence_2))
+
+        if start_sequence_3 is not None and start_sequence_3 < 0:
+            start_sequence_3 = len(words) + start_sequence_3
+        if stop_sequence_3 is not None and stop_sequence_3 < 0:
+            stop_sequence_3 = len(words) + stop_sequence_3
+
+        if stop_sequence_3 is not None:
+            if stop_sequence_2 is None or start_sequence_3 < stop_sequence_2:
+                raise ValueError(
+                    'start_sequence_3 ({}) < stop_sequence_2 ({})'.format(start_sequence_3, stop_sequence_2))
+            if stop_sequence_3 is None:
+                stop_sequence_3 = len(words)
+            sequences.append((start_sequence_3, stop_sequence_3))
+
+        idx_sequence = 0
+        current_sequence_length = 0
+        true_sequence_length = 0
+        max_true_sequence_length = 0
+        for idx_group, bert_tokens_with_spacy in enumerate(bert_token_groups_with_spacy):
+            if last_sentence_id is None or sentence_ids[idx_group] != last_sentence_id:
+                index_token_in_sentence = -1
+            last_sentence_id = sentence_ids[idx_group]
+            if idx_group >= sequences[idx_sequence][1]:
+                if idx_sequence + 1 < len(sequences):
+                    idx_sequence += 1
+                    current_sequence_length = 0
+                    max_true_sequence_length = max(true_sequence_length, max_true_sequence_length)
+                    true_sequence_length = 0
+                else:
+                    break
+            if idx_group < sequences[idx_sequence][0]:
+                continue
+            assert(sequences[idx_sequence][0] <= idx_group < sequences[idx_sequence][1])
+            included_indices.append(idx_group)
             index_word_in_example += 1
-            type_id = 1
+            idx_data = get_data_token_index(bert_tokens_with_spacy)
+            true_sequence_length += len(bert_tokens_with_spacy)
+            if max_sequence_length is None \
+                    or len(bert_tokens_with_spacy) + current_sequence_length < max_sequence_length:
+                for idx_token, (t, length, spacy_token) in enumerate(bert_tokens_with_spacy):
+                    index_token_in_sentence += 1
+                    current_sequence_length += 1
+                    idx_head_group = _get_syntactic_head_group(spacy_token, bert_token_groups_with_spacy)
+                    head_token = '[PAD]'
+                    head_location = np.nan
+                    if idx_head_group is not None:
+                        idx_head_data_token = get_data_token_index(bert_token_groups_with_spacy[idx_head_group])
+                        head_token = bert_token_groups_with_spacy[idx_head_group][idx_head_data_token][0]
+                        head_location = idx_head_group - idx_group
+                    example_tokens.append(t)
+                    example_mask.append(1)
+                    example_is_stop.append(_is_stop(spacy_token))
+                    example_pos.append('' if spacy_token is None else spacy_token.pos_)
+                    example_pos_id.append(_part_of_speech_id(spacy_token))
+                    example_lengths.append(length)
+                    example_probs.append(-20. if spacy_token is None else spacy_token.prob)
+                    example_head_location.append(head_location)
+                    example_token_head.append(head_token)
+                    is_continue_word_piece = t.startswith('##')
+                    example_is_begin_word_pieces.append(not is_continue_word_piece)
+                    example_type_ids.append(type_id)
+                    if span_ids is not None:
+                        example_span_ids.append(span_ids[idx_group])
+                    example_index_word_in_example.append(index_word_in_example)
+                    example_index_token_in_sentence.append(index_token_in_sentence)
+                    # we follow the BERT paper and always use the first word-piece as the labeled one
+                    data_id = -1
+                    if data_ids is not None and idx_token == idx_data or is_apply_data_offset_entire_group:
+                        data_id = data_ids[idx_group]
+                    example_data_ids.append(data_id)
+            if idx_group == sequences[idx_sequence][1]:
+                _append_special_token('[SEP]', index_word_in_example + 1, index_token_in_sentence + 1, type_id)
+                index_word_in_example += 1
+                type_id = 1
 
-    if data_key is None:
-        data_key = dict()
-    if isinstance(data_key, str):
-        data_key = [data_key]
+        if data_key is None:
+            data_key = dict()
+        if isinstance(data_key, str):
+            data_key = [data_key]
 
-    def _readonly(arr):
-        arr.setflags(write=False)
-        return arr
+        def _readonly(arr):
+            arr.setflags(write=False)
+            return arr
 
-    example_data_ids = _readonly(np.array(example_data_ids))
-    max_true_sequence_length = max(max_true_sequence_length, true_sequence_length)
+        example_data_ids = _readonly(np.array(example_data_ids))
+        max_true_sequence_length = max(max_true_sequence_length, true_sequence_length)
 
-    input_features = InputFeatures(
-        unique_id=unique_id,
-        tokens=tuple(example_tokens),
-        token_ids=_readonly(np.asarray(bert_tokenizer.convert_tokens_to_ids(example_tokens))),
-        mask=_readonly(np.array(example_mask)),
-        is_stop=_readonly(np.array(example_is_stop)),
-        part_of_speech=tuple(example_pos),
-        part_of_speech_id=_readonly(np.array(example_pos_id)),
-        is_begin_word_pieces=_readonly(np.array(example_is_begin_word_pieces)),
-        token_lengths=_readonly(np.array(example_lengths)),
-        token_probabilities=_readonly(np.array(example_probs)),
-        type_ids=_readonly(np.array(example_type_ids)),
-        head_location=_readonly(np.array(example_head_location)),
-        head_tokens=tuple(example_token_head),
-        head_token_ids=_readonly(np.array(bert_tokenizer.convert_tokens_to_ids(example_token_head))),
-        index_word_in_example=_readonly(np.array(example_index_word_in_example)),
-        index_token_in_sentence=_readonly(np.array(example_index_token_in_sentence)),
-        multipart_id=multipart_id,
-        span_ids=_readonly(np.array(example_span_ids)) if example_span_ids is not None else None,
-        data_ids=dict((k, example_data_ids) for k in data_key))
+        input_features = InputFeatures(
+            unique_id=unique_id,
+            tokens=tuple(example_tokens),
+            token_ids=_readonly(np.asarray(self.model_tokenizer.convert_tokens_to_ids(example_tokens))),
+            mask=_readonly(np.array(example_mask)),
+            is_stop=_readonly(np.array(example_is_stop)),
+            part_of_speech=tuple(example_pos),
+            part_of_speech_id=_readonly(np.array(example_pos_id)),
+            is_begin_word_pieces=_readonly(np.array(example_is_begin_word_pieces)),
+            token_lengths=_readonly(np.array(example_lengths)),
+            token_probabilities=_readonly(np.array(example_probs)),
+            type_ids=_readonly(np.array(example_type_ids)),
+            head_location=_readonly(np.array(example_head_location)),
+            head_tokens=tuple(example_token_head),
+            head_token_ids=_readonly(np.array(self.model_tokenizer.convert_tokens_to_ids(example_token_head))),
+            index_word_in_example=_readonly(np.array(example_index_word_in_example)),
+            index_token_in_sentence=_readonly(np.array(example_index_token_in_sentence)),
+            multipart_id=multipart_id,
+            span_ids=_readonly(np.array(example_span_ids)) if example_span_ids is not None else None,
+            data_ids=dict((k, example_data_ids) for k in data_key))
 
-    return input_features, np.array(included_indices), max_true_sequence_length
+        return input_features, np.array(included_indices), max_true_sequence_length

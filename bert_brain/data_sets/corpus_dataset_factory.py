@@ -8,10 +8,7 @@ import logging
 
 import numpy as np
 
-from transformers import BertTokenizer
-from spacy.language import Language
-
-from .spacy_token_meta import make_tokenizer_model as make_spacy_language
+from .spacy_token_meta import BertSpacyTokenAligner
 from .corpus_base import CorpusBase
 from .data_preparer import DataPreparer, PhasePreprocessorMappingT, SplitFunctionT, PreprocessForkFnT, ResponseKeyKind
 from .data_id_dataset import DataIdDataset
@@ -34,18 +31,13 @@ class CorpusDatasetFactory:
     model_tokenizer_name: str = 'bert-base-uncased'
     spacy_language_name: str = 'en_core_web_md'
     cache_path: str = None
-    model_tokenizer: BertTokenizer = field(init=False, repr=False, compare=False)
-    spacy_language: Language = field(init=False, repr=False, compare=False)
+    bert_spacy_token_aligner: BertSpacyTokenAligner = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         object.__setattr__(
             self,
-            'model_tokenizer',
-            BertTokenizer.from_pretrained(self.model_tokenizer_name, cache_dir=self.cache_path, do_lower_case=True))
-        object.__setattr__(
-            self,
-            'spacy_language',
-            make_spacy_language(self.spacy_language_name))
+            'bert_spacy_token_aligner',
+            BertSpacyTokenAligner(self.model_tokenizer_name, self.spacy_language_name, self.cache_path))
 
     @classmethod
     def _hash_arguments(cls, kwargs):
@@ -114,7 +106,7 @@ class CorpusDatasetFactory:
         if not os.path.exists(os.path.split(corpus_info_path)[0]):
             os.makedirs(os.path.split(corpus_info_path)[0])
         data, true_max_sequence_length = corpus.load(
-            self.spacy_language, self.model_tokenizer, max_sequence_length=max_sequence_length)
+            self.bert_spacy_token_aligner, max_sequence_length=max_sequence_length)
         corpus_info = CorpusLoadInfo(
             response_key_kinds=tuple(ResponseKeyKind(k, data.response_data[k].kind) for k in data.response_data),
             true_max_sequence_length=true_max_sequence_length)

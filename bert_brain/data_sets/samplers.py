@@ -68,7 +68,7 @@ class BatchOneTaskSamplerFactory(SamplerFactory):
 
 @dataclasses.dataclass(frozen=True)
 class BatchOneTaskProportionalSamplerFactory(BatchOneTaskSamplerFactory):
-    max_contribution: Optional[int] = None
+    max_contribution: Optional[float] = None
 
     def make_sampler(
             self,
@@ -83,7 +83,7 @@ class BatchOneTaskProportionalSamplerFactory(BatchOneTaskSamplerFactory):
 @dataclasses.dataclass(frozen=True)
 class BatchOneTaskTemperatureProportionalSamplerFactory(BatchOneTaskSamplerFactory):
     temperature: float = 1
-    max_contribution: Optional[int] = None
+    max_contribution: Optional[float] = None
 
     def make_sampler(
             self,
@@ -213,7 +213,7 @@ class BatchOneTaskTemperatureProportionalSampler(BatchOneTaskSampler):
             batch_size: int,
             batches_per_epoch: int,
             temperature: float,
-            max_contribution: Optional[int] = None,
+            max_contribution: Optional[float] = None,
             task_filter: Optional[Container[str]] = None,
             uncertainty_log_sigma_squared_field: Optional[str] = None,
             num_uncertainty_warmup_steps: int = 0):
@@ -222,9 +222,11 @@ class BatchOneTaskTemperatureProportionalSampler(BatchOneTaskSampler):
             uncertainty_log_sigma_squared_field, num_uncertainty_warmup_steps)
         self._task_keys = [task for task in self.task_indices]
         self._sample_rates = np.array(list(len(self.task_indices[k]) for k in self._task_keys))
+        self._sample_rates = self._sample_rates / np.sum(self._sample_rates)
         if max_contribution is not None:
             self._sample_rates = np.minimum(self._sample_rates, max_contribution)
-        self._sample_rates = np.power(self._sample_rates / np.sum(self._sample_rates), 1 / temperature)
+            self._sample_rates = self._sample_rates / np.sum(self._sample_rates)
+        self._sample_rates = np.power(self._sample_rates, 1 / temperature)
         self._sample_rates = self._sample_rates / np.sum(self._sample_rates)
         self._task_uncertainty = np.ones_like(self._sample_rates)
         self._effective_rates = self._task_uncertainty * self._sample_rates

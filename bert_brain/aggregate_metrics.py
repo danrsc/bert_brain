@@ -363,6 +363,7 @@ def regression_handler(
     mae = np.nanmean(np.abs(predictions - masked_target), axis=0)
 
     variance = np.where(variance < 1e-8, np.nan, variance)
+    mean_abs_deviation = np.where(mean_abs_deviation < 1e-8, np.nan, mean_abs_deviation)
 
     result = dict(
         mse=mse,
