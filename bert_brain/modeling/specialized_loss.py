@@ -214,6 +214,7 @@ def masked_binary_accuracy(mask, predictions, target, is_logits=True):
 
     result = torch.zeros(mask.size(), dtype=acc.dtype, device=acc.device)
     result.masked_scatter_(mask, acc)
+    result = result.type(torch.float)
     return result, valid_count
 
 
@@ -234,6 +235,7 @@ def masked_accuracy(mask, predictions, target):
 
     result = torch.zeros(mask.size(), dtype=acc.dtype, device=acc.device)
     result.masked_scatter_(mask, acc)
+    result = result.type(torch.float)
     return result, valid_count
 
 
