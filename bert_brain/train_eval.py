@@ -76,14 +76,6 @@ def restore_model_parameters_and_set_meta_gradient(
 
 def set_pareto_gradient(model, gradient_container, l2_norm=False, max_iter=256, tol=1e-6):
     # see algorithm 2 in https://papers.nips.cc/paper/7334-multi-task-learning-as-multi-objective-optimization.pdf
-    gradient_container_ = dict()
-    for gradient in gradient_container:
-        for key in gradient:
-            if key not in gradient_container_:
-                gradient_container_[key] = list()
-            gradient_container_[key].append(gradient[key])
-
-    gradient_container = gradient_container_
     model.zero_grad()
     for key, p in model.named_parameters():
         if p.requires_grad and key in gradient_container:
@@ -499,12 +491,12 @@ def _train_step(
             copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
         else:
             if gradient_container is not None:
-                gradient = dict()
                 for key, p in model.named_parameters():
                     if p.requires_grad and p.grad is not None:
+                        if key not in gradient_container:
+                            gradient_container[key] = list()
                         # noinspection PyUnresolvedReferences
-                        gradient[key] = p.grad.data.detach().cpu()
-                gradient_container.append(gradient)
+                        gradient_container[key].append(p.grad.data.detach().cpu())
             if not settings.use_pareto:
                 optimizer.step()
                 if scheduler is not None:
@@ -772,7 +764,7 @@ def train(
                 gradient_state = None
                 gradient_container = None
                 if settings.use_pareto:
-                    gradient_container = list()
+                    gradient_container = dict()
                 else:
                     restore_state = deepcopy(model.state_dict())
                     for key, p in model.named_parameters():
