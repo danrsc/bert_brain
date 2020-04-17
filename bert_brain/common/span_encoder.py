@@ -54,5 +54,5 @@ class NamedSpanEncoder:
             result[name] = masked == mask
             round_trips += masked
         if not torch.equal(round_trips, multi_encoded_span_ids):
-            raise ValueError('Bad value for encoded_span_ids')
-        return result
+            return result, False
+        return result, True

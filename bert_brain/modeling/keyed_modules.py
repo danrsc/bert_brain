@@ -476,7 +476,7 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         self.sequence_source_name = sequence_source_name
         self.span_source_name = span_source_name
         self.linear = None
-        self.named_span_encoder = NamedSpanEncoder(range(num_spans))
+        self.named_span_encoder = NamedSpanEncoder(list(range(num_spans)))
 
     def _instantiate(self, name_to_num_channels):
         in_sequence_channels = name_to_num_channels[self.sequence_source_name]
@@ -484,22 +484,28 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
 
         result = OrderedDict(self.output_key_to_shape)
         for key in name_to_num_channels:
-            if isinstance(key, tuple) and key[0] == self.source_name:
+            if isinstance(key, tuple) and key[0] == self.sequence_source_name:
                 for result_key in self.output_key_to_shape:
                     result[(result_key,) + key[1:]] = name_to_num_channels[key]
         return result
 
     def forward(self, batch):
+        if self.span_source_name not in batch:
+            return OrderedDict()
         span_ids = batch[self.span_source_name]
-        span_indicators = self.named_span_encoder.torch_span_indicators(span_ids)
+        span_indicators, is_fully_decoded = self.named_span_encoder.torch_span_indicators(span_ids)
+        if not is_fully_decoded:
+            # this has more spans than this module can handle
+            return OrderedDict()
         span_embeddings = list()
         for index_span, span_name in enumerate(span_indicators):
             span_indicator = torch.unsqueeze(span_indicators[span_name], dim=2)
-            span_values = -torch.inf * torch.ones_like(batch[self.sequence_source_name])
+            span_values = torch.full_like(batch[self.sequence_source_name], -float('inf'))
             span_values.masked_scatter_(
                 span_indicator, torch.masked_select(batch[self.sequence_source_name], span_indicator))
-            span_embeddings.append(torch.max(span_values, dim=1))
-        prediction_input = torch.cat(span_embeddings, dim=2)
+            max_values, _ = torch.max(span_values, dim=1)
+            span_embeddings.append(max_values)
+        prediction_input = torch.cat(span_embeddings, dim=1)
         predictions = self.linear(prediction_input)
         predictions = torch.split(predictions, self.splits, dim=-1)
         assert (len(self.output_key_to_shape) == len(predictions))

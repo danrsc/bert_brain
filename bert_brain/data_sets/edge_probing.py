@@ -28,20 +28,24 @@ __all__ = [
 
 
 def _read_records(path: str, named_span_encoder: NamedSpanEncoder):
+    span1_value = named_span_encoder.encode('span1')
+    span2_value = None
     with open(path, 'rt') as f:
         for line in tqdm(f, desc='records'):
             record = json.loads(line)
             words = record['text'].split()
-            span_ids = [0] * len(words)
             for target in record['targets']:
+                span_ids = [0] * len(words)
                 span1 = target['span1']
                 for i in range(span1[0], span1[1]):
-                    span_ids[i] += named_span_encoder.encode('span1')
+                    span_ids[i] += span1_value
                 labels = target['label']
                 if 'span2' in target:
+                    if span2_value is None:
+                        span2_value = named_span_encoder.encode('span2')
                     span2 = target['span2']
                     for i in range(span2[0], span2[1]):
-                        span_ids[i] += named_span_encoder.encode('span2')
+                        span_ids[i] += span2_value
                 yield words, span_ids, labels
 
 
@@ -95,25 +99,22 @@ def _load_multi_binary_label_probing_task(
             (validation_words, validation_spans, validation_true, validation_examples),
             (test_words, test_spans, test_true, test_examples)]:
         for words, span_ids, true_labels in zip(all_words, all_spans, all_true):
-            for index_choice, choice in enumerate(label_choices):
-                data_ids = -1 * np.ones(len(words), dtype=np.int64)
-                # doesn't matter which word we attach the label to since we specify below that is_sequence=False
-                data_ids[0] = len(output_labels[choice])
-                label = 1 if choice in true_labels else 0
-                try:
-                    ex = example_manager.add_example(
-                        example_key=(choice, len(output_labels[choice])),
-                        words=words,
-                        sentence_ids=[len(output_labels[choice])] * len(words),
-                        data_key='{}.{}'.format(response_key, choice),
-                        data_ids=data_ids,
-                        span_ids=span_ids,
-                        allow_new_examples=index_choice == 0)
-                    output_labels[choice].append(label)
-                    if ex is not None:
-                        example_list.append(ex)
-                except ChineseCharDetected:
-                    pass
+            data_ids = -1 * np.ones(len(words), dtype=np.int64)
+            # doesn't matter which word we attach the label to since we specify below that is_sequence=False
+            data_ids[0] = len(output_labels[label_choices[0]])
+            try:
+                ex = example_manager.add_example(
+                    example_key=data_ids[0],
+                    words=words,
+                    sentence_ids=[data_ids[0]] * len(words),
+                    data_key=['{}.{}'.format(response_key, choice) for choice in label_choices],
+                    data_ids=data_ids,
+                    span_ids=span_ids)
+                for choice in label_choices:
+                    output_labels[choice].append(1 if choice in true_labels else 0)
+                example_list.append(ex)
+            except ChineseCharDetected:
+                pass
 
     output_labels = OrderedDict(
         ('{}.{}'.format(response_key, k),

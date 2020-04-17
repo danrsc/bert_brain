@@ -272,6 +272,19 @@ class Settings:
     num_meta_learn_no_gradient_samples: int = 10
     num_meta_learn_gradient_samples: int = 10
 
+    # If True, then the meta-learning strategy is changed to try to estimate a Pareto optimum as in
+    # Multi-Task Learning as Multi-Objective Optimization
+    # Sener, Ozan and Koltun, Vladlen
+    # https://papers.nips.cc/paper/7334-multi-task-learning-as-multi-objective-optimization.pdf
+    # In this case, gradients are computed for num_meta_learn_gradient_samples without any steps being taken.
+    # The gradients are temporarily stored (shifted to CPU). Then the Frank-Wolfe optimization from the paper
+    # is applied to weight the gradients before a step is taken in a direction which decreases all of the losses
+    # which have been sampled during the inner steps.
+    # When use_pareto is True, num_meta_learn_no_gradient_samples must be 0, and meta_learn_no_gradient_loss_tasks must
+    # be empty
+    use_pareto: bool = False
+    use_l2_norm_pareto: bool = True
+
     @property
     def all_loss_tasks(self):
         all_loss_tasks = set(self.loss_tasks)

@@ -1987,16 +1987,16 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             weight_losses_by_inverse_example_counts=False,
             # num_meta_learn_gradient_samples=10,
             # num_meta_learn_no_gradient_samples=0,
-            sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
+            sampler_factory=BatchOneTaskSamplerFactory(1000),  # BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
-                'response_id', 'num_response_data_fields', 10,
+                'response_id', 'num_response_data_fields', 5,
                 OrderedDict(
                     bottleneck=KeyedLinear(
                         ('bert', 'sequence', 'all'),
-                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=1),
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=3),
                         should_norm=False)),
                 use_softmax_embedding=True),
             pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
@@ -2063,16 +2063,25 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
         settings.default_pooled_source = 'pooled_all_bottleneck'
         settings.default_sequence_source = 'sequence_all_bottleneck'
-        settings.loss_tasks.add(ResponseKind.generic)
-        settings.loss_tasks.add(ResponseKind.hp_fmri)
-        settings.loss_tasks.add(ResponseKind.ucl_erp)
-        settings.loss_tasks.add(ResponseKind.ucl_eye)
-        settings.loss_tasks.add(ResponseKind.ucl_self_paced)
-        settings.loss_tasks.add(ResponseKind.dundee_eye)
-        settings.loss_tasks.add(ResponseKind.geco)
+        # settings.loss_tasks.add(ResponseKind.generic)
+        # settings.loss_tasks.add(ResponseKind.hp_fmri)
+        # settings.loss_tasks.add(ResponseKind.ucl_erp)
+        # settings.loss_tasks.add(ResponseKind.ucl_eye)
+        # settings.loss_tasks.add(ResponseKind.ucl_self_paced)
+        # settings.loss_tasks.add(ResponseKind.dundee_eye)
+        # settings.loss_tasks.add(ResponseKind.geco)
 
-        # settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
-        # settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_erp)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_eye)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_self_paced)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.dundee_eye)
+        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.geco)
+        settings.num_meta_learn_no_gradient_samples = 0
+        settings.use_pareto = True
+        settings.use_l2_norm_pareto = True
+
         return settings
     else:
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

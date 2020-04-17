@@ -13,7 +13,7 @@ from torch.utils.data import SequentialSampler, DataLoader as TorchDataLoader
 from torch.optim.lr_scheduler import LambdaLR
 
 from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskSequentialSampler
-from .modeling import KeyedLinear, BertMultiPredictionHead
+from .modeling import KeyedLinear, BertMultiPredictionHead, find_min_norm_element
 from .settings import Settings
 from .result_output import write_predictions, write_loss_curve
 
@@ -32,7 +32,7 @@ def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
     for (name_opti, param_opti), (name_model, param_model) in zip(named_params_optimizer, named_params_model):
         if name_opti != name_model:
             logger.error("name_opti != name_model: {} {}".format(name_opti, name_model))
-            raise ValueError
+            raise ValueError()
         param_model.data.copy_(param_opti.data)
 
 
@@ -44,7 +44,7 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
     for (name_opti, param_opti), (name_model, param_model) in zip(named_params_optimizer, named_params_model):
         if name_opti != name_model:
             logger.error("name_opti != name_model: {} {}".format(name_opti, name_model))
-            raise ValueError
+            raise ValueError()
         if param_model.grad is not None:
             if test_nan and torch.isnan(param_model.grad).sum() > 0:
                 is_nan = True
@@ -74,6 +74,30 @@ def restore_model_parameters_and_set_meta_gradient(
             p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / num_inner_steps)
 
 
+def set_pareto_gradient(model, gradient_container, l2_norm=False, max_iter=256, tol=1e-6):
+    # see algorithm 2 in https://papers.nips.cc/paper/7334-multi-task-learning-as-multi-objective-optimization.pdf
+    gradient_container_ = dict()
+    for gradient in gradient_container:
+        for key in gradient:
+            if key not in gradient_container_:
+                gradient_container_[key] = list()
+            gradient_container_[key].append(gradient[key])
+
+    gradient_container = gradient_container_
+    model.zero_grad()
+    for key, p in model.named_parameters():
+        if p.requires_grad and key in gradient_container:
+            if p.grad is None:
+                p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()), requires_grad=True)
+            if len(gradient_container[key]) == 1:
+                # noinspection PyUnresolvedReferences
+                p.grad.data.copy_(torch.from_numpy(gradient_container[key][0]).to(p.grad.data.device))
+            else:
+                _, _, gradient = find_min_norm_element(gradient_container[key], l2_norm, max_iter, tol)
+                # noinspection PyUnresolvedReferences
+                p.grad.data.copy_(torch.from_numpy(gradient).to(p.grad.data.device))
+
+
 def evaluate(
         settings: Settings,
         model,
@@ -88,7 +112,9 @@ def evaluate(
 
     eval_sampler = None
     batch_sampler = None
-    if settings.use_sequential_sampling_on_evaluate or return_detailed:
+    if settings.use_sequential_sampling_on_evaluate:
+    # temporarily commenting out for panic
+    # if settings.use_sequential_sampling_on_evaluate or return_detailed:
         if settings.sampler_factory.is_one_task_at_a_time_sampler():
             batch_sampler = BatchOneTaskSequentialSampler(
                 eval_data_set, settings.optimization_settings.predict_batch_size)
@@ -391,6 +417,7 @@ def _train_step(
         optimizer,
         scheduler,
         sampler_to_update,
+        gradient_container,
         log_tag='train'):
 
     for k in batch:
@@ -471,13 +498,22 @@ def _train_step(
                 scheduler.step()
             copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
         else:
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+            if gradient_container is not None:
+                gradient = dict()
+                for key, p in model.named_parameters():
+                    if p.requires_grad and p.grad is not None:
+                        # noinspection PyUnresolvedReferences
+                        gradient[key] = p.grad.data.detach().cpu()
+                gradient_container.append(gradient)
+            if not settings.use_pareto:
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
         model.zero_grad()
 
-        for group in optimizer.param_groups:
-            assert(group['lr'] >= 0)
+        if not settings.use_pareto:
+            for group in optimizer.param_groups:
+                assert(group['lr'] >= 0)
 
     return True
 
@@ -510,6 +546,9 @@ def train(
         (settings.meta_learn_no_gradient_loss_tasks is not None and len(settings.meta_learn_no_gradient_loss_tasks) > 0)
         or (settings.meta_learn_gradient_loss_tasks is not None and len(settings.meta_learn_gradient_loss_tasks) > 0))
 
+    if settings.use_pareto and not is_meta_learn_active:
+        raise ValueError('Pareto optimization can only be used when meta-learning is active')
+
     if is_meta_learn_active:
         if settings.loss_tasks is not None and len(settings.loss_tasks) > 0:
             raise ValueError('When meta learning is active, settings.loss_tasks must be empty')
@@ -521,6 +560,12 @@ def train(
             raise ValueError('settings.num_meta_learn_gradient_samples must be >= 1 when meta learning is active')
         if settings.num_meta_learn_no_gradient_samples < 0:
             raise ValueError('settings.num_meta_learn_no_gradient_samples must be >= 0 when meta learning is active')
+        if settings.use_pareto and settings.num_meta_learn_no_gradient_samples > 0:
+            raise ValueError('settings.num_meta_learn_no_gradient_samples must be 0 when use_pareto is True')
+        if (settings.use_pareto
+                and settings.meta_learn_no_gradient_loss_tasks is not None
+                and len(settings.meta_learn_no_gradient_loss_tasks) > 0):
+            raise ValueError('settings.meta_learn_no_gradient_loss_tasks must be empty when use_pareto is True')
         if not settings.sampler_factory.is_one_task_at_a_time_sampler():
             raise ValueError('settings.sampler_factory must be a one-task-at-a-time variety for meta learning. '
                              'Current factory: {}'.format(settings.sampler_factory))
@@ -670,7 +715,7 @@ def train(
          't_total': num_train_steps_other}]
 
     inner_optimizer_grouped_parameters = None
-    if is_meta_learn_active:
+    if is_meta_learn_active and not settings.use_pareto:
         inner_optimizer_grouped_parameters = list(dict(g) for g in optimizer_grouped_parameters)
         for g in inner_optimizer_grouped_parameters:
             g['t_total'] *= settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples
@@ -682,7 +727,7 @@ def train(
         optimizer, optimizer_grouped_parameters)
 
     inner_meta_learn_optimizer = None
-    if is_meta_learn_active:
+    if is_meta_learn_active and not settings.use_pareto:
         inner_meta_learn_optimizer = settings.optimization_settings.make_inner_meta_learn_optimizer(
             optimizer,
             inner_optimizer_grouped_parameters,
@@ -723,10 +768,15 @@ def train(
             for step in iterate_and_update(
                     progress_update.update_batch,
                     range(num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)):
-                restore_state = deepcopy(model.state_dict())
-                for key, p in model.named_parameters():
-                    restore_state[key].requires_grad = p.requires_grad
+                restore_state = None
                 gradient_state = None
+                gradient_container = None
+                if settings.use_pareto:
+                    gradient_container = list()
+                else:
+                    restore_state = deepcopy(model.state_dict())
+                    for key, p in model.named_parameters():
+                        restore_state[key].requires_grad = p.requires_grad
                 for index_inner_step in range(
                         settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples):
                     if index_inner_step < settings.num_meta_learn_no_gradient_samples:
@@ -744,7 +794,7 @@ def train(
                                 # special case, when there are no no_gradient steps use the restore_state
                                 # to avoid extra memory
                                 gradient_state = restore_state
-                            else:
+                            elif not settings.use_pareto:
                                 gradient_state = deepcopy(model.state_dict())
                                 for key, p in model.named_parameters():
                                     gradient_state[key].requires_grad = p.requires_grad
@@ -761,23 +811,26 @@ def train(
                         current_loss_tasks,
                         train_data_set, device, model, inner_batch, step, index_epoch, global_step,
                         loss_handlers, train_results, param_optimizer,
-                        inner_meta_learn_optimizer, None, sampler_to_update, log_tag=log_tag)
+                        inner_meta_learn_optimizer, None, sampler_to_update, gradient_container, log_tag=log_tag)
                 logger.info('meta epoch {}, step {}'.format(index_epoch, step))
-                restore_model_parameters_and_set_meta_gradient(
-                    model, restore_state, gradient_state, settings.num_meta_learn_gradient_samples)
+                if settings.use_pareto:
+                    set_pareto_gradient(model, gradient_container, settings.use_l2_norm_pareto)
+                else:
+                    restore_model_parameters_and_set_meta_gradient(
+                        model, restore_state, gradient_state, settings.num_meta_learn_gradient_samples)
                 optimizer.step()
                 scheduler.step()
                 model.zero_grad()
                 global_step += 1
         else:
             sampler_to_update = batch_sampler if batch_sampler is not None else train_sampler
-
             for step, batch in iterate_and_update(progress_update.update_batch, enumerate(train_data_loader)):
                 if _train_step(
                         settings,
                         settings.loss_tasks,
                         train_data_set, device, model, batch, step, index_epoch, global_step,
-                        loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update):
+                        loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update,
+                        gradient_container=None):
                     global_step += 1
 
         write_loss_curve(output_train_curve_path, train_results)
