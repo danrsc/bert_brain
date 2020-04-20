@@ -476,7 +476,10 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         self.sequence_source_name = sequence_source_name
         self.span_source_name = span_source_name
         self.linear = None
-        self.named_span_encoder = NamedSpanEncoder(list(range(num_spans)))
+        named_span_encoder = NamedSpanEncoder(list(range(num_spans)))
+        masks = named_span_encoder.masks()
+        self.masks = torch.reshape(torch.tensor(list(masks[k] for k in masks), dtype=torch.long), (1, 1, len(masks)))
+        self.max_value = sum(masks[k] for k in masks)
 
     def _instantiate(self, name_to_num_channels):
         in_sequence_channels = name_to_num_channels[self.sequence_source_name]
@@ -493,19 +496,20 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         if self.span_source_name not in batch:
             return OrderedDict()
         span_ids = batch[self.span_source_name]
-        span_indicators, is_fully_decoded = self.named_span_encoder.torch_span_indicators(span_ids)
-        if not is_fully_decoded:
-            # this has more spans than this module can handle
+        self.masks = self.masks.to(span_ids.device)
+        if torch.max(span_ids) > self.max_value:
             return OrderedDict()
-        span_embeddings = list()
-        for index_span, span_name in enumerate(span_indicators):
-            span_indicator = torch.unsqueeze(span_indicators[span_name], dim=2)
-            span_values = torch.full_like(batch[self.sequence_source_name], -float('inf'))
-            span_values.masked_scatter_(
-                span_indicator, torch.masked_select(batch[self.sequence_source_name], span_indicator))
-            max_values, _ = torch.max(span_values, dim=1)
-            span_embeddings.append(max_values)
-        prediction_input = torch.cat(span_embeddings, dim=1)
+        span_values = batch[self.sequence_source_name]
+        # -> (batch, sequence, num_masks)
+        non_span_indicator = torch.unsqueeze(span_ids, dim=2) & self.masks != self.masks
+        # -> (batch, sequence, num_masks, 1)
+        invalid = torch.unsqueeze(
+            non_span_indicator.type(torch.float) * -(torch.max(torch.abs(span_values)) + 1), dim=3)
+        # -> (batch, sequence, num_masks, channels)
+        span_values = torch.unsqueeze(span_values, dim=2) + invalid
+        # -> (batch, num_masks, channels)
+        prediction_input, _ = torch.max(span_values, dim=1)
+        prediction_input = torch.reshape(prediction_input, (prediction_input.shape[0], -1))
         predictions = self.linear(prediction_input)
         predictions = torch.split(predictions, self.splits, dim=-1)
         assert (len(self.output_key_to_shape) == len(predictions))

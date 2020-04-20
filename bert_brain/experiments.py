@@ -2,7 +2,7 @@ import hashlib
 import itertools
 import random
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import replace, dataclass
 from typing import Union, Iterable, Mapping, Tuple
 
 import numpy as np
@@ -16,7 +16,8 @@ from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessKMeans, PreprocessRandomPair, PreprocessMakeBinary, PreprocessForkNoClusterToDisk, \
     PreprocessQuantileDigitize, PreprocessPCA, PreprocessRankData, PreprocessLog, corpus_types, \
     BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, BatchOneTaskProportionalSamplerFactory, \
-    BatchOneTaskTemperatureProportionalSamplerFactory
+    BatchOneTaskTemperatureProportionalSamplerFactory, BatchOneTaskTaskPermutedSamplerFactory, \
+    BatchOneTaskManualWeightSamplerFactory
 from .modeling import KeyedLinear, LinearContextualParameterGeneration, PooledFromSequence, PooledFromKTokens, \
     MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types, \
     learning_rate_schedules, MultiLayerBottleneck, ContextualBottleneckSum, AttentionKeyValues, AttentionPool, \
@@ -165,6 +166,46 @@ def standard_edge_probing_graph(corpora, sequence_key):
             num_spans_to_head[corpus.num_spans()][inner_name].targets.add(corpus.corpus_key)
             result[corpus.corpus_key] = num_spans_to_head[corpus.num_spans()]
     return result
+
+
+@dataclass(frozen=True)
+class SamplerWeightCollapse:
+    collapse_prefixes: Tuple[str, ...]
+    divisor: int = 1
+    temperature: int = 1
+
+    def __call__(self, task_weights: Mapping[str, float]) -> Mapping[str, float]:
+        prefix_maxes = dict((p, 0) for p in self.collapse_prefixes)
+        prefix_counts = dict((p, 0) for p in self.collapse_prefixes)
+        other = 0
+        for key in task_weights:
+            found = False
+            for prefix in self.collapse_prefixes:
+                if key.startswith(prefix):
+                    prefix_maxes[prefix] = max(prefix_maxes[prefix], task_weights[key] / self.divisor)
+                    prefix_counts[prefix] += 1
+                    found = True
+                    break
+            if not found:
+                other += task_weights[key]
+        new_other = 1
+        for prefix in prefix_maxes:
+            new_other -= prefix_maxes[prefix] / prefix_counts[prefix]
+        other_correction = new_other / other
+        weights = list()
+        for key in task_weights:
+            found = False
+            for prefix in self.collapse_prefixes:
+                if key.startswith(prefix):
+                    weights.append(prefix_maxes[prefix] / (prefix_counts[prefix] ** 2))
+                    found = True
+                    break
+            if not found:
+                weights.append(task_weights[key] * other_correction)
+        weights = np.array(weights)
+        weights = np.power(weights, 1 / self.temperature)
+        weights = weights / np.sum(weights)
+        return dict(zip(task_weights, weights))
 
 
 def singleton_variation(name: Union[str, Tuple[str, int]]) -> Tuple[Tuple[str, str], Settings]:
@@ -881,7 +922,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -945,7 +985,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             multi_layer_bottleneck=MultiLayerBottleneck(
@@ -1017,7 +1056,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             multi_layer_bottleneck=MultiLayerBottleneck(
@@ -1089,7 +1127,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             bottleneck=KeyedLinear(
@@ -1148,7 +1185,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             kv_layer=AttentionKeyValues(
@@ -1220,7 +1256,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             kv_layer=AttentionKeyValues(
@@ -1292,7 +1327,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             multi_layer_bottleneck=MultiLayerBottleneck(
@@ -1366,7 +1400,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.head_graph_parts = OrderedDict()
         settings.head_graph_parts[ResponseKind.generic] = OrderedDict(
@@ -1418,7 +1451,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         # settings.preprocessors[ResponseKind.hp_fmri] = [
         #     PreprocessQuantileDigitize(
@@ -1463,7 +1495,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         # remove any trend from individual runs before computing the median on the training data
         settings.preprocessors[ResponseKind.hp_fmri] = [
@@ -1516,7 +1547,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             attn_kv=AttentionKeyValues(
@@ -1592,7 +1622,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             attn_kv=AttentionKeyValues(
@@ -1668,7 +1697,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             attn_kv=AttentionKeyValues(
@@ -1744,7 +1772,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -1808,7 +1835,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskSamplerFactory(500),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -1882,7 +1908,6 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             # num_meta_learn_gradient_samples=10,
             # num_meta_learn_no_gradient_samples=0,
             sampler_factory=BatchOneTaskSamplerFactory(5000),
-            use_sequential_sampling_on_evaluate=False,
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -1985,10 +2010,10 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             data_id_in_batch_keys=None,
             field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
             weight_losses_by_inverse_example_counts=False,
-            # num_meta_learn_gradient_samples=10,
-            # num_meta_learn_no_gradient_samples=0,
-            sampler_factory=BatchOneTaskSamplerFactory(1000),  # BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
-            use_sequential_sampling_on_evaluate=False,
+            sampler_factory=BatchOneTaskManualWeightSamplerFactory(
+                1000, weight_fn=SamplerWeightCollapse(('spr1.', 'spr2.'), divisor=100, temperature=5)),
+            # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
+            # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             contextual_bottleneck=LinearContextualParameterGeneration(
@@ -2063,13 +2088,149 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
         settings.default_pooled_source = 'pooled_all_bottleneck'
         settings.default_sequence_source = 'sequence_all_bottleneck'
-        # settings.loss_tasks.add(ResponseKind.generic)
-        # settings.loss_tasks.add(ResponseKind.hp_fmri)
-        # settings.loss_tasks.add(ResponseKind.ucl_erp)
-        # settings.loss_tasks.add(ResponseKind.ucl_eye)
-        # settings.loss_tasks.add(ResponseKind.ucl_self_paced)
-        # settings.loss_tasks.add(ResponseKind.dundee_eye)
-        # settings.loss_tasks.add(ResponseKind.geco)
+        settings.loss_tasks.add(ResponseKind.generic)
+        settings.loss_tasks.add(ResponseKind.hp_fmri)
+        settings.loss_tasks.add(ResponseKind.ucl_erp)
+        settings.loss_tasks.add(ResponseKind.ucl_eye)
+        settings.loss_tasks.add(ResponseKind.ucl_self_paced)
+        settings.loss_tasks.add(ResponseKind.dundee_eye)
+        settings.loss_tasks.add(ResponseKind.geco)
+
+        return settings
+    elif name == 'fmri_cram_cpg_cca_ica_meta':
+        settings = Settings(
+            corpora=(
+                corpus_types.HarryPotterCorpus(
+                    fmri_subjects=None,  # None means all
+                    fmri_sentence_mode='ignore',
+                    fmri_window_duration=10.1,
+                    fmri_minimum_duration_required=9.6,
+                    fmri_kind='cca_ica',
+                    fmri_smooth_factor=None,
+                    separate_fmri_components=True,
+                    group_meg_sentences_like_fmri=True,
+                    meg_subjects=[]),
+                corpus_types.UclCorpus(subtract_erp_baseline=True),
+                corpus_types.GhentEyeTrackingCorpus(active_fields=(
+                    'word_fixation_count',
+                    'word_first_fixation_duration',
+                    'word_gaze_duration',
+                    'word_go_past_time',
+                    'word_total_reading_time')),
+                corpus_types.DundeeCorpus(),
+                corpus_types.StanfordSentimentTreebank(),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.PartOfSpeechConll2012(),
+                corpus_types.ConstituentsConll2012(),
+                corpus_types.SemanticRoleLabelConll2012(),
+                corpus_types.NamedEntityRecognitionConll2012(),
+                corpus_types.CoreferenceResolutionConll2012(),
+                corpus_types.DependenciesEnglishWeb(),
+                corpus_types.DefinitePronounResolution(),
+                corpus_types.SemEval(),
+                corpus_types.SemanticProtoRoles1(),
+                corpus_types.SemanticProtoRoles2()),
+            # corpus_types.WordContent()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=40,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=0,
+                learning_rate_head=1e-4,
+                learning_rate=1e-5,
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(200),
+                train_batch_size=8,
+                predict_batch_size=8,
+                num_loader_workers=8),
+            loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
+            weight_losses_by_inverse_example_counts=False,
+            sampler_factory=BatchOneTaskManualWeightSamplerFactory(
+                100, weight_fn=SamplerWeightCollapse(('spr1.', 'spr2.'), divisor=100, temperature=5)),
+            # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
+            # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
+            num_runs=4)
+        settings.common_graph_parts = OrderedDict(
+            contextual_bottleneck=LinearContextualParameterGeneration(
+                'response_id', 'num_response_data_fields', 5,
+                OrderedDict(
+                    bottleneck=KeyedLinear(
+                        ('bert', 'sequence', 'all'),
+                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=3),
+                        should_norm=False)),
+                use_softmax_embedding=True),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokens(
+                num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
+
+        settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
+
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            fmri_linear=KeyedLinear(
+                'hdr_pooled',
+                apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
+        # settings.preprocessors[ResponseKind.hp_fmri] = [
+        #     # PreprocessQuantileDigitize(quantiles=10, use_one_hot=False),
+        #     PreprocessStandardize(metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        # settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleMSE()
+        # for kind in [
+        #         ResponseKind.ucl_eye,
+        #         ResponseKind.ucl_self_paced,
+        #         ResponseKind.dundee_eye,
+        #         ResponseKind.geco]:
+        #     # settings.preprocessors[kind] = [
+        #     #     PreprocessLog(),
+        #     #     PreprocessStandardize(stop_mode='content')]
+        #     settings.preprocessors[kind] = [
+        #         PreprocessLog(),
+        #         PreprocessStandardize(stop_mode='content')]
+        #         # PreprocessQuantileDigitize(quantiles=10, use_one_hot=False, stop_mode='content'),
+        #         # PreprocessStandardize(stop_mode='content', average_axis=None)]
+        # # settings.preprocessors[ResponseKind.ucl_erp] = [PreprocessStandardize(stop_mode='content')]
+        # settings.preprocessors[ResponseKind.ucl_erp] = [
+        #     PreprocessStandardize(stop_mode='content'),]  # use standardize to average
+        #     # PreprocessQuantileDigitize(quantiles=19, use_one_hot=False, stop_mode='content'),
+        #     # PreprocessStandardize(stop_mode='content', average_axis=None)]
+        # for kind in [
+        #         ResponseKind.ucl_erp,
+        #         ResponseKind.ucl_eye,
+        #         ResponseKind.ucl_self_paced,
+        #         ResponseKind.dundee_eye,
+        #         ResponseKind.geco]:
+        #     settings.critics[kind] = critic_types.NamedTargetStopWordAwareMSE()
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessQuantileDigitize(
+                quantiles=2,
+                stop_mode=None,
+                metadata_example_group_by='fmri_runs',
+                train_on_all=True,
+                use_one_hot=False)]
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits()
+        for kind in [
+                ResponseKind.ucl_erp,
+                ResponseKind.ucl_eye,
+                ResponseKind.ucl_self_paced,
+                ResponseKind.dundee_eye,
+                ResponseKind.geco]:
+            settings.preprocessors[kind] = [
+                # use standardize to average subjects
+                PreprocessStandardize(stop_mode='content'),
+                PreprocessQuantileDigitize(
+                    quantiles=2,
+                    stop_mode='content',
+                    use_one_hot=False)]
+            settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
 
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
@@ -2078,9 +2239,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_self_paced)
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.dundee_eye)
         settings.meta_learn_gradient_loss_tasks.add(ResponseKind.geco)
+        settings.num_meta_learn_gradient_samples = 10
         settings.num_meta_learn_no_gradient_samples = 0
-        settings.use_pareto = True
-        settings.use_l2_norm_pareto = True
+        settings.use_pareto = False
 
         return settings
     else:

@@ -44,13 +44,16 @@ class NamedSpanEncoder:
             raise ValueError('Bad value for encoded_span_ids: {}'.format(encoded_span_ids))
         return active_names
 
+    def masks(self):
+        return OrderedDict((n, 1 << self.names[n]) for n in self.names)
+
     def torch_span_indicators(self, multi_encoded_span_ids):
         result = OrderedDict()
         round_trips = torch.zeros_like(multi_encoded_span_ids)
         for name in self.names:
             span_id = self.names[name]
-            mask = (1 << span_id) * torch.ones_like(multi_encoded_span_ids)
-            masked = mask & multi_encoded_span_ids
+            mask = (1 << span_id)
+            masked = multi_encoded_span_ids & mask
             result[name] = masked == mask
             round_trips += masked
         if not torch.equal(round_trips, multi_encoded_span_ids):

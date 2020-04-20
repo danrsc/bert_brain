@@ -48,22 +48,18 @@ def _projection_to_simplex(v):
     return w
 
 
-def find_min_norm_element(gradients, l2_norm=False, max_iter=256, tol=1e-6):
+def find_min_norm_element(gradients, norm, max_iter=256, tol=1e-6):
+    if len(gradients) == 1:
+        return gradients[0]
     shape = gradients[0].shape
-    gradients = np.array(list(np.reshape(g.numpy(), -1) for g in gradients))
+    gradients = np.reshape(gradients, (len(gradients), -1))
     # ignore 0 gradients
-    norm = np.linalg.norm(gradients, axis=1)
     if not np.any(norm > 0):
-        return np.ones(len(norm)) / len(norm), 0, np.reshape(gradients[0], shape)
+        return np.reshape(gradients[0], shape)
     gradients = gradients[norm > 0]
     if len(gradients) == 1:
-        solution = np.zeros_like(norm)
-        solution[norm > 0] = 1
-        return solution, norm[norm > 0], np.reshape(gradients[0], shape)
-    if l2_norm:
-        gradients_ = gradients / np.expand_dims(norm[norm > 0], 1)
-    else:
-        gradients_ = gradients
+        return np.reshape(gradients[0], shape)
+    gradients_ = gradients / np.expand_dims(norm[norm > 0], 1)
     dot_products = gradients_ @ gradients_.T
     gamma, cost = _min_norm_pairwise(dot_products)
     i, j = np.unravel_index(np.argmin(cost), cost.shape)
@@ -71,9 +67,7 @@ def find_min_norm_element(gradients, l2_norm=False, max_iter=256, tol=1e-6):
     solution[i] = gamma[i, j]
     solution[j] = 1 - gamma[i, j]
     if len(solution) == 2:
-        solution_ = np.zeros_like(norm)
-        solution_[norm > 0] = solution
-        return solution_, cost[i, j], np.reshape(np.sum(np.expand_dims(solution, 1) * gradients, axis=0), shape)
+        return np.reshape(np.sum(np.expand_dims(solution, 1) * gradients, axis=0), shape)
     for _ in range(max_iter):
         grad_dir = -1 * np.dot(dot_products, solution)
         new_point = _next_point(solution, grad_dir)
@@ -82,20 +76,13 @@ def find_min_norm_element(gradients, l2_norm=False, max_iter=256, tol=1e-6):
         v2v2 = np.sum(np.expand_dims(new_point, 1) * np.expand_dims(new_point, 0) * dot_products)
         if v1v2 >= v1v1:
             gamma = 0.999
-            cost = v1v1
         elif v1v2 >= v2v2:
             gamma = 0.001
-            cost = v2v2
         else:
             gamma = -1.0 * ((v1v2 - v2v2) / (v1v1 + v2v2 - 2 * v1v2))
-            cost = v2v2 + gamma * (v1v2 - v2v2)
         new_solution = gamma * solution + (1 - gamma) * new_point
         change = new_solution - solution
         if np.sum(np.abs(change)) < tol:
-            solution_ = np.zeros_like(norm)
-            solution_[norm > 0] = new_solution
-            return solution_, cost, np.reshape(np.sum(np.expand_dims(new_solution, 1) * gradients, axis=0), shape)
+            return np.reshape(np.sum(np.expand_dims(new_solution, 1) * gradients, axis=0), shape)
         solution = new_solution
-    solution_ = np.zeros_like(norm)
-    solution_[norm > 0] = solution
-    return solution_, cost, np.reshape(np.sum(np.expand_dims(solution, 1) * gradients, axis=0), shape)
+    return np.reshape(np.sum(np.expand_dims(solution, 1) * gradients, axis=0), shape)

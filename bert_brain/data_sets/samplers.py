@@ -1,6 +1,6 @@
 import dataclasses
 from collections import OrderedDict
-from typing import Optional, Container, Iterable
+from typing import Optional, Container, Iterable, Callable, Mapping
 
 import numpy as np
 import torch
@@ -21,7 +21,12 @@ __all__ = [
     'BatchOneTaskSequentialSampler',
     'BatchOneTaskRandomSamplerFactory',
     'BatchOneTaskRandomSampler',
-    'RandomSamplerFactory']
+    'RandomSamplerFactory',
+    'BatchOneTaskTaskPermutedSamplerFactory',
+    'BatchOneTaskTaskPermutedSampler',
+    'BatchOneTaskManualWeightSamplerFactory',
+    'BatchOneTaskManualWeightSampler',
+    'BatchOneTaskEvalSampler']
 
 
 class SamplerFactory:
@@ -205,6 +210,63 @@ class BatchOneTaskSampler(torch.utils.data.Sampler):
         return self.batches_per_epoch
 
 
+@dataclasses.dataclass(frozen=True)
+class BatchOneTaskManualWeightSamplerFactory(SamplerFactory):
+    batches_per_epoch: int
+    weight_fn: Callable[[Mapping[str, float]], Mapping[str, float]]
+    uncertainty_log_sigma_squared_field: Optional[str] = None
+    num_uncertainty_warmup_steps: int = 0
+
+    @classmethod
+    def is_one_task_at_a_time_sampler(cls):
+        return True
+
+    @classmethod
+    def is_batch_sampler(cls):
+        return True
+
+    def make_sampler(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            task_filter: Optional[Container[str]] = None):
+        return BatchOneTaskManualWeightSampler(
+            data_source, self.weight_fn, batch_size, self.batches_per_epoch, task_filter,
+            self.uncertainty_log_sigma_squared_field, self.num_uncertainty_warmup_steps)
+
+
+class BatchOneTaskManualWeightSampler(BatchOneTaskSampler):
+
+    def __init__(
+            self,
+            data_source: DataIdMultiDataset,
+            weight_fn: Callable[[Mapping[str, float]], Mapping[str, float]],
+            batch_size: int,
+            batches_per_epoch: int,
+            task_filter: Optional[Container[str]] = None,
+            uncertainty_log_sigma_squared_field: Optional[str] = None,
+            num_uncertainty_warmup_steps: int = 0):
+        super().__init__(
+            data_source, batch_size, batches_per_epoch, task_filter, uncertainty_log_sigma_squared_field,
+            num_uncertainty_warmup_steps)
+
+        proportions = np.array(list(len(self.task_indices[k]) for k in self._task_keys))
+        proportions = proportions / np.sum(proportions)
+        sample_rates = dict(weight_fn(dict(zip(self._task_keys, proportions))))
+        if len(sample_rates) != len(self._task_keys):
+            raise ValueError('A sample rate must be returned for every task')
+        self._sample_rates = list()
+        for key in self._task_keys:
+            if key not in sample_rates:
+                raise ValueError('A sample rate must be returned for every task')
+            self._sample_rates.append(sample_rates[key])
+        self._sample_rates = np.array(self._sample_rates)
+        self._sample_rates /= np.sum(self._sample_rates)
+        self._task_uncertainty = np.ones_like(self._sample_rates)
+        self._effective_rates = self._task_uncertainty * self._sample_rates
+        self._effective_rates = self._effective_rates / np.sum(self._effective_rates)
+
+
 class BatchOneTaskTemperatureProportionalSampler(BatchOneTaskSampler):
 
     def __init__(
@@ -313,7 +375,10 @@ class BatchOneTaskRandomSampler(torch.utils.data.Sampler):
         return int(self.true_div_len())
 
 
+@dataclasses.dataclass(frozen=True)
 class RandomSamplerFactory(SamplerFactory):
+    replacement: bool = False
+    num_samples: Optional[int] = None
 
     @classmethod
     def is_batch_sampler(cls):
@@ -330,7 +395,7 @@ class RandomSamplerFactory(SamplerFactory):
             task_filter: Optional[Container[str]] = None):
         if task_filter is not None:
             raise ValueError('{} does not support task_filter'.format(type(self)))
-        return torch.utils.data.RandomSampler(data_source)
+        return torch.utils.data.RandomSampler(data_source, self.replacement, self.num_samples)
 
 
 class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
@@ -365,6 +430,123 @@ class BatchOneTaskSequentialSampler(torch.utils.data.Sampler):
     def true_div_len(self):
         return (
             sum(sum(len(task_item_list) for task_item_list in self.task_indices[task]) for task in self.task_indices)
+            / self.batch_size)
+
+    def __len__(self):
+        return int(self.true_div_len())
+
+
+@dataclasses.dataclass(frozen=True)
+class BatchOneTaskTaskPermutedSamplerFactory(SamplerFactory):
+    batches_per_task_per_epoch: int = 1
+
+    @classmethod
+    def is_one_task_at_a_time_sampler(cls):
+        return True
+
+    @classmethod
+    def is_batch_sampler(cls):
+        return True
+
+    def make_sampler(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            task_filter: Optional[Container[str]] = None):
+        return BatchOneTaskTaskPermutedSampler(data_source, batch_size, self.batches_per_task_per_epoch, task_filter)
+
+
+class BatchOneTaskTaskPermutedSampler(torch.utils.data.Sampler):
+
+    def __init__(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            batches_per_task_per_epoch: int,
+            task_filter: Optional[Container[str]] = None):
+        super().__init__(data_source)
+        self._data_source = data_source
+        self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
+                batch_size <= 0:
+            raise ValueError("batch_size should be a positive integer value, "
+                             "but got batch_size={}".format(batch_size))
+        self.batch_size = batch_size
+        self.batches_per_task_per_epoch = batches_per_task_per_epoch
+        self._task_keys = [task for task in self.task_indices]
+
+    def __iter__(self):
+        for _ in range(self.batches_per_task_per_epoch):
+            for task in np.random.permutation(list(self.task_indices)):
+                task_sample = np.random.randint(0, len(self.task_indices[task]), self.batch_size)
+                batch = list()
+                for i in task_sample:
+                    if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                        if len(batch) == 0:
+                            batch.append(self.task_indices[task][i])
+                        break
+                    batch.append(self.task_indices[task][i])
+                yield np.concatenate(batch)
+
+    def true_div_len(self):
+        return self.batches_per_task_per_epoch * len(self.task_indices)
+
+    def __len__(self):
+        return int(self.true_div_len())
+
+
+class BatchOneTaskEvalSampler(torch.utils.data.Sampler):
+
+    def __init__(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            max_samples_per_task: int,
+            task_filter: Optional[Container[str]] = None):
+        super().__init__(data_source)
+        self._data_source = data_source
+        self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
+                batch_size <= 0:
+            raise ValueError("batch_size should be a positive integer value, "
+                             "but got batch_size={}".format(batch_size))
+        self.batch_size = batch_size
+        self.max_samples_per_task = max_samples_per_task
+        self._task_keys = [task for task in self.task_indices]
+
+    def __iter__(self):
+        for task in self.task_indices:
+            if len(self.task_indices[task]) < self.max_samples_per_task:
+                task_sample = np.arange(len(self.task_indices[task]))
+            else:
+                task_sample = np.random.permutation(len(self.task_indices[task]))
+            batch = list()
+            count = 0
+            for i in task_sample:
+                if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                    yield np.concatenate(batch)
+                    count += len(batch)
+                    batch = list()
+                    if count >= self.max_samples_per_task:
+                        break
+                # if a single multipart item > batch_count, we just make a batch that is larger than batch size
+                # so no check here
+                batch.append(self.task_indices[task][i])
+            if len(batch) > 0:
+                yield np.concatenate(batch)
+
+    def true_div_len(self):
+        return (
+            sum(min(sum(len(task_item_list) for task_item_list in self.task_indices[task]), self.max_samples_per_task)
+                for task in self.task_indices)
             / self.batch_size)
 
     def __len__(self):

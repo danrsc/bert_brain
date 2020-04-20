@@ -237,11 +237,14 @@ class Settings:
     field_spec_replacers: Optional[Mapping[str, Mapping[str, Any]]] = None
 
     # An instances of a SamplerFactory which will be used to create the training sampler.
-    # If use_sequential_sampling_on_evaluate is False, then sampler_factory is also used to create the evaluation
-    # sampler
+    # If sampler_on_evaluate_factory is None, then during evaluate a BatchOneTaskEvalSampler with
+    # maximum 100 samples per task (500 when return_detailed=True) is used whenever sampler_factory generates a one
+    # task sampler and a RandomSampler with 10000 samples is used (50000 when return_detailed=True) whenever
+    # sampler_factory generates a mixed task sampler. If sampler_on_evaluate_factory is set to 'train', then
+    # sampler_factory is used to generate the evaluation sampler. If sampler_on_evaluate_factory is set to a
+    # SamplerFactory then that factory will be used to generate the evaluation sampler.
     sampler_factory: SamplerFactory = RandomSamplerFactory()
-
-    use_sequential_sampling_on_evaluate: bool = True
+    sampler_on_evaluate_factory: Optional[Union[SamplerFactory, str]] = None
 
     # mapping from [response_key, kind, or corpus_key] to critic settings; lookups fall back in that order
     critics: MutableMapping[str, NamedTargetMaskedLossBase] = field(default_factory=_default_critics)
