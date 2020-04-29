@@ -8,7 +8,6 @@ from torch import nn
 import torch.nn.functional
 
 from .graph_part import GraphPart
-from .utility_modules import HiddenReconstructionPenalty
 
 
 __all__ = ['LinearContextualParameterGeneration', 'ContextualBottleneckSum', 'ContextAttention',
@@ -22,8 +21,18 @@ class ContextualizedLinear(nn.Module):
         super().__init__()
         self.in_features = linear.in_features
         self.out_features = linear.out_features
-        self.weight = linear.weight.detach()
-        self.bias = linear.bias.detach() if linear.bias is not None else None
+        self.weight = linear.weight.detach().clone()
+        self.bias = linear.bias.detach().clone() if linear.bias is not None else None
+
+    def init_contextualized_parameter_data(self, embedding_size, name):
+        fan_in, _ = _calculate_fan_in_and_fan_out(self.weight.size())
+        bound = 1 / np.sqrt(fan_in)
+        tensor = getattr(self, name)
+        if tensor is None:
+            return None
+        result = tensor.new_empty((embedding_size,) + tensor.size())
+        nn.init.uniform_(result, -bound, bound)
+        return result
 
     def forward(self, x):
         return nn.functional.linear(x, self.weight, self.bias)
@@ -32,13 +41,42 @@ class ContextualizedLinear(nn.Module):
 class ContextualizedLayerNorm(nn.Module):
     def __init__(self, layer_norm):
         super().__init__()
-        self.weight = layer_norm.weight.detach()
-        self.bias = layer_norm.bias.detach()
+        self.weight = layer_norm.weight.detach().clone() if layer_norm.weight is not None else None
+        self.bias = layer_norm.bias.detach().clone() if layer_norm.bias is not None else None
         self.eps = layer_norm.eps
         self.normalized_shape = layer_norm.normalized_shape
 
+    def init_contextualized_parameter_data(self, embedding_size, name):
+        tensor = getattr(self, name)
+        if tensor is None:
+            return None
+        result = tensor.new_empty((embedding_size,) + tensor.size())
+        if name == 'weight':
+            nn.init.ones_(result)
+        elif name == 'bias':
+            nn.init.zeros_(result)
+        else:
+            raise ValueError('Unexpected name: {}'.format(name))
+        return result
+
     def forward(self, x):
         return nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+
+
+def _calculate_fan_in_and_fan_out(shape):
+    dimensions = len(shape)
+    if dimensions < 2:
+        raise ValueError("Fan in and fan out can not be computed for tensor with fewer than 2 dimensions")
+
+    num_input_fmaps = shape[1]
+    num_output_fmaps = shape[0]
+    receptive_field_size = 1
+    if len(shape) > 2:
+        receptive_field_size = np.prod(shape[2:])
+    fan_in = num_input_fmaps * receptive_field_size
+    fan_out = num_output_fmaps * receptive_field_size
+
+    return fan_in, fan_out
 
 
 class LinearContextualParameterGeneration(GraphPart):
@@ -49,16 +87,18 @@ class LinearContextualParameterGeneration(GraphPart):
             num_contexts,
             embedding_size,
             inner_graph_parts: OrderedDict,
-            use_softmax_embedding=False):
+            use_softmax_embedding=False,
+            use_weight_norm=False):
         super().__init__()
         self.context_id_source_name = context_id_source_name
         self.num_contexts = num_contexts
         self.embedding_size = embedding_size
         self.inner_graph_parts = OrderedDict(inner_graph_parts)
         self._generated_parameters = None
-        self._splits = None
-        self.generator = None
+        self._generated_weights = None
+        self._scales = None
         self.embedding = None
+        self.use_weight_norm = use_weight_norm
         self.softmax = nn.Softmax(dim=-1) if use_softmax_embedding else None
 
     def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
@@ -95,11 +135,11 @@ class LinearContextualParameterGeneration(GraphPart):
 
         def gather_parameters(result, module_, prefix_=''):
             module_result = OrderedDict()
-            for name_, tensor in module_.named_parameters(prefix_[:-1], False):
+            for name_, data_tensor in module_.named_parameters(prefix_[:-1], False):
                 if name_ in result:
                     raise ValueError('Duplicate name in parameters: {}'.format(name_))
-                if tensor is not None:
-                    module_result[name_] = (module_, name_[len(prefix_):], tensor.size())
+                if data_tensor is not None:
+                    module_result[name_] = (module_, name_[len(prefix_):])
 
             # this is very ugly, but for reasonable reasons, PyTorch does not allow the modification of
             # parameters in a module into variables, so we create specialized modules. We could support
@@ -130,9 +170,24 @@ class LinearContextualParameterGeneration(GraphPart):
         for key in self.inner_graph_parts:
             gather_parameters(self._generated_parameters, self.inner_graph_parts[key])
 
-        self._splits = [int(np.prod(self._generated_parameters[k][2])) for k in self._generated_parameters]
+        # make the parameter names legal
+        self._generated_parameters = OrderedDict(
+            (k.replace('.', '-'), self._generated_parameters[k]) for k in self._generated_parameters)
 
-        self.generator = torch.nn.Linear(self.embedding_size, sum(self._splits))
+        self._generated_weights = nn.ParameterDict()
+        for key in self._generated_parameters:
+            module, name = self._generated_parameters[key]
+            self._generated_weights[key] = nn.Parameter(
+                module.init_contextualized_parameter_data(self.embedding_size, name), requires_grad=True)
+
+        if self.use_weight_norm:
+            self._scales = nn.ParameterDict()
+            for key in self._generated_weights:
+                with torch.no_grad():
+                    norm = torch.norm(self._generated_weights[key].data, p=2, dim=-1, keepdim=True)
+                    self._generated_weights[key].data /= norm
+                    self._scales[key] = nn.Parameter(torch.mean(norm, dim=0), requires_grad=True)
+
         self.embedding = torch.nn.Embedding(
             self.num_contexts, self.embedding_size, max_norm=None if self.softmax is not None else 1)
 
@@ -146,12 +201,15 @@ class LinearContextualParameterGeneration(GraphPart):
         context_embedding = self.embedding(context_id[0])
         if self.softmax is not None:
             context_embedding = self.softmax(context_embedding / np.sqrt(context_embedding.size()[-1]))
-        parameters = self.generator(context_embedding)
-        parameters = torch.split(parameters, self._splits, dim=-1)
-        assert(len(parameters) == len(self._generated_parameters))
-        for name, parameter in zip(self._generated_parameters, parameters):
-            module, attr_name, shape = self._generated_parameters[name]
-            setattr(module, attr_name, parameter.view(shape))
+        for key in self._generated_parameters:
+            module, attr_name = self._generated_parameters[key]
+            p = self._generated_weights[key]
+            if self.use_weight_norm:
+                p = p / torch.norm(p, p=2, dim=-1, keepdim=True)
+            p = torch.sum(context_embedding.view((len(context_embedding),) + (1,) * (len(p.size()) - 1)) * p, dim=0)
+            if self.use_weight_norm:
+                p = p * self._scales[key]
+            setattr(module, attr_name, p)
 
         outputs = OrderedDict()
         for name in self.inner_graph_parts:

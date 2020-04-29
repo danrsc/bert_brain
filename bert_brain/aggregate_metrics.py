@@ -215,7 +215,7 @@ def load_switched_corpus(variation_name, replacement_corpus, index_run):
         index_run,
         replacement_corpus,
         settings.preprocessors,
-        settings.get_split_function(replacement_corpus.corpus_key, index_run),
+        settings.get_split_function(replacement_corpus, index_run),
         settings.preprocess_fork_fn,
         False,
         paths,
@@ -239,7 +239,14 @@ def read_variation_results(
         paths, variation_name, index_run=None, compute_scalar=True, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
 
     _, settings = singleton_variation(variation_name)
-    runs = range(settings.num_runs) if index_run is None else [index_run]
+    if index_run is None:
+        runs = range(settings.num_runs)
+    elif callable(index_run):
+        runs = index_run(settings.num_runs)
+    elif np.ndim(index_run) == 0:
+        runs = [index_run]
+    else:
+        runs = index_run
     task_arguments = [(paths.result_path, paths.model_path, variation_name, i,
                        compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in runs]
 

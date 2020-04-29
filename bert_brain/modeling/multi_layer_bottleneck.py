@@ -97,7 +97,6 @@ class MultiLayerBottleneck(GraphPart):
             num_hidden_bottlenecks: Optional[Union[int, Sequence[int]]] = None,
             hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
             should_norm_hidden: bool = True,
-            force_cpu: bool = False,
             should_norm: bool = False,
             should_transpose_output: bool = True):
         super().__init__()
@@ -108,7 +107,6 @@ class MultiLayerBottleneck(GraphPart):
         self.num_hidden_bottlenecks = num_hidden_bottlenecks
         self.hidden_activation = hidden_activation
         self.should_norm_hidden = should_norm_hidden
-        self.force_cpu = force_cpu
         self.bottleneck_combine = None
         self.linear = None
         self.single_layer_norm = None
@@ -188,9 +186,6 @@ class MultiLayerBottleneck(GraphPart):
                     x = x.view(x.size()[:-1] + (self.num_bottleneck_channels, self._num_first_layer_bottlenecks))
             if self.single_layer_norm is not None:
                 x = self.single_layer_norm(x)
-
-        if self.force_cpu:
-            x = x.cpu()
 
         result = OrderedDict()
         for key in batch:

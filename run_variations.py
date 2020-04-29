@@ -47,6 +47,14 @@ def _dummy_update_total(_):
     return
 
 
+def _worker_update_progress_wrap(count=1):
+    worker_update_progress(count, ignore_if_no_progress_context=True)
+
+
+def _worker_update_progress_total_wrap(increment):
+    worker_update_progress_total(increment, ignore_if_no_progress_context=True)
+
+
 @dataclass(frozen=True)
 class ProgressUpdater:
     update_batch: Callable[[int], None] = _dummy_update
@@ -71,16 +79,12 @@ def _worker_run_variation(name, index_variation, index_run, force_cache_miss_set
 
     progress_updater_kwargs = dict()
     if progress_level == 'runs':
-        progress_updater_kwargs['update_run'] = lambda up: worker_update_progress(
-            up, ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_run'] = _worker_update_progress_wrap
     elif progress_level == 'epochs':
-        progress_updater_kwargs['update_epoch'] = lambda up: worker_update_progress(
-            up, ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_epoch'] = _worker_update_progress_wrap
     elif progress_level == 'batches':
-        progress_updater_kwargs['update_batch'] = lambda up: worker_update_progress(
-            up, ignore_if_no_progress_context=True)
-        progress_updater_kwargs['update_batch_total'] = lambda increment: worker_update_progress_total(
-            increment, ignore_if_no_progress_context=True)
+        progress_updater_kwargs['update_batch'] = _worker_update_progress_wrap
+        progress_updater_kwargs['update_batch_total'] = _worker_update_progress_total_wrap
     else:
         raise ValueError('Unknown progress_level: {}'.format(progress_level))
     progress_updater = ProgressUpdater(**progress_updater_kwargs)
@@ -136,7 +140,7 @@ def _train_single_run(
             index_run,
             corpus,
             settings.preprocessors,
-            settings.get_split_function(corpus.corpus_key, index_run),
+            settings.get_split_function(corpus, index_run),
             settings.preprocess_fork_fn,
             force_cache_miss_set is not None and (
                     corpus.corpus_key in force_cache_miss_set or '__all__' in force_cache_miss_set),
@@ -176,7 +180,8 @@ def run_variation(
             settings: Settings,
             force_cache_miss_set: Optional[set],
             device: torch.device,
-            progress_updater=None):
+            progress_updater=None,
+            index_run=None):
 
     if settings.optimization_settings.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
@@ -189,7 +194,11 @@ def run_variation(
         progress_bar = tqdm(total=settings.num_runs, desc='Runs')
         progress_updater = ProgressUpdater(update_run=progress_bar.update)
 
-    for index_run in range(settings.num_runs):
+    if index_run is not None:
+        runs = [index_run]
+    else:
+        runs = range(settings.num_runs)
+    for index_run in runs:
         _train_single_run(
             settings, paths, index_run, device, corpus_dataset_factory, force_cache_miss_set, progress_updater)
 
@@ -228,6 +237,9 @@ def main():
     parser.add_argument('--min_memory_gb', action='store', required=False, default=4, type=int,
                         help='How many GB must be free on a GPU for a worker to run on that GPU. '
                              'Ignored if num_workers < 2')
+
+    parser.add_argument('--index_run', action='store', required=False, default=-1, type=int,
+                        help='Specify to train a particular run. Mostly useful for debugging')
 
     parser.add_argument(
         '--name', action='store', required=False, default='erp', help='Which set to run')
@@ -336,7 +348,8 @@ def main():
                 settings_.optimization_settings.fp16))
 
             with cuda_auto_empty_cache_context(device):
-                run_variation(variation, settings_, force_cache_miss_set, device, progress_updater)
+                index_run = None if args.index_run < 0 else args.index_run
+                run_variation(variation, settings_, force_cache_miss_set, device, progress_updater, index_run)
 
         progress_bar.close()
 

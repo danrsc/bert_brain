@@ -275,18 +275,16 @@ class Settings:
     num_meta_learn_no_gradient_samples: int = 10
     num_meta_learn_gradient_samples: int = 10
 
-    # If True, then the meta-learning strategy is changed to try to estimate a Pareto optimum as in
-    # Multi-Task Learning as Multi-Objective Optimization
-    # Sener, Ozan and Koltun, Vladlen
-    # https://papers.nips.cc/paper/7334-multi-task-learning-as-multi-objective-optimization.pdf
+    # If True, then the meta-learning strategy is changed to use projected conflicting gradients as in
+    # Gradient Surgery for Multi-Task Learning
+    # Yu, Tianhe et al.
+    # https://arxiv.org/pdf/2001.06782.pdf
     # In this case, gradients are computed for num_meta_learn_gradient_samples without any steps being taken.
-    # The gradients are temporarily stored (shifted to CPU). Then the Frank-Wolfe optimization from the paper
-    # is applied to weight the gradients before a step is taken in a direction which decreases all of the losses
-    # which have been sampled during the inner steps.
-    # When use_pareto is True, num_meta_learn_no_gradient_samples must be 0, and meta_learn_no_gradient_loss_tasks must
+    # The gradients are temporarily stored, then gradients are adjusted based on cosine similarity of the gradients
+    # across tasks by projecting one gradient onto another when the similarity is less than 0
+    # When use_pc_grad is True, num_meta_learn_no_gradient_samples must be 0, and meta_learn_no_gradient_loss_tasks must
     # be empty
-    use_pareto: bool = False
-    use_l2_norm_pareto: bool = True
+    use_pc_grad: bool = False
 
     @property
     def all_loss_tasks(self):
@@ -305,7 +303,7 @@ class Settings:
 
     # If true, tasks are re-weighted by the inverse of the number of available examples so that the expected
     # effect of different data sets is balanced
-    weight_losses_by_inverse_example_counts: bool = True
+    weight_losses_fn: Optional[Callable[[Mapping[Tuple[str, str], int]], Mapping[str, float]]] = None
 
     # fields which are not in the response_data part of the RawData structure, but which should nevertheless be used
     # as output targets of the model. If a field is already in loss_tasks then it does not need to also be specified
@@ -323,10 +321,11 @@ class Settings:
     # Whether not to use CUDA when available
     no_cuda: bool = False
 
-    def get_split_function(self, key, index_run):
-        if self.split_functions is None or key not in self.split_functions:
+    def get_split_function(self, corpus, index_run):
+        corpus = replace(corpus, index_run=index_run)
+        if self.split_functions is None or corpus.corpus_key not in self.split_functions:
             return None
-        return self.split_functions[key](index_run)
+        return self.split_functions[corpus.corpus_key](corpus.run_info)
 
     def get_critic(self, field_name, data_set):
         if field_name in self.critics:

@@ -33,7 +33,6 @@ def group_concat_linear(
         pooled_source_name=None,
         hidden_sizes=None,
         hidden_activation=gelu,
-        force_cpu=False,
         output_key_to_shape=None,
         targets=None):
     result = OrderedDict()
@@ -48,7 +47,6 @@ def group_concat_linear(
         'group_concat_fixed_group_size_output',
         hidden_sizes=hidden_sizes,
         hidden_activation=hidden_activation,
-        force_cpu=force_cpu,
         output_key_to_shape=output_key_to_shape,
         targets=targets)
     return result
@@ -122,26 +120,28 @@ class KeyedLinear(KeyedBase):
             hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
             hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
             should_norm_hidden: bool = True,
-            force_cpu: bool = False,
+            bias_hidden: bool = True,
             output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
             targets: Optional[Union[str, Iterable[str]]] = None,
             apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False,
             should_norm: bool = False,
+            bias: bool = True,
             activation_fn: Optional[Callable[[Tensor], Tensor]] = None,
             penultimate_reconstruction_penalty_coefficient: float = 0,
             penultimate_reconstruction_l1_weight_coefficient: float = 0,
             penultimate_reconstruction_output_name: str = 'rcn'):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
-        self.force_cpu = force_cpu
         self.hidden_sizes = hidden_sizes
         self.hidden_activation = hidden_activation
         self.should_norm_hidden = should_norm_hidden
+        self.bias_hidden = bias_hidden
         self.hidden = None
         self.linear = None
         self.norm_layers = None
         self.apply_at_most_one_data_id = apply_at_most_one_data_id
         self.should_norm = should_norm
+        self.bias = bias
         self.activation_fn = activation_fn
         self.penultimate_reconstruction_penalty = HiddenReconstructionPenalty(
             penultimate_reconstruction_penalty_coefficient,
@@ -160,7 +160,10 @@ class KeyedLinear(KeyedBase):
                 hidden_modules.append(
                     LinearWithLayerNorm(
                         current_in,
-                        hidden_sizes[index_hidden], self.hidden_activation, should_norm=self.should_norm_hidden))
+                        hidden_sizes[index_hidden],
+                        self.bias_hidden,
+                        self.hidden_activation,
+                        should_norm=self.should_norm_hidden))
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
         self.linear = nn.Linear(in_channels, sum(self.splits))
@@ -181,8 +184,6 @@ class KeyedLinear(KeyedBase):
         x = batch[self.source_name]
         if self.hidden is not None:
             x = self.hidden(x)
-        if self.force_cpu:
-            x = x.cpu()
         predictions = self.linear(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
         if self.activation_fn is not None:
@@ -227,7 +228,6 @@ class KeyedQuasiAttention(KeyedBase):
             hidden_sizes: Optional[Union[int, Sequence[int]]] = None,
             hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu,
             should_norm_hidden: bool = True,
-            force_cpu: bool = False,
             output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
             targets: Optional[Union[str, Iterable[str]]] = None,
             apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False,
@@ -238,7 +238,6 @@ class KeyedQuasiAttention(KeyedBase):
             penultimate_reconstruction_output_name: str = 'rcn'):
         super().__init__(output_key_to_shape, targets)
         self.source_name = source_name
-        self.force_cpu = force_cpu
         self.hidden_sizes = hidden_sizes
         self.hidden_activation = hidden_activation
         self.should_norm_hidden = should_norm_hidden
@@ -289,8 +288,6 @@ class KeyedQuasiAttention(KeyedBase):
         x = batch[self.source_name]
         if self.hidden is not None:
             x = self.hidden(x)
-        if self.force_cpu:
-            x = x.cpu()
         predictions = self.quasi_attention(x)
         predictions = torch.split(predictions, self.splits, dim=-1)
         if self.activation_fn is not None:

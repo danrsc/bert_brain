@@ -113,9 +113,9 @@ class Conv1DCausal(torch.nn.Module):
 
 class LinearWithLayerNorm(torch.nn.Module):
 
-    def __init__(self, in_channels, out_channels, activation_function=gelu, should_norm=True):
+    def __init__(self, in_channels, out_channels, bias=True, activation_function=gelu, should_norm=True):
         super().__init__()
-        self.linear = nn.Linear(in_channels, out_channels)
+        self.linear = nn.Linear(in_channels, out_channels, bias)
         self.activation_function = activation_function
         self.layer_norm = torch.nn.LayerNorm(out_channels) if should_norm else None
 

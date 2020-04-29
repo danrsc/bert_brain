@@ -81,6 +81,12 @@ def _set_progress_queue_and_initialize(progress_queue, initializer, initargs):
         initializer(*initargs)
 
 
+def _run_fn_and_empty_cache(fn, args, kwargs):
+    fn(*args, **kwargs)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def worker_device():
     return _worker_device
 
@@ -539,7 +545,7 @@ class CudaPoolExecutor(object):
         return _chain_from_iterable_of_lists(results)
 
     def submit(self, fn, *args, **kwargs):
-        return self._process_pool_executor.submit(fn, *args, **kwargs)
+        return self._process_pool_executor.submit(_run_fn_and_empty_cache, fn, args, kwargs)
 
     def shutdown(self, wait=True):
         self._no_available_queue.put(2)
@@ -562,10 +568,14 @@ def progress_pool_executor(mp_context=None, max_workers=None, initializer=None, 
 @contextmanager
 def cuda_pool_executor(min_memory, max_workers=None, mp_context=None, initializer=None, initargs=()):
     memory_info = cuda_memory_info()
+    progress_queue = None
     if max_workers is None:
         max_workers = len(memory_info)
     if mp_context is None:
         mp_context = get_context('spawn')
+    elif isinstance(mp_context, ProgressContext):
+        progress_queue = mp_context.progress_queue
+        mp_context = mp_context.mp_context
 
     memory_info = [
         (device_id, device_info.free) for device_id, device_info in enumerate(memory_info)]
@@ -597,7 +607,7 @@ def cuda_pool_executor(min_memory, max_workers=None, mp_context=None, initialize
         max_workers=max_workers,
         mp_context=mp_context,
         initializer=_set_device_id_and_initialize,
-        initargs=(device_queue, no_available_queue, initializer, initargs))
+        initargs=(device_queue, no_available_queue, progress_queue, initializer, initargs))
 
     no_available_queue.put(2)
 

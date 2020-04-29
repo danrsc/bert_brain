@@ -8,7 +8,6 @@ from . import keyed_modules
 from . import learning_rate_schedule_factories
 from . import learning_rate_schedules
 from . import multi_layer_bottleneck
-from . import pareto_solver
 from . import specialized_loss
 from . import task_uncertainty_module
 from . import utility_modules
@@ -23,7 +22,6 @@ from .keyed_modules import *
 from .learning_rate_schedule_factories import *
 from .learning_rate_schedules import *
 from .multi_layer_bottleneck import *
-from .pareto_solver import *
 from .specialized_loss import *
 from .task_uncertainty_module import *
 from .utility_modules import *
@@ -39,7 +37,6 @@ __all__ = [
     'learning_rate_schedule_factories',
     'learning_rate_schedules',
     'multi_layer_bottleneck',
-    'pareto_solver',
     'specialized_loss',
     'task_uncertainty_module',
     'utility_modules']
@@ -51,7 +48,6 @@ __all__.extend(grouping_modules.__all__)
 __all__.extend(keyed_modules.__all__)
 __all__.extend(learning_rate_schedule_factories.__all__)
 __all__.extend(multi_layer_bottleneck.__all__)
-__all__.extend(pareto_solver.__all__)
 __all__.extend(specialized_loss.__all__)
 __all__.extend(task_uncertainty_module.__all__)
 __all__.extend(utility_modules.__all__)

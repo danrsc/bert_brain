@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import dataclasses
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Mapping, Tuple
 
 import numpy as np
 import torch
@@ -48,7 +48,9 @@ __all__ = [
     'NamedTargetSingleSoftLabelCrossEntropy',
     'NamedTargetSingleSoftLabelNLL',
     'KLeastSEHalvingEpochs',
-    'DetailedResult']
+    'DetailedResult',
+    'weight_losses_by_inverse_example_counts',
+    'ManuallyRescaleLosses']
 
 
 class NoValidInputs(Exception):
@@ -1323,3 +1325,32 @@ class NamedTargetSingleBinaryCrossEntropy(NamedTargetMaskedLossBase):
     @classmethod
     def is_classification_loss(cls):
         return True
+
+
+def weight_losses_by_inverse_example_counts(loss_count_dict: Mapping[Tuple[str, str], int]) -> Mapping[str, float]:
+    fields = [field for field, kind in loss_count_dict]
+    counts = np.array([loss_count_dict[k] for k in loss_count_dict])
+    loss_weights = 1. / (np.sum(1. / counts) * counts)
+    return dict(zip(fields, [w.item() for w in loss_weights]))
+
+
+@dataclass(frozen=True)
+class ManuallyRescaleLosses:
+    field_or_kind_to_weight: Mapping[str, float]
+    sum_to_one: bool = False
+
+    def __call__(self, loss_count_dict: Mapping[Tuple[str, str], int]) -> Mapping[str, float]:
+        weights = list()
+        fields = list()
+        for field, kind in loss_count_dict:
+            fields.append(field)
+            if field in self.field_or_kind_to_weight:
+                weights.append(self.field_or_kind_to_weight[field])
+            elif kind in self.field_or_kind_to_weight:
+                weights.append(self.field_or_kind_to_weight[kind])
+            else:
+                weights.append(1)
+        weights = np.array(weights)
+        if self.sum_to_one:
+            weights = weights / np.sum(weights)
+        return dict(zip(fields, [w.item() for w in weights]))

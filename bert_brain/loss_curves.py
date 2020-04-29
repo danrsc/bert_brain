@@ -39,6 +39,40 @@ def average_unique_epochs_within_loss_curves(curves):
         curve.values = np.array(epoch_values)
 
 
+def average_over_runs(curves, run_key=None):
+    aggregate = dict()
+    for curve in curves:
+        run = -1 if run_key is None else run_key(curve.index_run)
+        if run not in aggregate:
+            aggregate[run] = dict()
+        if (curve.key, curve.train_eval_kind) not in aggregate[run]:
+            aggregate[run][(curve.key, curve.train_eval_kind)] = list()
+        aggregate[run][(curve.key, curve.train_eval_kind)].append(curve)
+    result = list()
+    for run in aggregate:
+        for curve_key, train_eval_kind in aggregate[run]:
+            steps = dict()
+            for curve in aggregate[run][(curve_key, train_eval_kind)]:
+                for s, e, v in zip(curve.steps, curve.epochs, curve.values):
+                    if (s, e) not in steps:
+                        steps[s, e] = list()
+                    steps[s, e].append(v)
+            curve_steps = list()
+            curve_epochs = list()
+            curve_values = list()
+            for s, e in sorted(steps):
+                curve_steps.append(s)
+                curve_epochs.append(e)
+                curve_values.append(np.mean(steps[s, e]))
+            result.append(dataclasses.replace(
+                aggregate[run][(curve_key, train_eval_kind)][0],
+                index_run=run,
+                epochs=np.array(curve_epochs),
+                steps=np.array(curve_steps),
+                values=np.array(curve_values)))
+    return result
+
+
 @dataclasses.dataclass
 class LossCurve:
     training_variation: Tuple[str, ...]

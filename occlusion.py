@@ -67,7 +67,7 @@ def _run_occlusion_for_variation(
             index_run,
             corpus,
             settings.preprocessors,
-            settings.get_split_function(corpus.corpus_key, index_run),
+            settings.get_split_function(corpus, index_run),
             settings.preprocess_fork_fn,
             False,
             paths,

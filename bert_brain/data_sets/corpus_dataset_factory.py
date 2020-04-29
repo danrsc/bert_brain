@@ -17,7 +17,6 @@ __all__ = ['CorpusDatasetFactory']
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel('INFO')
 
 
 @dataclass(frozen=True)
