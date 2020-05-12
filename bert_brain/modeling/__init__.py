@@ -2,6 +2,8 @@ from . import attention_key_values
 from . import bert_multi_prediction_head
 from . import contextual_parameter_generation
 from . import critic_types
+from . import gelu_new_module
+from . import gradient_consumers
 from . import graph_part
 from . import grouping_modules
 from . import keyed_modules
@@ -16,6 +18,8 @@ from .attention_key_values import *
 from .bert_multi_prediction_head import *
 from .contextual_parameter_generation import *
 from .critic_types import *
+from .gelu_new_module import *
+from .gradient_consumers import *
 from .graph_part import *
 from .grouping_modules import *
 from .keyed_modules import *
@@ -31,6 +35,8 @@ __all__ = [
     'bert_multi_prediction_head',
     'contextual_parameter_generation',
     'critic_types',
+    'gelu_new_module',
+    'gradient_consumers',
     'graph_part',
     'grouping_modules',
     'keyed_modules',
@@ -43,6 +49,8 @@ __all__ = [
 __all__.extend(attention_key_values.__all__)
 __all__.extend(bert_multi_prediction_head.__all__)
 __all__.extend(contextual_parameter_generation.__all__)
+__all__.extend(gelu_new_module.__all__)
+__all__.extend(gradient_consumers.__all__)
 __all__.extend(graph_part.__all__)
 __all__.extend(grouping_modules.__all__)
 __all__.extend(keyed_modules.__all__)

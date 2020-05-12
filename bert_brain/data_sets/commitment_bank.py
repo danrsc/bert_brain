@@ -16,14 +16,8 @@ class CommitmentBank(CorpusBase):
     path: str = path_attribute_field('commitment_bank_path')
 
     @staticmethod
-    def _read_examples(path, example_manager: CorpusExampleUnifier, labels):
+    def _read_examples(path, example_manager: CorpusExampleUnifier, labels, classes):
         examples = list()
-        classes = {
-            'unknown': 0,
-            'entailment': 1,
-            'contradiction': 2,
-            'neutral': 3
-        }
         with open(path, 'rt') as f:
             for line in f:
                 fields = json.loads(line.strip('\n'))
@@ -57,20 +51,34 @@ class CommitmentBank(CorpusBase):
     def num_classes(cls) -> int:
         return 4
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
+        classes = {
+            'unknown': 0,
+            'entailment': 1,
+            'contradiction': 2,
+            'neutral': 3
+        }
         labels = list()
         train = CommitmentBank._read_examples(
-            os.path.join(self.path, 'train.jsonl'), example_manager, labels)
+            os.path.join(self.path, 'train.jsonl'), example_manager, labels, classes)
+        meta_train = None
+        if use_meta_train > 0:
+            from sklearn.model_selection import train_test_split
+            idx_train, idx_meta_train = train_test_split(np.arange(len(train)), test_size=0.2)
+            meta_train = [train[i] for i in idx_meta_train]
+            train = [train[i] for i in idx_train]
         validation = CommitmentBank._read_examples(
-            os.path.join(self.path, 'val.jsonl'), example_manager, labels)
+            os.path.join(self.path, 'val.jsonl'), example_manager, labels, classes)
         test = CommitmentBank._read_examples(
-            os.path.join(self.path, 'test.jsonl'), example_manager, labels)
+            os.path.join(self.path, 'test.jsonl'), example_manager, labels, classes)
         labels = np.array(labels, dtype=np.float64)
         labels.setflags(write=False)
         return RawData(
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
+            meta_train_input_examples=meta_train,
             response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
-            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)},
+            text_labels={type(self).response_key(): list(sorted(classes, key=lambda k: classes[k]))})

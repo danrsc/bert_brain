@@ -6,7 +6,7 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional
 
-from transformers.modeling_bert import gelu_new as gelu
+from .gelu_new_module import gelu_new as gelu
 
 from .utility_modules import LinearWithLayerNorm, HiddenReconstructionPenalty, QuasiAttention
 from ..common import NamedSpanEncoder
@@ -160,13 +160,14 @@ class KeyedLinear(KeyedBase):
                 hidden_modules.append(
                     LinearWithLayerNorm(
                         current_in,
-                        hidden_sizes[index_hidden],
+                        hidden_sizes[index_hidden],s
                         self.bias_hidden,
                         self.hidden_activation,
                         should_norm=self.should_norm_hidden))
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
-        self.linear = nn.Linear(in_channels, sum(self.splits))
+        print(self.output_key_to_shape)
+        self.linear = nn.Linear(in_channels, sum(self.splits), self.bias)
         result = OrderedDict()
         for key in self.output_key_to_shape:
             result[key] = int(np.prod(self.output_key_to_shape[key]))
@@ -218,6 +219,16 @@ class KeyedLinear(KeyedBase):
 
     def compute_penalties(self, batch, predictions, loss_dict):
         return self.penultimate_reconstruction_penalty.compute_penalties(batch, predictions, loss_dict)
+
+    def get_output_weights(self, as_numpy=True):
+        split_weights = torch.split(self.linear.weight.detach().clone(), self.splits, dim=0)
+        result = OrderedDict()
+        for key, weight in zip(self.output_key_to_shape, split_weights):
+            weight = torch.reshape(weight, self.output_key_to_shape[key] + weight.size()[1:])
+            if as_numpy:
+                weight = weight.numpy()
+            result[key] = weight
+        return result
 
 
 class KeyedQuasiAttention(KeyedBase):
@@ -514,6 +525,16 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         for k, p in zip(self.output_key_to_shape, predictions):
             p = p.view(p.size()[:1] + self.output_key_to_shape[k])
             result[k] = p
+        return result
+
+    def get_output_weights(self, as_numpy=True):
+        split_weights = torch.split(self.linear.weight.detach().clone(), self.splits, dim=0)
+        result = OrderedDict()
+        for key, weight in zip(self.output_key_to_shape, split_weights):
+            weight = torch.reshape(weight, self.output_key_to_shape[key] + weight.size()[1:])
+            if as_numpy:
+                weight = weight.numpy()
+            result[key] = weight
         return result
 
 

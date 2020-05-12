@@ -90,6 +90,8 @@ class DataIdDataset(torch.utils.data.Dataset):
             return current.validation if current.validation is not None else []
         elif which == 'test':
             return current.test if current.test is not None else []
+        elif which == 'meta_train':
+            return current.meta_train if current.meta_train is not None else []
         raise ValueError(
             'Unknown value for which: {}. Valid choices are: ({})'.format(which.var, ', '.join(which.tests)))
 
@@ -221,6 +223,12 @@ class DataIdDataset(torch.utils.data.Dataset):
             else:
                 self_has_word_ids[response_data_key] = False
 
+            if prepared_data.text_labels is not None and response_data_key in prepared_data.text_labels:
+                label_file_path = os.path.join(path, '{}.labels.txt'.format(response_data_key))
+                with open(label_file_path, 'wt') as label_file:
+                    label_file.writelines(
+                        ['{}\n'.format(label) for label in prepared_data.text_labels[response_data_key]])
+
         if metadata is not None:
             for metadata_key in metadata:
                 for data_id, item in tqdm(
@@ -232,7 +240,7 @@ class DataIdDataset(torch.utils.data.Dataset):
                     with open(metadata_file_path, 'wb') as metadata_file:
                         pickle.dump(item, metadata_file, protocol=pickle.HIGHEST_PROTOCOL)
 
-        for which in ('train', 'test', 'validation'):
+        for which in ('train', 'test', 'validation', 'meta_train'):
             examples = DataIdDataset._get_examples(which, prepared_data)
             self_unique_ids[which] = dict()
             for index_example, example in tqdm(enumerate(examples), desc=which, total=len(examples)):
@@ -592,3 +600,13 @@ class DataIdDataset(torch.utils.data.Dataset):
         if field in self._response_data_key_to_unique_ids:
             return len(self._response_data_key_to_unique_ids[field])
         return len(self._all_unique_ids)
+
+    def text_labels_for_field(self, field):
+        if field not in self._field_specs:
+            raise KeyError('Unknown field: {}'.format(field))
+        label_file_path = os.path.join(self._path, '{}.labels.txt'.format(field))
+        if os.path.exists(label_file_path):
+            with open(label_file_path, 'rt') as label_file:
+                return list(ln.strip() for ln in label_file.readlines())
+        else:
+            return None

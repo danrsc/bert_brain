@@ -275,6 +275,8 @@ class Settings:
     num_meta_learn_no_gradient_samples: int = 10
     num_meta_learn_gradient_samples: int = 10
 
+    create_meta_train_dataset: bool = False
+
     # If True, then the meta-learning strategy is changed to use projected conflicting gradients as in
     # Gradient Surgery for Multi-Task Learning
     # Yu, Tianhe et al.

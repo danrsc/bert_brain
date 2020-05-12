@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn
 from torch import nn
-from transformers.modeling_bert import gelu_new as gelu
+from .gelu_new_module import gelu_new as gelu
 
 from .graph_part import GraphPart
 
@@ -54,6 +54,7 @@ class PooledFromKTokens(GraphPart):
         self.use_first_k = use_first_k
         self.source_name = source_name
         self.output_name = output_name
+        self.linear = None
         self.transform_fn = transform_fn
 
     def resolve_placeholders(self, placeholder_name_to_fields, field_shapes, num_response_data_fields):
@@ -61,7 +62,8 @@ class PooledFromKTokens(GraphPart):
 
     def instantiate(self, name_to_num_channels):
         result = OrderedDict()
-        result[self.output_name] = name_to_num_channels[self.source_name] * self.num_tokens
+        result[self.output_name] = name_to_num_channels[self.source_name]
+        self.linear = nn.Linear(self.num_tokens, 1)
         for key in name_to_num_channels:
             if isinstance(key, tuple) and key[0] == self.source_name:
                 result[(self.output_name,) + key[1:]] = name_to_num_channels[key]
@@ -79,7 +81,8 @@ class PooledFromKTokens(GraphPart):
                 x = torch.nn.functional.pad(x, [0, pad_size, 0, 0])
             else:
                 x = torch.nn.functional.pad(x, [pad_size, 0, 0, 0])
-        x = torch.reshape(x, (x.size()[0], -1))
+        x = torch.transpose(x, -2, -1)
+        x = torch.squeeze(self.linear(x), -1)
         result[self.output_name] = x if self.transform_fn is None else self.transform_fn(x)
         for key in batch:
             if isinstance(key, tuple) and key[0] == self.source_name:

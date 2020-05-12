@@ -12,8 +12,10 @@ import torch.nn
 from torch.utils.data import RandomSampler, DataLoader as TorchDataLoader
 from torch.optim.lr_scheduler import LambdaLR
 
-from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskEvalSampler
-from .modeling import KeyedLinear, BertMultiPredictionHead
+from .data_sets import collate_fn, DataIdMultiDataset, BatchOneTaskEvalSampler, \
+    BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory, BatchOneTaskTaskPermutedSampler
+from .modeling import KeyedLinear, BertMultiPredictionHead, \
+    GradientContainer, MovingAverageGradientSimilarity, GradientCounter
 from .settings import Settings
 from .result_output import write_predictions, write_loss_curve
 
@@ -75,18 +77,19 @@ def restore_model_parameters_and_set_meta_gradient(
             p.grad.data.copy_((model_state_for_gradient[key].detach() - target_state[key].detach()) / count)
 
 
-def set_projected_conflicting_gradients(model, gradient_container):
+def set_projected_conflicting_gradients(model, gradient_container: GradientContainer):
     # see https://arxiv.org/pdf/2001.06782.pdf
     model.zero_grad()
     for key, p in model.named_parameters():
         if p.requires_grad and key in gradient_container:
             if p.grad is None:
                 p.grad = torch.nn.Parameter(p.data.new().resize_(*p.data.size()), requires_grad=True)
-            if len(gradient_container[key][0]) == 1:
-                gradient = gradient_container[key][0][0]
+            gradients = gradient_container.gradients(key)
+            if len(gradients) == 1:
+                gradient = gradients[0]
             else:
-                gradients = torch.stack(gradient_container[key][0])
-                norms = torch.stack(gradient_container[key][1])
+                gradients = torch.stack(gradients)
+                norms = torch.stack(gradient_container.norms(key))
                 flat_gradients = torch.reshape(gradients, (len(gradients), -1))
                 dot = torch.matmul(flat_gradients, flat_gradients.t())
                 similarity = dot / (torch.unsqueeze(norms, 1) * torch.unsqueeze(norms, 0))
@@ -320,11 +323,13 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             loss_handlers[i] = replace(loss_handler, weight=loss_weights[loss_handler.field])
 
     graph_parts = OrderedDict()
+    common_graph_keys = set()
     if settings.common_graph_parts is not None:
         for k in settings.common_graph_parts:
             settings.common_graph_parts[k].resolve_placeholders(
                 placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
             graph_parts[k] = settings.common_graph_parts[k]
+            common_graph_keys.add(k)
 
     default_sequence_head = None
     default_pooled_head = None
@@ -403,7 +408,8 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             else:
                 pooled_supplemental_key_to_shape[k] = data_set.value_shape(k)
 
-    return graph_parts, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers
+    return (graph_parts, common_graph_keys,
+            token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers)
 
 
 @dataclass
@@ -432,9 +438,8 @@ def _train_step(
         optimizer,
         scheduler,
         sampler_to_update,
-        gradient_container,
-        gradient_counter,
-        log_tag='train'):
+        gradient_consumer,
+        log_tag='trn'):
 
     for k in batch:
         batch[k] = batch[k].to(device)
@@ -472,23 +477,25 @@ def _train_step(
                 else:
                     loss += current
             train_result = np.nan if no_valid_inputs else data_loss.detach().cpu().numpy().item()
-            train_results.add_result(
-                data_key,
-                index_epoch,
-                global_step,
-                train_result)
+            if train_results is not None:
+                train_results.add_result(
+                    data_key,
+                    index_epoch,
+                    global_step,
+                    train_result)
 
     for metric in metric_result:
-        train_results.add_result(metric, index_epoch, global_step, metric_result[metric])
+        if train_results is not None:
+            train_results.add_result(metric, index_epoch, global_step, metric_result[metric])
 
     if loss is not None:
         if len(losses_to_write) < 4:
             # noinspection PyUnresolvedReferences
-            logger.info('{}: {:<#8.6}, '.format(log_tag, loss.item()) + ', '.join(
+            logger.info('{} {}: {:<#8.6}, '.format(log_tag, global_step, loss.item()) + ', '.join(
                 ['{}: {:<#8.6}'.format(k, losses_to_write[k]) for k in losses_to_write]))
         else:
             # noinspection PyUnresolvedReferences
-            logger.info('{}: {}'.format(log_tag, loss.item()))
+            logger.info('{} {}: {}'.format(log_tag, global_step, loss.item()))
         if settings.optimization_settings.fp16 and settings.loss_scale != 1.0:
             # rescale loss for fp16 training
             # see https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html
@@ -514,31 +521,19 @@ def _train_step(
                 scheduler.step()
             copy_optimizer_params_to_model(model.named_parameters(), param_optimizer)
         else:
-            if gradient_container is not None:
+            if gradient_consumer is not None:
+                gradient_dict = OrderedDict()
                 for key, p in model.named_parameters():
                     if p.requires_grad and p.grad is not None:
-                        g = p.grad.data.detach().clone()
-                        norm = torch.sqrt(torch.sum(g ** 2))
-                        if norm > 0:
-                            if key not in gradient_container:
-                                gradient_container[key] = list(), list()
-                            # noinspection PyUnresolvedReferences
-                            gradient_container[key][0].append(g)
-                            gradient_container[key][1].append(norm)
-            if gradient_counter is not None:
-                for key, p in model.named_parameters():
-                    if p.requires_grad and p.grad is not None:
-                        if key not in gradient_counter:
-                            gradient_counter[key] = (p.grad.data.detach().clone(), 1)
-                        elif torch.any(p.grad.data != gradient_counter[key][0]):
-                            gradient_counter[key] = (p.grad.data.detach().clone(), gradient_counter[key][1] + 1)
-            if not settings.use_pc_grad:
+                        gradient_dict[key] = p.grad.data.detach()
+                gradient_consumer.add(gradient_dict, batch, train_data_set)
+            if optimizer is not None and not settings.use_pc_grad:
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
         model.zero_grad()
 
-        if not settings.use_pc_grad:
+        if not settings.use_pc_grad and optimizer is not None:
             for group in optimizer.param_groups:
                 assert(group['lr'] >= 0)
 
@@ -559,6 +554,7 @@ def train(
         train_data_set: DataIdMultiDataset,
         validation_data_set: DataIdMultiDataset,
         test_data_set: DataIdMultiDataset,
+        meta_train_data_set: DataIdMultiDataset,  # not currently used
         device: torch.device,
         progress_update,
         load_from_path: str = None):
@@ -575,6 +571,10 @@ def train(
 
     if settings.use_pc_grad and not is_meta_learn_active:
         raise ValueError('PCGrad can only be used when meta-learning is active')
+
+    if isinstance(settings.sampler_factory, BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory) \
+            and is_meta_learn_active:
+        raise ValueError('meta learning cannot be used at the same time as MultiDDS sampler')
 
     if is_meta_learn_active:
         if settings.loss_tasks is not None and len(settings.loss_tasks) > 0:
@@ -628,6 +628,18 @@ def train(
         else:
             train_sampler = sampler_
 
+    task_sample_weights_train_frequency_in_batches = None
+    meta_train_loader = None
+    if isinstance(settings.sampler_factory, BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory):
+        task_sample_weights_train_frequency_in_batches = settings.sampler_factory.update_frequency_in_batches
+        meta_train_sampler = BatchOneTaskTaskPermutedSampler(
+            meta_train_data_set,
+            settings.optimization_settings.train_batch_size,
+            settings.sampler_factory.batches_per_epoch)
+        meta_train_loader = TorchDataLoader(
+            meta_train_data_set, batch_sampler=meta_train_sampler, collate_fn=collate_fn,
+            num_workers=settings.optimization_settings.num_loader_workers)
+
     if is_meta_learn_active:
         no_gradient_meta_learn_loader = None if no_gradient_meta_learn_sampler is None else TorchDataLoader(
             train_data_set, batch_sampler=no_gradient_meta_learn_sampler, collate_fn=collate_fn,
@@ -675,7 +687,7 @@ def train(
         settings.optimization_settings.num_train_epochs
         - settings.optimization_settings.num_final_epochs_train_prediction_heads_only)
 
-    graph_parts, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
+    graph_parts, common_graph_keys, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
         setup_prediction_heads_and_losses(settings, train_data_set)
 
     # Prepare model
@@ -688,6 +700,11 @@ def train(
     if settings.optimization_settings.fp16:
         model.half()
     model.to(device)
+    task_sample_logits = None
+    if task_sample_weights_train_frequency_in_batches is not None:
+        rate_logits = batch_sampler.rate_logits()
+        task_sample_logits = torch.nn.Parameter(
+            torch.tensor(list(rate_logits[k] for k in rate_logits), device=model.device), requires_grad=True)
 
     # Prepare optimizer
     if settings.optimization_settings.fp16:
@@ -698,8 +715,10 @@ def train(
                            for n, param in model.named_parameters()]
     else:
         param_optimizer = list(model.named_parameters())
-
-    def is_no_decay(param_name):
+        
+    def is_no_decay(param_name, param):
+        if hasattr(param, 'no_decay'):
+            return getattr(param, 'no_decay')
         name_parts = param_name.split('.')
         if name_parts[-1] in ['bias', 'gamma', 'beta']:
             return True
@@ -707,18 +726,27 @@ def train(
             return True
         return False
 
+    def is_prediction_head(param_name, param):
+        if hasattr(param, 'prediction_head'):
+            return getattr(param, 'prediction_head')
+        name_parts = param_name.split('.')
+        if name_parts[0] == 'prediction_head' and name_parts[2] not in common_graph_keys:
+            return True
+        return False
+
     non_prediction_head_parameters = None
-    if num_epochs_prediction_head_only_train > 0 or start_final_epochs_prediction_head_only_train:
-        non_prediction_head_parameters = [p for n, p in param_optimizer if not n.startswith('prediction_head.')]
+    if num_epochs_prediction_head_only_train > 0 \
+            or start_final_epochs_prediction_head_only_train < settings.optimization_settings.num_train_epochs:
+        non_prediction_head_parameters = [p for n, p in param_optimizer if not is_prediction_head(n, p)]
         for p in non_prediction_head_parameters:
             p.requires_grad = False
 
     prediction_head_weight_decay_group = {
-        'params': [p for n, p in param_optimizer if not is_no_decay(n) and n.startswith('prediction_head.')],
+        'params': [p for n, p in param_optimizer if not is_no_decay(n, p) and is_prediction_head(n, p)],
         'weight_decay': 0.01,
         't_total': num_train_steps_prediction_heads}
     prediction_head_no_decay_group = {
-        'params': [p for n, p in param_optimizer if is_no_decay(n) and n.startswith('prediction_head.')],
+        'params': [p for n, p in param_optimizer if is_no_decay(n, p) and is_prediction_head(n, p)],
         'weight_decay': 0.0,
         't_total': num_train_steps_prediction_heads}
 
@@ -733,16 +761,24 @@ def train(
         # no weight decay, prediction head
         prediction_head_no_decay_group,
         # weight decay, non-prediction head
-        {'params': [p for n, p in param_optimizer if not is_no_decay(n) and not n.startswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if not is_no_decay(n, p) and not is_prediction_head(n, p)],
          'weight_decay': 0.01,
          't_total': num_train_steps_other},
         # no weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if is_no_decay(n) and not n.startswith('prediction_head.')],
+        {'params': [p for n, p in param_optimizer if is_no_decay(n, p) and not is_prediction_head(n, p)],
          'weight_decay': 0.0,
          't_total': num_train_steps_other}]
 
+    if task_sample_logits is not None:
+        optimizer_grouped_parameters.append(
+            {'params': [task_sample_logits],
+             'weight_decay': 0.0,
+             't_total': num_train_steps_prediction_heads / task_sample_weights_train_frequency_in_batches})
+        if batch_sampler.learning_rate is not None:
+            optimizer_grouped_parameters[-1]['lr'] = batch_sampler.learning_rate
+
     inner_optimizer_grouped_parameters = None
-    if is_meta_learn_active and not settings.use_pc_grad:
+    if (is_meta_learn_active and not settings.use_pc_grad) or task_sample_logits is not None:
         inner_optimizer_grouped_parameters = list(dict(g) for g in optimizer_grouped_parameters)
         for g in inner_optimizer_grouped_parameters:
             g['t_total'] *= settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples
@@ -754,7 +790,7 @@ def train(
         optimizer, optimizer_grouped_parameters)
 
     inner_meta_learn_optimizer = None
-    if is_meta_learn_active and not settings.use_pc_grad:
+    if (is_meta_learn_active and not settings.use_pc_grad) or task_sample_logits is not None:
         inner_meta_learn_optimizer = settings.optimization_settings.make_inner_meta_learn_optimizer(
             optimizer,
             inner_optimizer_grouped_parameters,
@@ -773,6 +809,12 @@ def train(
     logger.info("  Num steps (heads) = %d", num_train_steps_prediction_heads)
     logger.info("  Num steps (all param) = %d", num_train_steps_other)
 
+    gradient_consumer = None
+    if task_sample_logits is not None:
+        gradient_consumer = MovingAverageGradientSimilarity(
+            list(batch_sampler.rate_logits()), preferences=batch_sampler.preferences(), decay=0.9)
+
+    meta_train_iterator = iter(meta_train_loader) if meta_train_loader is not None else None
     for index_epoch in iterate_and_update(
             progress_update.update_epoch, range(int(settings.optimization_settings.num_train_epochs))):
 
@@ -783,6 +825,10 @@ def train(
         if index_epoch == start_final_epochs_prediction_head_only_train:
             for p in non_prediction_head_parameters:
                 p.requires_grad = False
+            if batch_sampler is not None and hasattr(batch_sampler, 'change_temperature'):
+                batch_sampler.change_temperature(100)
+            if train_sampler is not None and hasattr(train_sampler, 'change_temperature'):
+                train_sampler.change_temperature(100)
         elif index_epoch == num_epochs_prediction_head_only_train:
             for p in non_prediction_head_parameters:
                 p.requires_grad = True
@@ -797,10 +843,9 @@ def train(
                     range(num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)):
                 restore_state = None
                 gradient_state = None
-                gradient_container = None
-                gradient_counter = None
+                gradient_consumer = None
                 if settings.use_pc_grad:
-                    gradient_container = dict()
+                    gradient_consumer = GradientContainer(store_norm=True)
                 else:
                     restore_state = deepcopy(model.state_dict())
                     for key, p in model.named_parameters():
@@ -815,10 +860,11 @@ def train(
                             inner_batch = next(no_gradient_meta_learn_iterator)
                         current_loss_tasks = settings.meta_learn_no_gradient_loss_tasks
                         sampler_to_update = no_gradient_meta_learn_sampler
-                        log_tag = 'inner_no_grad'
+                        log_tag = 'inr_no_grd'
                     else:
                         if index_inner_step == settings.num_meta_learn_no_gradient_samples:
-                            gradient_counter = dict()
+                            if not settings.use_pc_grad:
+                                gradient_consumer = GradientCounter()
                             if index_inner_step == 0:
                                 # special case, when there are no no_gradient steps use the restore_state
                                 # to avoid extra memory
@@ -834,7 +880,7 @@ def train(
                             inner_batch = next(gradient_meta_learn_iterator)
                         current_loss_tasks = settings.meta_learn_gradient_loss_tasks
                         sampler_to_update = gradient_meta_learn_sampler
-                        log_tag = 'inner_grad'
+                        log_tag = 'inr_grd'
                     _train_step(
                         settings,
                         current_loss_tasks,
@@ -843,30 +889,67 @@ def train(
                         inner_meta_learn_optimizer,
                         None,
                         sampler_to_update,
-                        gradient_container,
-                        gradient_counter,
+                        gradient_consumer,
                         log_tag=log_tag)
                 logger.info('meta epoch {}, step {}'.format(index_epoch, step))
                 if settings.use_pc_grad:
-                    set_projected_conflicting_gradients(model, gradient_container)
+                    set_projected_conflicting_gradients(model, gradient_consumer)
                 else:
                     restore_model_parameters_and_set_meta_gradient(
-                        model, restore_state, gradient_state, gradient_counter)
+                        model, restore_state, gradient_state, gradient_consumer)
                 optimizer.step()
                 scheduler.step()
                 model.zero_grad()
                 global_step += 1
         else:
+            assert(settings.loss_tasks is not None)
             sampler_to_update = batch_sampler if batch_sampler is not None else train_sampler
             for step, batch in iterate_and_update(progress_update.update_batch, enumerate(train_data_loader)):
-                if _train_step(
+                is_stepped = _train_step(
+                    settings,
+                    settings.loss_tasks,
+                    train_data_set, device, model, batch, step, index_epoch, global_step,
+                    loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update,
+                    gradient_consumer=gradient_consumer)
+
+                if task_sample_logits is not None:
+                    try:
+                        meta_train_batch = next(meta_train_iterator)
+                    except StopIteration:
+                        meta_train_iterator = iter(meta_train_loader)
+                        meta_train_batch = next(meta_train_iterator)
+
+                    # update the similarities with a random meta_train task, don't step
+                    _train_step(
                         settings,
                         settings.loss_tasks,
-                        train_data_set, device, model, batch, step, index_epoch, global_step,
-                        loss_handlers, train_results, param_optimizer, optimizer, scheduler, sampler_to_update,
-                        gradient_counter=None,
-                        gradient_container=None):
+                        meta_train_data_set, device, model, meta_train_batch, step, index_epoch, global_step,
+                        loss_handlers, None, None, None, None, None, gradient_consumer, log_tag='smp')
+
+                if is_stepped:
                     global_step += 1
+
+                if (task_sample_logits is not None
+                        and global_step > 0
+                        and global_step % task_sample_weights_train_frequency_in_batches == 0):
+
+                    similarities = gradient_consumer.mean_task_similarity()
+                    ordered_s = list()
+                    with torch.no_grad():
+                        rate_logits = batch_sampler.rate_logits()
+                        for i, task_key in enumerate(rate_logits):
+                            task_sample_logits[i] = rate_logits[task_key]
+                            ordered_s.append(similarities[task_key])
+                        ordered_s = torch.as_tensor(ordered_s, device=task_sample_logits.device)
+
+                    task_sample_loss = torch.sum(
+                        ordered_s * -torch.nn.functional.log_softmax(task_sample_logits, dim=-1))
+                    task_sample_loss.backward()
+                    optimizer.step()
+                    model.zero_grad()
+                    batch_sampler.update_rate_logits(
+                        OrderedDict((t, logit.item())
+                                    for t, logit in zip(batch_sampler.rate_logits(), task_sample_logits)))
 
         write_loss_curve(output_train_curve_path, train_results)
         if len(validation_data_set) > 0:
@@ -883,6 +966,13 @@ def train(
     if not os.path.exists(output_model_path):
         os.makedirs(output_model_path)
     model.save_pretrained(output_model_path)
+    if task_sample_logits is not None:
+        with open(os.path.join(output_model_path, 'task_sample_logits.txt'), 'wt') as task_weight_file:
+            rate_logits = batch_sampler.rate_logits()
+            task_weight_file.writelines(['{}: {}\n'.format(task, rate_logits[task]) for task in rate_logits])
+        with open(os.path.join(output_model_path, 'pairwise_gradient_similarities.txt'), 'wt') as similarity_file:
+            similarity_file.writelines(
+                ['{}, {}: {}\n'.format(t1, t2, s) for t1, t2, s in gradient_consumer.pairwise_similarities()])
 
     if len(validation_data_set) > 0:
         all_validation = evaluate(

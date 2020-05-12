@@ -89,18 +89,21 @@ class RawData:
     response_data: Mapping[str, KindData]
     test_input_examples: Optional[Sequence[InputFeatures]] = None
     validation_input_examples: Optional[Sequence[InputFeatures]] = None
+    meta_train_input_examples: Optional[Sequence[InputFeatures]] = None
     is_pre_split: bool = False
     test_proportion: float = 0.0
     validation_proportion_of_train: float = 0.1
+    meta_proportion_of_train: float = 0
     field_specs: Optional[Mapping[str, FieldSpec]] = None
     metadata: Optional[Mapping[str, np.array]] = None
+    text_labels: Optional[Mapping[str, Sequence[str]]] = None
 
 
 @dataclass(frozen=True)
 class SplitData:
     shuffle: bool = True
 
-    def __call__(self, raw_data, random_state=None):
+    def __call__(self, raw_data, random_state=None, use_meta_train=False):
         from sklearn.model_selection import train_test_split
 
         if raw_data.test_proportion > 0:
@@ -118,7 +121,15 @@ class SplitData:
         else:
             idx_validation = []
 
+        if use_meta_train and raw_data.meta_proportion_of_train > 0:
+            idx_train, idx_meta = train_test_split(
+                idx_train,
+                test_size=raw_data.meta_proportion_of_train, shuffle=self.shuffle, random_state=random_state)
+        else:
+            idx_meta = []
+
         train = [raw_data.input_examples[i] for i in idx_train]
         validation = [raw_data.input_examples[i] for i in idx_validation]
         test = [raw_data.input_examples[i] for i in idx_test]
-        return train, validation, test
+        meta = [raw_data.input_examples[i] for i in idx_meta]
+        return train, validation, test, meta

@@ -25,7 +25,7 @@ class UclCorpus(CorpusBase):
 
     all_erp_tasks: ClassVar[Tuple[str, ...]] = ('epnp', 'pnp', 'elan', 'lan', 'n400', 'p600')
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
         data = OrderedDict()
         if self.include_erp:
             erp = self._read_erp(example_manager)
@@ -61,7 +61,12 @@ class UclCorpus(CorpusBase):
         for k in data:
             data[k].data.setflags(write=False)
 
-        return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1)
+        return RawData(
+            examples,
+            data,
+            test_proportion=0.,
+            validation_proportion_of_train=0.1,
+            meta_proportion_of_train=0.1 if use_meta_train else 0.)
 
     def _read_erp(self, example_manager: CorpusExampleUnifier):
         data = loadmat(self.frank_2015_erp_path)

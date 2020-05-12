@@ -219,9 +219,10 @@ def load_switched_corpus(variation_name, replacement_corpus, index_run):
         settings.preprocess_fork_fn,
         False,
         paths,
-        settings.max_sequence_length)
+        settings.max_sequence_length,
+        settings.create_meta_train_dataset)
 
-    train_data, validation_data, test_data = (
+    train_data, validation_data, test_data, meta_train_data = (
         DataIdDataset(
             data_set_path,
             which,
@@ -230,9 +231,9 @@ def load_switched_corpus(variation_name, replacement_corpus, index_run):
             data_id_in_batch_keys=settings.data_id_in_batch_keys,
             filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
             field_spec_replacers=settings.field_spec_replacers)
-        for which in ('train', 'validation', 'test'))
+        for which in ('train', 'validation', 'test', 'meta_train'))
 
-    return train_data, validation_data, test_data
+    return train_data, validation_data, test_data, meta_train_data
 
 
 def read_variation_results(

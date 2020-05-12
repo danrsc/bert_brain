@@ -125,11 +125,17 @@ class ReadingComprehensionWithCommonSenseReasoning(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
         labels = list()
         f1 = list()
         train = ReadingComprehensionWithCommonSenseReasoning._read_examples(
             os.path.join(self.path, 'train.jsonl'), example_manager, labels, f1)
+        meta_train = None
+        if use_meta_train:
+            from sklearn.model_selection import train_test_split
+            idx_train, idx_meta_train = train_test_split(np.arange(len(train)), test_size=0.2)
+            meta_train = [train[i] for i in idx_meta_train]
+            train = [train[i] for i in idx_train]
         validation = ReadingComprehensionWithCommonSenseReasoning._read_examples(
             os.path.join(self.path, 'val.jsonl'), example_manager, labels, f1)
         test = ReadingComprehensionWithCommonSenseReasoning._read_examples(
@@ -142,6 +148,7 @@ class ReadingComprehensionWithCommonSenseReasoning(CorpusBase):
             input_examples=train,
             validation_input_examples=validation,
             test_input_examples=test,
+            meta_train_input_examples=meta_train,
             response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             is_pre_split=True,
             field_specs={type(self).response_key(): FieldSpec(is_sequence=False)},

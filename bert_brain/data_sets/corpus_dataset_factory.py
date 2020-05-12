@@ -55,7 +55,9 @@ class CorpusDatasetFactory:
             preprocess_fork_fn: Optional[PreprocessForkFnT] = None,
             force_cache_miss: bool = False,
             paths_obj=None,
-            max_sequence_length: Optional[int] = None) -> str:
+            max_sequence_length: Optional[int] = None,
+            use_meta_train: bool = False,
+            paths_only: bool = False) -> str:
 
         corpus = CorpusBase.replace_paths(corpus, paths_obj, index_run=index_run)
         corpus_load_hash = type(self)._hash_arguments(OrderedDict((k, v) for k, v in [
@@ -81,7 +83,8 @@ class CorpusDatasetFactory:
                 corpus_info.response_key_kinds,
                 preprocess_dict,
                 split_function,
-                preprocess_fork_fn)
+                preprocess_fork_fn,
+                use_meta_train)
 
             effective_max_sequence_length = corpus_info.true_max_sequence_length
             if max_sequence_length is not None and max_sequence_length < effective_max_sequence_length:
@@ -92,7 +95,8 @@ class CorpusDatasetFactory:
                     ('factory', self),
                     ('corpus', corpus),
                     ('data_preparer', data_preparer),
-                    ('max_sequence_length', effective_max_sequence_length)]))
+                    ('max_sequence_length', effective_max_sequence_length),
+                    ('use_meta_train', use_meta_train)]))
 
             data_set_path = os.path.join(corpus.cache_base_path, data_set_hash)
             init_file_path = os.path.join(data_set_path, DataIdDataset.dataset_init_file)
@@ -101,11 +105,13 @@ class CorpusDatasetFactory:
                 logger.info('Using cached {}'.format(corpus.corpus_key))
                 return data_set_path
 
+        if paths_only:
+            return ''
         print('Loading {}...'.format(corpus.corpus_key), end='', flush=True)
         if not os.path.exists(os.path.split(corpus_info_path)[0]):
             os.makedirs(os.path.split(corpus_info_path)[0])
         data, true_max_sequence_length = corpus.load(
-            self.bert_spacy_token_aligner, max_sequence_length=max_sequence_length)
+            self.bert_spacy_token_aligner, max_sequence_length=max_sequence_length, use_meta_train=use_meta_train)
         corpus_info = CorpusLoadInfo(
             response_key_kinds=tuple(ResponseKeyKind(k, data.response_data[k].kind) for k in data.response_data),
             true_max_sequence_length=true_max_sequence_length)
@@ -118,7 +124,8 @@ class CorpusDatasetFactory:
             corpus_info.response_key_kinds,
             preprocess_dict,
             split_function,
-            preprocess_fork_fn)
+            preprocess_fork_fn,
+            use_meta_train)
 
         effective_max_sequence_length = corpus_info.true_max_sequence_length
         if max_sequence_length is not None and max_sequence_length < effective_max_sequence_length:
@@ -129,7 +136,8 @@ class CorpusDatasetFactory:
                 ('factory', self),
                 ('corpus', corpus),
                 ('data_preparer', data_preparer),
-                ('max_sequence_length', effective_max_sequence_length)]))
+                ('max_sequence_length', effective_max_sequence_length),
+                ('use_meta_train', use_meta_train)]))
 
         data_set_path = os.path.join(corpus.cache_base_path, data_set_hash)
 

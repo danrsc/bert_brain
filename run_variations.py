@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+import shutil
 from shutil import rmtree
 import argparse
 import logging
@@ -23,6 +24,7 @@ from dataclasses import replace, dataclass
 from typing import Optional, Callable
 from tqdm import tqdm
 from tqdm_logging import replace_root_logger_handler
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import torch
 
@@ -145,9 +147,10 @@ def _train_single_run(
             force_cache_miss_set is not None and (
                     corpus.corpus_key in force_cache_miss_set or '__all__' in force_cache_miss_set),
             paths,
-            settings.max_sequence_length))
+            settings.max_sequence_length,
+            settings.create_meta_train_dataset))
 
-    train_data, validation_data, test_data = (
+    train_data, validation_data, test_data, meta_train_data = (
         DataIdMultiDataset(
             which,
             data_set_paths,
@@ -155,7 +158,7 @@ def _train_single_run(
             data_id_in_batch_keys=settings.data_id_in_batch_keys,
             filter_when_not_in_loss_keys=settings.filter_when_not_in_loss_keys,
             field_spec_replacers=settings.field_spec_replacers)
-        for which in ('train', 'validation', 'test'))
+        for which in ('train', 'validation', 'test', 'meta_train'))
 
     load_from_path = None
     if settings.load_from is not None:
@@ -170,9 +173,137 @@ def _train_single_run(
             task_hash(load_from_settings),
             'run_{}'.format(load_from_index_run))
 
-    train(settings, output_dir, completion_file_path, output_model_path,
-          train_data, validation_data, test_data, device, progress_updater, load_from_path)
+    train(replace(settings), output_dir, completion_file_path, output_model_path,
+          train_data, validation_data, test_data, meta_train_data, device, progress_updater, load_from_path)
     progress_updater.update_run()
+
+
+def _reachable_for_variation(variation_name, training_variation):
+    data_set_paths = set()
+    model_paths = set()
+    result_paths = set()
+
+    named_settings = named_variations(variation_name)
+    settings = named_settings[variation_name, training_variation]
+
+    corpus_dataset_factory, paths = _io_setup(variation_name, settings)
+    for index_run in range(settings.num_runs):
+        model_paths.add(os.path.join(paths.model_path, 'run_{}'.format(index_run)))
+        result_paths.add(os.path.join(paths.result_path, 'run_{}'.format(index_run)))
+        set_random_seeds(settings.seed, index_run, n_gpu=1)
+
+        for corpus in settings.corpora:
+            data_set_path = corpus_dataset_factory.maybe_make_data_set_files(
+                index_run,
+                corpus,
+                settings.preprocessors,
+                settings.get_split_function(corpus, index_run),
+                settings.preprocess_fork_fn,
+                False,
+                paths,
+                settings.max_sequence_length,
+                settings.create_meta_train_dataset,
+                paths_only=True)
+            if data_set_path is not None and len(data_set_path) > 0:
+                data_set_paths.add(data_set_path)
+
+    return data_set_paths, model_paths, result_paths
+
+
+def find_reachable():
+    full_variation_map = named_variations('__full_map__')
+    data_set_paths = set()
+    model_paths = set()
+    result_paths = set()
+
+    with ProcessPoolExecutor() as ex:
+        futures = list(
+            ex.submit(_reachable_for_variation, v, t) for v, t in full_variation_map)
+        for future in tqdm(as_completed(futures), total=len(futures), desc='variations'):
+            d, m, r = future.result()
+            data_set_paths.update(d)
+            model_paths.update(m)
+            result_paths.update(r)
+
+    return data_set_paths, model_paths, result_paths
+
+
+def _reachable_closure(reachable):
+    closure = set()
+    for entry in reachable:
+        while True:
+            up_one, _ = os.path.split(entry)
+            if len(up_one) == 0 or up_one == '/':
+                break
+            closure.add(up_one)
+            entry = up_one
+    reachable = set(reachable)
+    reachable.update(closure)
+    return reachable
+
+
+def _leaf_count_at_least(base_path, remaining_depth, count):
+    if count is None:
+        return False
+    if count == 'force':
+        return True
+    leaf_count = 0
+    with os.scandir(base_path) as it:
+        for entry in it:
+            if not entry.is_dir():
+                continue
+            if remaining_depth == 0:
+                leaf_count += 1
+                if leaf_count > count:
+                    return True
+            elif _leaf_count_at_least(os.path.join(base_path, entry.name), remaining_depth - 1, count):
+                return True
+    return False
+
+
+def _find_unreachable(base_path, remaining_depth, reachable, leave_if_leaf_count_at_least=None):
+    unreachable = list()
+    count_reachable = 0
+    with os.scandir(base_path) as it:
+        for entry in it:
+            if not entry.is_dir():
+                continue
+            entry_path = os.path.join(base_path, entry.name)
+            leave_if = leave_if_leaf_count_at_least
+            if _leaf_count_at_least(entry_path, remaining_depth - 1, leave_if):
+                leave_if = 'force'
+            if entry_path not in reachable and leave_if != 'force':
+                unreachable.append(entry_path)
+            elif remaining_depth > 0:
+                entry_unreachable, entry_count_reachable = _find_unreachable(
+                    entry_path, remaining_depth - 1, reachable, leave_if)
+                unreachable.extend(entry_unreachable)
+                count_reachable += entry_count_reachable
+            else:
+                count_reachable += 1
+    return unreachable, count_reachable
+
+
+def find_unreachable_data_set_paths(reachable):
+    unreachable, count_reachable = _find_unreachable(Paths().cache_path, 1, _reachable_closure(reachable))
+    print('Found {} reachable and {} unreachable data set directories'.format(count_reachable, len(unreachable)))
+    return unreachable
+
+
+def find_unreachable_model_paths(reachable, leave_if_leaf_count_at_least=None):
+    unreachable, count_reachable = _find_unreachable(
+        Paths().model_path, 2, _reachable_closure(reachable),
+        leave_if_leaf_count_at_least=leave_if_leaf_count_at_least)
+    print('Found {} reachable and {} unreachable model directories'.format(count_reachable, len(unreachable)))
+    return unreachable
+
+
+def find_unreachable_result_paths(reachable, leave_if_leaf_count_at_least=None):
+    unreachable, count_reachable = _find_unreachable(
+        Paths().result_path, 2, _reachable_closure(reachable),
+        leave_if_leaf_count_at_least=leave_if_leaf_count_at_least)
+    print('Found {} reachable and {} unreachable result directories'.format(count_reachable, len(unreachable)))
+    return unreachable
 
 
 def run_variation(
@@ -241,8 +372,13 @@ def main():
     parser.add_argument('--index_run', action='store', required=False, default=-1, type=int,
                         help='Specify to train a particular run. Mostly useful for debugging')
 
+    parser.add_argument('--archive_unreachable', action='store', required=False, default='',
+                        help='Goes through all current experiments, computing the set of cache and model paths that '
+                             'they comprise, and outputs the set of cache and model paths which is not reachable. '
+                             'These can be used to delete unreachable data through rsync for example.')
+
     parser.add_argument(
-        '--name', action='store', required=False, default='erp', help='Which set to run')
+        '--name', action='store', required=False, default='', help='Which set to run')
 
     args = parser.parse_args()
 
@@ -253,6 +389,9 @@ def main():
     logging.getLogger().setLevel(level=args.log_level.upper())
 
     if args.clean:
+        if len(args.name) == 0:
+            sys.exit(0)
+
         while True:
             answer = input('About to remove results at {}. Is this really what you want to do [y/n]? '.format(
                 args.name))
@@ -279,6 +418,25 @@ def main():
             rmtree(model_path)
         if os.path.exists(result_path):
             rmtree(result_path)
+        sys.exit(0)
+
+    if len(args.archive_unreachable) > 0:
+        data_set_paths, model_paths, result_paths = find_reachable()
+        for path in find_unreachable_data_set_paths(data_set_paths):
+            new_path = os.path.join(args.archive_unreachable, path[1:])
+            print(new_path)
+            os.makedirs(new_path, exist_ok=True)
+            shutil.move(path, new_path)
+        for path in find_unreachable_model_paths(model_paths, leave_if_leaf_count_at_least=10):
+            new_path = os.path.join(args.archive_unreachable, path[1:])
+            print(new_path)
+            os.makedirs(new_path, exist_ok=True)
+            shutil.move(path, new_path)
+        for path in find_unreachable_result_paths(result_paths, leave_if_leaf_count_at_least=10):
+            new_path = os.path.join(args.archive_unreachable, path[1:])
+            print(new_path)
+            os.makedirs(new_path, exist_ok=True)
+            shutil.move(path, new_path)
         sys.exit(0)
 
     named_settings = named_variations(args.name)

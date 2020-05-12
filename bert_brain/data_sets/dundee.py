@@ -14,7 +14,7 @@ __all__ = ['DundeeCorpus']
 class DundeeCorpus(CorpusBase):
     path: str = path_attribute_field('dundee_path')
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         data = loadmat(os.path.join(self.path, 'data.mat'))
         line_pos = data['line_pos'].squeeze(axis=1)
         sent_pos = data['sent_pos'].squeeze(axis=1)
@@ -102,6 +102,7 @@ class DundeeCorpus(CorpusBase):
                 'dun_go_pst': KindData(ResponseKind.dundee_eye, _readonly(reading_time_go_past)),
                 'dun_rt_bnd': KindData(ResponseKind.dundee_eye, _readonly(reading_time_right_bounded))},
             validation_proportion_of_train=0.25,
+            meta_proportion_of_train=0.2 if use_meta_train else 0,
             metadata={
                 'line_pos': _readonly(line_pos),
                 'sent_pos': _readonly(sent_pos),

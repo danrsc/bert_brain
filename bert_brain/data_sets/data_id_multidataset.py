@@ -46,6 +46,7 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
         self._data_set_id_to_data_set_key = dict()
         self._field_to_data_set_key = dict()
         self._field_specs = OrderedDict()
+        self._which = which
 
         for data_set_id, path in enumerate(paths):
             data_set = DataIdDataset(
@@ -83,6 +84,10 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
     @property
     def fields(self):
         return tuple(self._field_specs)
+
+    @property
+    def which(self):
+        return self._which
 
     @property
     def response_fields(self):
@@ -228,3 +233,9 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
 
     def get_tokens(self, data_set_id, unique_id):
         return self.get_input_features(data_set_id, unique_id).tokens
+
+    def text_labels_for_field(self, field):
+        data_set = self.data_set_key_for_field(field)
+        if data_set is None:
+            raise KeyError('Unknown field: {}'.format(field))
+        return self._data_sets[data_set].text_labels_for_field(field)

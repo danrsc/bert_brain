@@ -6,7 +6,7 @@ from bert_brain import read_variation_results
 from ocular import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
-output_order = (
+output_order_regression = (
     'mse',       # mean squared error
     'mae',       # mean absolute error
     'pove',      # proportion of variance explained
@@ -15,7 +15,9 @@ output_order = (
     'pode',      # proportion of mean absolute deviation explained
     'variance',
     'mad',       # mean absolute deviation
-    'r_seq',     # avg (over batch) of sequence correlation values (i.e. correlation within a sequence)
+    'r_seq')     # avg (over batch) of sequence correlation values (i.e. correlation within a sequence)
+
+output_order_classifier = (
     'xent',      # cross entropy
     'acc',       # accuracy
     'macc',      # mode accuracy - the accuracy one would get if one picked the mode
@@ -31,31 +33,35 @@ def print_variation_results(paths, variation_set_name, index_run=None, field_pre
     aggregated, count_runs, settings = read_variation_results(
         paths, variation_set_name, index_run=index_run, **loss_handler_kwargs)
 
-    metrics = list()
-    for metric in output_order:
-        if any(metric in aggregated[name] for name in aggregated):
-            metrics.append(metric)
+    for output_order in (output_order_regression, output_order_classifier):
+        metrics = list()
+        for metric in output_order:
+            if any(metric in aggregated[name] for name in aggregated):
+                metrics.append(metric)
 
-    text_grid = TextGrid()
-    text_grid.append_value('name', column_padding=2)
-    for metric in metrics:
-        text_grid.append_value(metric, line_style=TextWrapStyle.right_justify, column_padding=2)
-    text_grid.next_row()
-    value_format = '{' + ':.{}f'.format(field_precision) + '}'
-    for name in aggregated:
-        text_grid.append_value(name, column_padding=2)
+        text_grid = TextGrid()
+        text_grid.append_value('name', column_padding=2)
         for metric in metrics:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning)
-                value = np.nanmean(aggregated[name].values(metric)) if metric in aggregated[name] else np.nan
-            text_grid.append_value(value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
+            text_grid.append_value(metric, line_style=TextWrapStyle.right_justify, column_padding=2)
         text_grid.next_row()
+        value_format = '{' + ':.{}f'.format(field_precision) + '}'
+        for name in aggregated:
+            if not any(metric in aggregated[name] for metric in metrics):
+                continue
+            text_grid.append_value(name, column_padding=2)
+            for metric in metrics:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    value = np.nanmean(aggregated[name].values(metric)) if metric in aggregated[name] else np.nan
+                text_grid.append_value(
+                    value_format.format(value), line_style=TextWrapStyle.right_justify, column_padding=2)
+            text_grid.next_row()
 
-    training_variation_name = ', '.join(sorted(settings.all_loss_tasks))
-    print('Variation ({} of {} runs found): {}'.format(count_runs, settings.num_runs, training_variation_name))
-    write_text_grid_to_console(text_grid, width='tight')
-    print('')
-    print('')
+        training_variation_name = ', '.join(sorted(settings.all_loss_tasks))
+        print('Variation ({} of {} runs found): {}'.format(count_runs, settings.num_runs, training_variation_name))
+        write_text_grid_to_console(text_grid, width='tight')
+        print('')
+        print('')
 
 
 def text_heat_map_html(words, scores, vmin=None, vmax=None, cmap=None, text_color=None):

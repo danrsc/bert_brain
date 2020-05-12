@@ -8,8 +8,7 @@ from typing import Union, Iterable, Mapping, Tuple
 import numpy as np
 import torch
 import torch.cuda
-
-from transformers.modeling_bert import gelu_new as gelu
+from torch.nn.functional import sigmoid
 
 from .common import SwitchRemember
 from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
@@ -17,12 +16,13 @@ from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     PreprocessQuantileDigitize, PreprocessPCA, PreprocessRankData, PreprocessLog, corpus_types, \
     BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, BatchOneTaskProportionalSamplerFactory, \
     BatchOneTaskTemperatureProportionalSamplerFactory, BatchOneTaskTaskPermutedSamplerFactory, \
-    BatchOneTaskManualWeightSamplerFactory
+    BatchOneTaskManualWeightSamplerFactory, BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory
 from .modeling import KeyedLinear, LinearContextualParameterGeneration, PooledFromSequence, PooledFromKTokens, \
     MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types, \
     learning_rate_schedules, MultiLayerBottleneck, ContextualBottleneckSum, AttentionKeyValues, AttentionPool, \
     ContextAttention, LinearDecreasingTemperatureSchedule, KeyedConcat, KeyedSingleTargetSpanMaxPool, \
     weight_losses_by_inverse_example_counts, ManuallyRescaleLosses
+from .modeling import gelu_new as gelu
 from .settings import Settings, OptimizationSettings
 
 
@@ -46,7 +46,7 @@ def _internal_hash_update(hash_, settings: Settings):
     for loss_task in sorted(settings.meta_learn_gradient_loss_tasks):
         hash_.update(loss_task.encode())
     if settings.load_from is not None:
-        hash_.update('load_from')
+        hash_.update('load_from'.encode())
         (variation_name, _), load_from_settings = singleton_variation(settings.load_from)
         hash_.update(variation_name.encode())
         _internal_hash_update(hash_, load_from_settings)
@@ -232,6 +232,21 @@ def named_variations(name: Union[str, Tuple[str, int]]) -> Mapping[Tuple[str, st
         except TypeError:
             raise KeyError('Cannot use {} to access a variation which is not iterable'.format((name, name_index)))
 
+    if name == '__full_map__':
+        names = _named_variations(name)
+        result = OrderedDict()
+        for name in names:
+            result_ = _named_variations(name)
+            if isinstance(result_, Settings):
+                result[(name, '{}'.format(0))] = result_
+            elif isinstance(result_, dict):
+                for k in result_:
+                    result[(name, k)] = result_[k]
+            else:
+                for i, r in enumerate(result_):
+                    result[(name, '{}'.format(i))] = r
+        return result
+
     result = _named_variations(name)
     if isinstance(result, Settings):
         return {(name, '{}'.format(0)): result}
@@ -241,7 +256,8 @@ def named_variations(name: Union[str, Tuple[str, int]]) -> Mapping[Tuple[str, st
         return OrderedDict(((name, '{}'.format(i)), r) for i, r in enumerate(result))
 
 
-def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iterable[Settings], Mapping[str, Settings]]:
+def _named_variations(name: Union[str, Tuple[str, int]]) -> \
+        Union[Settings, Iterable[Settings], Mapping[str, Settings], Iterable[str]]:
 
     hp_fmri_tasks = tuple('hp_fmri_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_fmri_subjects)
 
@@ -387,7 +403,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         settings.loss_tasks = set(hp_fmri_tasks + ('hp_meg',))
         return settings
     elif name in ['hp_fmri_simple_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_fmri_subjects]:
-        subject_ = name[name.var.rindex('_') + 1:]
+        subject_ = name.var[name.var.rindex('_') + 1:]
         settings = Settings(
             corpora=(corpus_types.HarryPotterCorpus(
                 fmri_subjects=subject_,
@@ -2136,16 +2152,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
-                'response_id', 'num_response_data_fields', 20,
-                OrderedDict(
-                    bottleneck=KeyedLinear(
-                        ('bert', 'sequence', 'all'),
-                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
-                        should_norm=False,
-                        bias=False)),
-                use_softmax_embedding=True,
-                use_weight_norm=True),
+            sigmoid_bottleneck=KeyedLinear(
+                ('bert', 'sequence', 'all'),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=100),
+                should_norm=False,
+                activation_fn=sigmoid),
             pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
             hdr_bottleneck=PooledFromKTokens(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
@@ -2218,10 +2229,10 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
         settings.loss_tasks.add(ResponseKind.dundee_eye)
         settings.loss_tasks.add(ResponseKind.geco)
 
-        settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 2})
+        settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 5})
 
         return settings
-    elif name == 'fmri_cram_cpg_cca_ica_meta':
+    elif name == 'fmri_cram_cpg_cca_ica_dds':
         settings = Settings(
             corpora=(
                 corpus_types.HarryPotterCorpus(
@@ -2264,32 +2275,33 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
                 corpus_types.SemanticProtoRoles2()),
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=20,
+                num_train_epochs=10,
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=0,
                 learning_rate_head=1e-3,
                 learning_rate=1e-5,
-                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(200),
-                train_batch_size=8,
-                predict_batch_size=8,
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
+                train_batch_size=16,
+                predict_batch_size=16,
                 num_loader_workers=8),
             loss_tasks=set(),
             data_id_in_batch_keys=None,
             field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
-            sampler_factory=BatchOneTaskManualWeightSamplerFactory(
-                100, weight_fn=SamplerWeightCollapse(('spr1.', 'spr2.'), divisor=100, temperature=5)),
+            sampler_factory=BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory(
+                batches_per_epoch=1000,
+                update_frequency_in_batches=100,
+                initial_sample_rate_proportional_temperature=5,
+                learning_rate=0.1,
+                preferences={ResponseKind.hp_fmri: 5}),
             # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
-                'response_id', 'num_response_data_fields', 10,
-                OrderedDict(
-                    bottleneck=KeyedLinear(
-                        ('bert', 'sequence', 'all'),
-                        output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
-                        should_norm=True)),
-                use_softmax_embedding=True),
+            sigmoid_bottleneck=KeyedLinear(
+                ('bert', 'sequence', 'all'),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=100),
+                should_norm=False,
+                activation_fn=sigmoid),
             pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
             hdr_bottleneck=PooledFromKTokens(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
@@ -2354,18 +2366,137 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> Union[Settings, Iter
             settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
         settings.default_pooled_source = 'pooled_all_bottleneck'
         settings.default_sequence_source = 'sequence_all_bottleneck'
+        settings.loss_tasks.add(ResponseKind.generic)
+        settings.loss_tasks.add(ResponseKind.hp_fmri)
+        settings.loss_tasks.add(ResponseKind.ucl_erp)
+        settings.loss_tasks.add(ResponseKind.ucl_eye)
+        settings.loss_tasks.add(ResponseKind.ucl_self_paced)
+        settings.loss_tasks.add(ResponseKind.dundee_eye)
+        settings.loss_tasks.add(ResponseKind.geco)
+        settings.create_meta_train_dataset = True
 
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.generic)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.hp_fmri)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_erp)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_eye)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.ucl_self_paced)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.dundee_eye)
-        settings.meta_learn_gradient_loss_tasks.add(ResponseKind.geco)
-        settings.num_meta_learn_gradient_samples = 10
-        settings.num_meta_learn_no_gradient_samples = 0
-        settings.use_pc_grad = True
+        # settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 5})
+
+        return settings
+    elif name == 'fmri_cram_maxima_dds':
+        settings = Settings(
+            corpora=(
+                corpus_types.HarryPotterCorpus(
+                    fmri_subjects=None,  # None means all
+                    fmri_sentence_mode='ignore',
+                    fmri_window_duration=10.1,
+                    fmri_minimum_duration_required=9.6,
+                    fmri_kind='local_maxima_of_projected',
+                    fmri_smooth_factor=None,
+                    separate_fmri_components=False,
+                    group_meg_sentences_like_fmri=True,
+                    meg_subjects=[]),
+                corpus_types.UclCorpus(subtract_erp_baseline=True),
+                corpus_types.GhentEyeTrackingCorpus(active_fields=(
+                    'word_fixation_count',
+                    'word_first_fixation_duration',
+                    'word_gaze_duration',
+                    'word_go_past_time',
+                    'word_total_reading_time')),
+                corpus_types.DundeeCorpus(),
+                corpus_types.StanfordSentimentTreebank(),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.PartOfSpeechConll2012(),
+                corpus_types.ConstituentsConll2012(),
+                corpus_types.SemanticRoleLabelConll2012(),
+                corpus_types.NamedEntityRecognitionConll2012(),
+                corpus_types.CoreferenceResolutionConll2012(),
+                corpus_types.DependenciesEnglishWeb(),
+                corpus_types.DefinitePronounResolution(),
+                corpus_types.SemEval(),
+                corpus_types.SemanticProtoRoles1(),
+                corpus_types.SemanticProtoRoles2()),
+            # corpus_types.WordContent()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=6,
+                num_epochs_train_prediction_heads_only=0,
+                num_final_epochs_train_prediction_heads_only=1,
+                learning_rate_head=1e-3,
+                learning_rate=1e-5,
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
+                train_batch_size=16,
+                predict_batch_size=16,
+                num_loader_workers=8),
+            loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
+            sampler_factory=BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory(
+                batches_per_epoch=1000,
+                update_frequency_in_batches=100,
+                initial_sample_rate_proportional_temperature=5,
+                learning_rate=0.1,
+                preferences={ResponseKind.hp_fmri: 5}),
+            # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
+            # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
+            num_runs=4)
+        settings.common_graph_parts = OrderedDict(
+            latent_task_bottleneck=KeyedLinear(
+                ('bert', 'sequence', 'all'),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=50),
+                should_norm=True,
+                activation_fn=gelu),
+            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokens(
+                num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
+
+        settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
+
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            fmri_linear=KeyedLinear(
+                'hdr_pooled',
+                output_key_to_shape=OrderedDict(fmri_compressed=10),
+                should_norm=True,
+                activation_fn=gelu),
+            fmri_output=KeyedLinear(
+                'fmri_compressed',
+                apply_at_most_one_data_id='if_no_target',
+                targets=ResponseKind.hp_fmri))
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessDetrend(metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleMSE()
+        for kind in [
+                ResponseKind.ucl_erp,
+                ResponseKind.ucl_eye,
+                ResponseKind.ucl_self_paced,
+                ResponseKind.dundee_eye,
+                ResponseKind.geco]:
+            settings.preprocessors[kind] = [
+                # use standardize to average subjects
+                PreprocessStandardize(stop_mode='content'),
+                PreprocessQuantileDigitize(
+                    quantiles=2,
+                    stop_mode='content',
+                    use_one_hot=False)]
+            settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
+        settings.loss_tasks.add(ResponseKind.generic)
+        settings.loss_tasks.add(ResponseKind.hp_fmri)
+        settings.loss_tasks.add(ResponseKind.ucl_erp)
+        settings.loss_tasks.add(ResponseKind.ucl_eye)
+        settings.loss_tasks.add(ResponseKind.ucl_self_paced)
+        settings.loss_tasks.add(ResponseKind.dundee_eye)
+        settings.loss_tasks.add(ResponseKind.geco)
+        settings.create_meta_train_dataset = True
+
+        settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 10})
 
         return settings
     else:
+        if name.var == '__full_map__':
+            return name.tests
         raise ValueError('Unknown name: {}. Valid choices are: \n{}'.format(name.var, '\n'.join(name.tests)))

@@ -263,14 +263,15 @@ class CorpusBase:
     def load(
             self,
             bert_spacy_token_aligner: BertSpacyTokenAligner,
-            max_sequence_length: Optional[int] = None) -> Tuple[RawData, int]:
+            max_sequence_length: Optional[int] = None,
+            use_meta_train: bool = False) -> Tuple[RawData, int]:
         example_manager = CorpusExampleUnifier(bert_spacy_token_aligner, max_sequence_length)
-        result = self._load(example_manager)
+        result = self._load(example_manager, use_meta_train)
         CorpusBase._populate_default_field_specs(result)
         return result, example_manager.true_max_sequence_length
 
     def _run_info(self, index_run):
         return -1
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         raise NotImplementedError('{} does not implement _load'.format(type(self)))

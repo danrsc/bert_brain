@@ -4,7 +4,7 @@ from typing import Union, Tuple, Sequence, Optional, Callable
 import numpy as np
 from torch import Tensor, nn
 
-from transformers.modeling_bert import gelu_new as gelu
+from .gelu_new_module import gelu_new as gelu
 
 from .graph_part import GraphPart
 

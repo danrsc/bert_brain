@@ -25,8 +25,10 @@ class PreparedData:
     train: Optional[Sequence[InputFeatures]] = None
     validation: Optional[Sequence[InputFeatures]] = None
     test: Optional[Sequence[InputFeatures]] = None
+    meta_train: Optional[Sequence[InputFeatures]] = None
     data: Optional[Mapping[str, KindData]] = None
     field_specs: Optional[Mapping[str, FieldSpec]] = None
+    text_labels: Optional[Mapping[str, Sequence[str]]] = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ class PreparedDataView:
     train: Optional[Sequence[InputFeatures]] = None
     validation: Optional[Sequence[InputFeatures]] = None
     test: Optional[Sequence[InputFeatures]] = None
+    meta_train: Optional[Sequence[InputFeatures]] = None
     data: Optional[np.array] = None
     word_ids: Optional[np.array] = None
 
@@ -48,6 +51,7 @@ def _make_prepared_data_view(prepared_data: PreparedData, response_key: str) -> 
         train=_make_examples_view(prepared_data.train, response_key),
         validation=_make_examples_view(prepared_data.validation, response_key),
         test=_make_examples_view(prepared_data.test, response_key),
+        meta_train=_make_examples_view(prepared_data.meta_train, response_key),
         data=prepared_data.data[response_key].data,
         word_ids=prepared_data.data[response_key].word_ids)
 
@@ -73,7 +77,7 @@ def _reconcile_view_examples(
 
 def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, response_key: str):
     if view.data is None:
-        for ex in chain(prepared_data.train, prepared_data.validation, prepared_data.test):
+        for ex in chain(prepared_data.train, prepared_data.validation, prepared_data.test, prepared_data.meta_train):
             # noinspection PyUnresolvedReferences
             del ex.data_ids[response_key]
         del prepared_data.data[response_key]
@@ -81,6 +85,7 @@ def _reconcile_view(prepared_data: PreparedData, view: PreparedDataView, respons
         is_modified = _reconcile_view_examples(prepared_data.train, view.train, response_key)
         is_modified = is_modified or _reconcile_view_examples(prepared_data.validation, view.validation, response_key)
         is_modified = is_modified or _reconcile_view_examples(prepared_data.test, view.test, response_key)
+        is_modified = is_modified or _reconcile_view_examples(prepared_data.meta_train, view.meta_train, response_key)
         if is_modified and prepared_data.data[response_key].word_ids is not None:
             is_word_ids_updated = len(prepared_data.data[response_key].word_ids) != len(view.word_ids)
             if not is_word_ids_updated:
@@ -117,6 +122,7 @@ SplitFunctionT = Callable[
     Tuple[
         Optional[Sequence[InputFeatures]],
         Optional[Sequence[InputFeatures]],
+        Optional[Sequence[InputFeatures]],
         Optional[Sequence[InputFeatures]]]]
 
 
@@ -134,6 +140,7 @@ class DataPreparer:
     preprocess_dict: Optional[PhasePreprocessorMappingT]
     split_function: Optional[SplitFunctionT] = None
     preprocess_fork_fn: Optional[PreprocessForkFnT] = None
+    use_meta_train: bool = False
     forked_response_keys: Optional[Sequence[Tuple[str, str]]] = field(init=False)
 
     def __post_init__(self):
@@ -218,18 +225,27 @@ class DataPreparer:
                 _copy_examples(raw_data.input_examples),
                 _copy_examples(raw_data.validation_input_examples),
                 _copy_examples(raw_data.test_input_examples),
+                _copy_examples(raw_data.meta_train_input_examples),
                 OrderedDict(raw_data.response_data),
-                field_specs=raw_data.field_specs)
+                field_specs=raw_data.field_specs,
+                text_labels=type(raw_data.text_labels)(raw_data.text_labels)
+                if raw_data.text_labels is not None else None)
         else:
-            train_input_examples, validation_input_examples, test_input_examples = self.split_function(
-                raw_data=raw_data, random_state=random_state)
+            (train_input_examples,
+             validation_input_examples,
+             test_input_examples,
+             meta_input_examples) = self.split_function(
+                raw_data=raw_data, random_state=random_state, use_meta_train=self.use_meta_train)
 
             result = PreparedData(
                 _copy_examples(train_input_examples),
                 _copy_examples(validation_input_examples),
                 _copy_examples(test_input_examples),
+                _copy_examples(meta_input_examples),
                 OrderedDict(raw_data.response_data),
-                field_specs=raw_data.field_specs)
+                field_specs=raw_data.field_specs,
+                text_labels=type(raw_data.text_labels)(raw_data.text_labels)
+                if raw_data.text_labels is not None else None)
 
         phases = None
         phase_change_steps = dict()
@@ -239,6 +255,8 @@ class DataPreparer:
             if forked_name in result.data:
                 raise ValueError('Duplicate name: {}'.format(forked_name))
             result.data[forked_name] = result.data[response_k].copy()
+            if result.text_labels is not None and response_k in result.text_labels:
+                result.text_labels[forked_name] = list(result.text_labels[response_k])
             for ex in chain(result.train, result.validation, result.test):
                 # noinspection PyUnresolvedReferences
                 ex.data_ids[forked_name] = np.copy(ex.data_ids[response_k])

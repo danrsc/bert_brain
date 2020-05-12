@@ -1,13 +1,18 @@
 import dataclasses
 from collections import OrderedDict
 from typing import Optional, Container, Iterable, Callable, Mapping
+import logging
 
 import numpy as np
+from scipy.special import softmax as scipy_softmax
 import torch
 import torch.utils.data
 
 from .data_id_dataset import DataIdDataset
 from .data_id_multidataset import DataIdMultiDataset
+
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -26,7 +31,9 @@ __all__ = [
     'BatchOneTaskTaskPermutedSampler',
     'BatchOneTaskManualWeightSamplerFactory',
     'BatchOneTaskManualWeightSampler',
-    'BatchOneTaskEvalSampler']
+    'BatchOneTaskEvalSampler',
+    'BatchOneTaskMultiDifferentiableDataSelectionSampler',
+    'BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory']
 
 
 class SamplerFactory:
@@ -551,3 +558,155 @@ class BatchOneTaskEvalSampler(torch.utils.data.Sampler):
 
     def __len__(self):
         return int(self.true_div_len())
+
+
+@dataclasses.dataclass(frozen=True)
+class BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory(SamplerFactory):
+    batches_per_epoch: int
+    update_frequency_in_batches: int = 100
+    initial_sample_rate_proportional_temperature: int = 1
+    learning_rate: Optional[float] = None
+    preferences: Optional[Mapping[str, float]] = None
+
+    @classmethod
+    def is_one_task_at_a_time_sampler(cls):
+        return True
+
+    @classmethod
+    def is_batch_sampler(cls):
+        return True
+
+    def make_sampler(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            task_filter: Optional[Container[str]] = None):
+        return BatchOneTaskMultiDifferentiableDataSelectionSampler(
+            data_source, batch_size, self.batches_per_epoch, task_filter,
+            self.initial_sample_rate_proportional_temperature,
+            self.learning_rate,
+            self.preferences)
+
+
+class BatchOneTaskMultiDifferentiableDataSelectionSampler(torch.utils.data.Sampler):
+
+    def __init__(
+            self,
+            data_source: DataIdMultiDataset,
+            batch_size: int,
+            batches_per_epoch: int,
+            task_filter: Optional[Container[str]] = None,
+            initial_sample_rate_proportional_temperature: int = 1,
+            learning_rate: Optional[float] = None,
+            preferences: Optional[Mapping[str, float]] = None):
+        super().__init__(data_source)
+        self._data_source = data_source
+        self.task_indices = data_source.task_indices()
+        if task_filter is not None:
+            self.task_indices = type(self.task_indices)(
+                (k, self.task_indices[k]) for k in self.task_indices
+                if k in task_filter or data_source.response_data_kind(k) in task_filter)
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
+                batch_size <= 0:
+            raise ValueError("batch_size should be a positive integer value, "
+                             "but got batch_size={}".format(batch_size))
+        if not isinstance(batches_per_epoch, int) or isinstance(batches_per_epoch, bool) or \
+                batches_per_epoch <= 0:
+            raise ValueError("batches_per_epoch should be a positive integer value, "
+                             "but got batch_per_epoch={}".format(batches_per_epoch))
+        self.batch_size = batch_size
+        self.batches_per_epoch = batches_per_epoch
+        self.learning_rate = learning_rate
+        self._task_keys = [task for task in self.task_indices]
+        if preferences is not None:
+            self._preferences = OrderedDict()
+            for k in self._task_keys:
+                if k in preferences:
+                    self._preferences[k] = preferences[k]
+                elif data_source.response_data_kind(k) in preferences:
+                    self._preferences[k] = preferences[data_source.response_data_kind(k)]
+                elif data_source.data_set_key_for_field(k) in preferences:
+                    self._preferences[k] = preferences[data_source.data_set_key_for_field(k)]
+                else:
+                    self._preferences[k] = 1
+        else:
+            self._preferences = OrderedDict((k, 1) for k in self._task_keys)
+        self._temperature = 1
+        self._sample_rate_logits = np.zeros(len(self._task_keys))
+
+        sample_rates = np.array(list(len(self.task_indices[k]) for k in self._task_keys))
+        sample_rates = sample_rates / np.sum(sample_rates)
+        sample_rates = np.power(sample_rates, 1 / initial_sample_rate_proportional_temperature)
+        sample_rates = torch.tensor(sample_rates / np.sum(sample_rates))
+
+        # temporary parameter to initialize to target sample rates
+        sample_rate_logits = torch.nn.Parameter(torch.tensor(self._sample_rate_logits), requires_grad=True)
+
+        optimizer = torch.optim.SGD(params=[sample_rate_logits], lr=1)
+
+        loss = None
+        while loss is None or loss > 0.000001:
+            sm_rates = torch.nn.functional.softmax(sample_rate_logits, dim=-1)
+            loss = torch.nn.functional.mse_loss(sm_rates, sample_rates)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            loss = loss.item()
+
+        self._sample_rates = torch.nn.functional.softmax(sample_rate_logits, dim=-1).detach().numpy()
+        self._sample_rate_logits = sample_rate_logits.detach().numpy()
+
+    def __iter__(self):
+        idx = 0
+        while self.batches_per_epoch <= 0 or idx < self.batches_per_epoch:
+            task = self._sample_task()
+            task_sample = np.random.randint(0, len(self.task_indices[task]), self.batch_size)
+            batch = list()
+            for i in task_sample:
+                if len(batch) + len(self.task_indices[task][i]) > self.batch_size:
+                    if len(batch) == 0:
+                        batch.append(self.task_indices[task][i])
+                    break
+                batch.append(self.task_indices[task][i])
+            yield np.concatenate(batch)
+            idx += 1
+
+    def _sample_task(self):
+        return np.random.choice(self._task_keys, p=self._sample_rates)
+
+    def update_rate_logits(self, rate_logits):
+        if len(rate_logits) != len(self._task_keys):
+            raise ValueError('rate_logits length does not match task keys')
+        logits = list()
+        for task_key in self._task_keys:
+            if task_key not in rate_logits:
+                raise ValueError('rate_logits is missing task_key: {}'.format(task_key))
+            logits.append(rate_logits[task_key])
+        self._sample_rate_logits = np.array(logits)
+        new_sample_rates = scipy_softmax(self._sample_rate_logits)
+        diff = self._sample_rates - new_sample_rates
+        if self._temperature != 1:
+            new_sample_rates = np.power(new_sample_rates, 1 / self._temperature)
+            new_sample_rates = new_sample_rates / np.sum(new_sample_rates)
+        self._sample_rates = new_sample_rates
+        logger.info('new sample rates: {}'.format(self._sample_rates))
+        logger.info('sample rates diff: {}'.format(diff))
+
+    @property
+    def temperature(self):
+        return self._temperature
+
+    def change_temperature(self, temperature):
+        self._temperature = temperature
+
+    def rate_logits(self):
+        return OrderedDict(zip(self._task_keys, self._sample_rate_logits))
+
+    def preferences(self):
+        return OrderedDict(self._preferences)
+
+    def true_div_len(self):
+        return self.batches_per_epoch
+
+    def __len__(self):
+        return self.batches_per_epoch

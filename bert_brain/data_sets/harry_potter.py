@@ -1,7 +1,7 @@
 import os
 import re
 from collections import OrderedDict
-from itertools import combinations
+from itertools import permutations
 import dataclasses
 from typing import Mapping, Sequence, Optional, Union, ClassVar, Tuple
 
@@ -42,6 +42,7 @@ class _DataKindProperties:
     cluster_key_regex_format: Optional[str] = None
     mixing_key_regex_format: Optional[str] = None
     bias_key_regex_format: Optional[str] = None
+    indicator_local_maxima_regex_format: Optional[str] = None
     joint_data_regex_format: Optional[str] = None
     subject_data_regex_format: Optional[str] = None
 
@@ -224,7 +225,11 @@ class HarryPotterCorpus(CorpusBase):
                 'harry_potter_fmri_rank_cca_ica.npz', is_preprocessed=True,
                 mixing_key_regex_format='mixing_{subject}_hold_out_{hold_out}',
                 bias_key_regex_format='bias_{subject}_hold_out_{hold_out}',
-                joint_data_regex_format='data_hold_out_{hold_out}')
+                joint_data_regex_format='data_hold_out_{hold_out}'),
+            'local_maxima_of_data': _DataKindProperties(
+                'harry_potter_fmri_rank_local_maxima_of_data.npz', is_preprocessed=True),
+            'local_maxima_of_projected': _DataKindProperties(
+                'harry_potter_fmri_rank_local_maxima_of_projected.npz', is_preprocessed=True)
         }
         if fmri_kind not in kind_properties:
             raise ValueError('Unknown fmri_kind: {}'.format(fmri_kind))
@@ -289,7 +294,7 @@ class HarryPotterCorpus(CorpusBase):
             return index_run % 4
         return -1
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
 
         if (HarryPotterCorpus._meg_kind_properties(self.meg_kind).is_preprocessed
                 != HarryPotterCorpus._fmri_kind_properties(self.fmri_kind).is_preprocessed
@@ -367,6 +372,19 @@ class HarryPotterCorpus(CorpusBase):
                     validation.append(ex)
                 else:
                     train.append(ex)
+
+            if use_meta_train:
+                fmri_runs = [metadata['fmri_runs'][ex.unique_id] for ex in train]
+                max_run = max(fmri_runs)
+                t = list()
+                meta_train = list()
+                for ex, fmri_run in zip(train, fmri_runs):
+                    if fmri_run == max_run:
+                        meta_train.append(ex)
+                    else:
+                        t.append(ex)
+                train = t
+
             return RawData(
                 input_examples=train,
                 validation_input_examples=validation,
@@ -379,6 +397,7 @@ class HarryPotterCorpus(CorpusBase):
             response_data=data,
             metadata=metadata,
             validation_proportion_of_train=0.1,
+            meta_proportion_of_train=0.2 if use_meta_train else 0.,
             test_proportion=0.)
 
     def _read_preprocessed_meg(self, example_manager: CorpusExampleUnifier, examples):
@@ -744,6 +763,31 @@ class HarryPotterCorpus(CorpusBase):
 
             return mixing, bias
 
+    def read_preprocessed_fmri_indicator_local_maxima(self):
+        kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
+        if not kind_properties.is_preprocessed:
+            raise ValueError('{} is not a preprocessed fmri_kind'.format(self.fmri_kind))
+        indicator_local_maxima_regex_format = kind_properties.indicator_local_maxima_regex_format
+        if indicator_local_maxima_regex_format is None:
+            indicator_local_maxima_regex_format = 'indicator_local_maxima_{subject}_hold_out_{hold_out}'
+
+        with np.load(self.fmri_path, allow_pickle=True) as loaded:
+            assert (self.run_info >= 0)
+            maxima_keys, subjects, blocks = type(self)._match_keys(indicator_local_maxima_regex_format, loaded)
+            subjects = list(sorted(subjects))
+            blocks = list(sorted(blocks))
+            held_out_block = blocks[self.run_info]
+
+            if self.fmri_subjects is not None:
+                subjects = [s for s in subjects if s in self.fmri_subjects]
+
+            indicator_local_maxima = OrderedDict()
+            for subject in subjects:
+                if (subject, held_out_block) in maxima_keys:
+                    indicator_local_maxima[subject] = loaded[maxima_keys[(subject, held_out_block)]]
+
+            return indicator_local_maxima
+
     def _read_harry_potter_fmri_files(self):
         kind_properties = HarryPotterCorpus._fmri_kind_properties(self.fmri_kind)
         if kind_properties.is_preprocessed:
@@ -1047,34 +1091,46 @@ class HarryPotterLeaveOutFmriRun:
     shuffle: bool = True
     make_test: bool = False
 
-    def __call__(self, raw_data, random_state=None):
+    def __call__(self, raw_data, random_state=None, use_meta_train=False):
         if raw_data.is_pre_split:
             raise ValueError(
                 'Misconfiguration. The data has already been split, but harry_potter_leave_out_fmri_run is active')
 
         runs = raw_data.metadata['fmri_runs']
         unique_runs = np.unique(runs)
+        meta_run = None
         if self.make_test:
-            folds = list(combinations(unique_runs, 2))
-            index_validation, index_test = folds[self.index_variation_run % len(folds)]
-            if self.index_variation_run % (len(folds) * 2) >= len(folds):
-                index_test, index_validation = index_validation, index_test
+            if use_meta_train:
+                folds = list(permutations(unique_runs, 3))
+                index_validation, index_test, index_meta = folds[self.index_variation_run % len(folds)]
+                meta_run = unique_runs[index_meta]
+            else:
+                folds = list(permutations(unique_runs, 2))
+                index_validation, index_test = folds[self.index_variation_run % len(folds)]
             validation_run = unique_runs[index_validation]
             test_run = unique_runs[index_test]
         else:
             test_run = None
-            index_validation = self.index_variation_run % len(unique_runs)
+            if use_meta_train:
+                folds = list(permutations(unique_runs, 2))
+                index_validation, index_meta = folds[self.index_variation_run % len(folds)]
+                meta_run = unique_runs[index_meta]
+            else:
+                index_validation = self.index_variation_run % len(unique_runs)
             validation_run = unique_runs[index_validation]
 
         train_examples = list()
         validation_examples = list()
         test_examples = list()
+        meta_examples = list()
 
         for example in raw_data.input_examples:
             if runs[example.unique_id] == validation_run:
                 validation_examples.append(example)
             elif runs[example.unique_id] == test_run:
                 test_examples.append(example)
+            elif runs[example.unique_id] == meta_run:
+                meta_examples.append(example)
             else:
                 train_examples.append(example)
         if self.shuffle:
@@ -1082,11 +1138,13 @@ class HarryPotterLeaveOutFmriRun:
                 random_state.shuffle(train_examples)
                 random_state.shuffle(validation_examples)
                 random_state.shuffle(test_examples)
+                random_state.shuffle(meta_examples)
             else:
                 np.random.shuffle(train_examples)
                 np.random.shuffle(validation_examples)
                 np.random.shuffle(test_examples)
-        return train_examples, validation_examples, test_examples
+                np.random.shuffle(meta_examples)
+        return train_examples, validation_examples, test_examples, meta_examples
 
 
 def get_mask_for_subject(subject):

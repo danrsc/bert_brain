@@ -51,10 +51,16 @@ class StanfordSentimentTreebank(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
         label_list = list()
         train_examples = StanfordSentimentTreebank._read_labels(
             label_list, example_manager, os.path.join(self.path, 'train.tsv'))
+        meta_train = None
+        if use_meta_train:
+            from sklearn.model_selection import train_test_split
+            idx_train, idx_meta_train = train_test_split(np.arange(len(train_examples)), test_size=0.2)
+            meta_train = [train_examples[i] for i in idx_meta_train]
+            train_examples = [train_examples[i] for i in idx_train]
         validation_examples = StanfordSentimentTreebank._read_labels(
             label_list, example_manager, os.path.join(self.path, 'dev.tsv'))
 
@@ -65,5 +71,6 @@ class StanfordSentimentTreebank(CorpusBase):
             train_examples,
             response_data={type(self).response_key(): KindData(ResponseKind.generic, labels)},
             validation_input_examples=validation_examples,
+            meta_train_input_examples=meta_train,
             is_pre_split=True,
             field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

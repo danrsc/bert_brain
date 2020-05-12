@@ -71,7 +71,8 @@ def _run_occlusion_for_variation(
             settings.preprocess_fork_fn,
             False,
             paths,
-            settings.max_sequence_length))
+            settings.max_sequence_length,
+            settings.create_meta_train_dataset))
 
     validation_data = DataIdMultiDataset(
         'validation',
@@ -88,7 +89,7 @@ def _run_occlusion_for_variation(
         collate_fn=collate_fn,
         num_workers=1)
 
-    _, _, _, loss_handlers = setup_prediction_heads_and_losses(settings, validation_data)
+    _, _, _, _, loss_handlers = setup_prediction_heads_and_losses(settings, validation_data)
 
     for batch in batch_iterator:
 

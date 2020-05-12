@@ -20,7 +20,11 @@ __all__ = [
 
 
 def _load_probing_task(
-        example_manager: CorpusExampleUnifier, path: str, response_key: str, num_classes: int) -> RawData:
+        example_manager: CorpusExampleUnifier,
+        path: str,
+        response_key: str,
+        num_classes: int,
+        use_meta_train: bool) -> RawData:
     train_examples = list()
     validation_examples = list()
     test_examples = list()
@@ -68,13 +72,22 @@ def _load_probing_task(
     labels = np.array(labels, dtype=np.float64)
     labels.setflags(write=False)
 
+    meta_train = None
+    if use_meta_train:
+        from sklearn.model_selection import train_test_split
+        idx_train, idx_meta_train = train_test_split(np.arange(len(train_examples)), test_size=0.2)
+        meta_train = [train_examples[i] for i in idx_meta_train]
+        train_examples = [train_examples[i] for i in idx_train]
+
     return RawData(
         train_examples,
         response_data={response_key: KindData(ResponseKind.generic, labels)},
         validation_input_examples=validation_examples,
         test_input_examples=test_examples,
+        meta_train_input_examples=meta_train,
         is_pre_split=True,
-        field_specs={response_key: FieldSpec(is_sequence=False)})
+        field_specs={response_key: FieldSpec(is_sequence=False)},
+        text_labels={response_key: list(sorted(unique_labels, key=lambda k: unique_labels[k]))})
 
 
 @dataclass(frozen=True)
@@ -89,8 +102,9 @@ class BigramShift(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -105,8 +119,9 @@ class CoordinationInversion(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -121,8 +136,9 @@ class ObjectNumber(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -137,8 +153,9 @@ class SemanticOddManOut(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -153,8 +170,9 @@ class SentenceLength(CorpusBase):
     def num_classes(cls) -> int:
         return 6
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -169,8 +187,9 @@ class SubjectNumber(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -185,8 +204,9 @@ class TopConstituents(CorpusBase):
     def num_classes(cls) -> int:
         return 20
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -201,8 +221,9 @@ class TreeDepth(CorpusBase):
     def num_classes(cls) -> int:
         return 7
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -217,8 +238,9 @@ class VerbTense(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -233,5 +255,6 @@ class WordContent(CorpusBase):
     def num_classes(cls) -> int:
         return 1000
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), use_meta_train)

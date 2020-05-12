@@ -965,3 +965,154 @@ def joint_cluster_maxima_residual(maxima_residuals, data, num_components, which_
     result = OrderedDict((k, result[k]) for k in maxima_residuals)
     components = OrderedDict((k, components[k]) for k in sorted(components))
     return components, result
+
+
+def _fit_common_direction(train, num_components, batch_size=32, steps=256, step_size=.01, device=None):
+    import torch
+    from torch.nn.functional import linear
+    from torch.nn.parameter import Parameter
+    from torch.utils.data import DataLoader, TensorDataset
+    import gc
+
+    if device is None:
+        from bert_brain import cuda_most_free_device
+        device = cuda_most_free_device()
+
+    weight = Parameter(torch.Tensor(num_components, train[0].shape[1]), requires_grad=True)
+    weight = weight / torch.sqrt(torch.sum(weight ** 2, dim=1))
+    weight = weight.to(device)
+
+    train = [(t - np.mean(t, axis=0, keepdims=True)) / np.std(t, axis=0, keepdims=True) for t in train]
+    train = list(
+        DataLoader(TensorDataset(torch.from_numpy(t)), batch_size, shuffle=True, drop_last=False) for t in train)
+    train_iterables = list(iter(t) for t in train)
+
+    for step in range(steps):
+        gradients = list()
+        for index_task in range(len(train_iterables)):
+            try:
+                batch = next(train_iterables[index_task])
+            except StopIteration:
+                train_iterables[index_task] = iter(train[index_task])
+                batch = next(train_iterables[index_task])
+            batch = batch.to(device)
+            prediction = linear(linear(batch, weight), weight.t())
+            loss = torch.mean((prediction - batch) ** 2)
+            print(step, loss)
+            loss.backward()
+            gradients.append(weight.grad.detach().clone())
+            weight.grad.zero_()
+
+        gradients = torch.stack(gradients)
+        flat_gradients = torch.reshape(gradients, (len(gradients), -1))
+        norms = torch.sqrt(torch.sum(flat_gradients ** 2, dim=1))
+        dot = torch.matmul(flat_gradients, flat_gradients.t())
+        similarity = dot / (torch.unsqueeze(norms, 1) * torch.unsqueeze(norms, 0))
+
+        for i in range(len(gradients)):
+            for j in np.random.permutation(len(gradients)):
+                if j == i:
+                    continue
+                if similarity[i, j] < 0:
+                    # subtract projection of i onto j
+                    gradients[i] = gradients[i] - dot[i, j] / norms[j] * gradients[j]
+        gradient = torch.sum(gradients, dim=0)
+        weight.requires_grad = False
+        weight = weight - step_size * gradient
+        weight = weight / torch.sqrt(torch.sum(weight ** 2, dim=1))
+        weight.requires_grad = True
+        weight.grad.zero_()
+
+    weight = weight.detach().cpu().numpy()
+    gc.collect()
+    torch.cuda.empty_cache()
+    return weight
+
+
+def common_direction_descent(indicator_local_maxima_dict, data, num_components, which_hold_out=None):
+    grouped_keys = dict()
+    for key in indicator_local_maxima_dict:
+        if isinstance(key, tuple):
+            _, hold_out = key
+        else:
+            hold_out = -1
+        if which_hold_out is not None and hold_out != which_hold_out:
+            continue
+        if hold_out not in grouped_keys:
+            grouped_keys[hold_out] = list()
+        grouped_keys[hold_out].append(key)
+
+    reconstruction_weights = dict()
+    reconstruction_bias = dict()
+    correlations = dict()
+    reduced = dict()
+    for hold_out in grouped_keys:
+        valid_rows = None
+        joint_compressed_data = None
+
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+
+            if joint_compressed_data is None:
+                joint_compressed_data = list()
+                for _ in range(len(data[subject])):
+                    joint_compressed_data.append(list())
+
+            v = list(_valid_rows(r) for r in data[subject])
+            if valid_rows is None:
+                valid_rows = v
+            else:
+                if len(valid_rows) != len(v):
+                    raise ValueError('All subjects must have the same nan rows')
+                for v_, have in zip(v, valid_rows):
+                    if not np.array_equal(v_, have):
+                        raise ValueError('All subjects must have the same nan rows')
+
+            for i, (r, v) in enumerate(zip(data[subject], valid_rows)):
+                joint_compressed_data[i].append(r[v][:, indicator_local_maxima_dict[key]])
+
+        for i in range(len(joint_compressed_data)):
+            joint_compressed_data[i] = np.concatenate(joint_compressed_data[i], axis=1)
+
+        joint_train = list(d for i, d in enumerate(joint_compressed_data) if i != hold_out)
+
+        weight = _fit_common_direction(joint_train, num_components)
+
+        reduced[hold_out] = list(d @ weight.T for d in joint_compressed_data)
+        train_reduced = np.concatenate(list(r for i, r in enumerate(reduced[hold_out]) if i != hold_out))
+
+        # now find the weights to approximate the whole brain
+        for key in grouped_keys[hold_out]:
+            if isinstance(key, tuple):
+                subject, _ = key
+            else:
+                subject = key
+
+            train_full = np.concatenate(
+                list(r[v] for i, (r, v) in enumerate(zip(data[subject], valid_rows)) if i != hold_out))
+
+            x = np.concatenate([train_reduced, np.ones((len(train_reduced), 1), dtype=train_reduced.dtype)], axis=1)
+            solution, _, _, _ = np.linalg.lstsq(x, train_full, rcond=None)
+            # separate weights from bias
+            reconstruction_weights[hold_out, subject] = solution[:, :-1]
+            reconstruction_bias[hold_out, subject] = solution[:, -1]
+            validation_prediction = \
+                reduced[hold_out][hold_out] @ reconstruction_weights[hold_out, subject] \
+                + reconstruction_bias[hold_out, subject]
+            validation = data[subject][hold_out][valid_rows[hold_out]]
+            validation_prediction = ((validation_prediction - np.mean(validation_prediction, axis=0, keepdims=True))
+                                     / np.std(validation_prediction, axis=0, keepdims=True))
+            validation = ((validation - np.mean(validation, axis=0, keepdims=True))
+                          / np.std(validation, axis=0, keepdims=True))
+            correlations[hold_out, subject] = np.mean(validation_prediction * validation, axis=0)
+
+        reduced[hold_out] = list(_fill_rows(r, v) for r, v in zip(reduced[hold_out], valid_rows))
+
+    reduced = OrderedDict((k, reduced[k]) for k in sorted(reduced))
+    reconstruction_weights = OrderedDict((k, reconstruction_weights[k]) for k in sorted(reconstruction_weights))
+    reconstruction_bias = OrderedDict((k, reconstruction_bias[k]) for k in sorted(reconstruction_bias))
+    correlations = OrderedDict((k, correlations[k]) for k in sorted(correlations))
+    return reduced, reconstruction_weights, reconstruction_bias, correlations

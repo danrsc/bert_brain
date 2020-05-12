@@ -67,7 +67,8 @@ def _load_multi_binary_label_probing_task(
         path: str,
         response_key: str,
         validation_path: Optional[str] = None,
-        test_path: Optional[str] = None) -> RawData:
+        test_path: Optional[str] = None,
+        use_meta_train: bool = False) -> RawData:
     label_choices = set()
     named_span_encoder = NamedSpanEncoder()
 
@@ -121,11 +122,20 @@ def _load_multi_binary_label_probing_task(
          KindData(ResponseKind.generic, np.array(output_labels[k], dtype=np.float64))) for k in output_labels)
     for k in output_labels:
         output_labels[k].data.setflags(write=False)
+
+    meta_train = None
+    if use_meta_train:
+        from sklearn.model_selection import train_test_split
+        idx_train, idx_meta_train = train_test_split(np.arange(len(train_examples)), test_size=0.2)
+        meta_train = [train_examples[i] for i in idx_meta_train]
+        train_examples = [train_examples[i] for i in idx_train]
+
     return RawData(
         train_examples,
         response_data=output_labels,
         validation_input_examples=validation_examples,
         test_input_examples=test_examples,
+        meta_train_input_examples=meta_train,
         is_pre_split=True,
         field_specs=dict((k, FieldSpec(is_sequence=False)) for k in output_labels))
 
@@ -137,7 +147,8 @@ def _load_probing_task(
         num_classes: int,
         label_transform: Optional[Callable[[str], str]] = None,
         validation_path: Optional[str] = None,
-        test_path: Optional[str] = None) -> RawData:
+        test_path: Optional[str] = None,
+        use_meta_train: bool = False) -> RawData:
 
     train_examples = list()
     validation_examples = list()
@@ -185,13 +196,22 @@ def _load_probing_task(
     labels = np.array(labels, dtype=np.float64)
     labels.setflags(write=False)
 
+    meta_train = None
+    if use_meta_train:
+        from sklearn.model_selection import train_test_split
+        idx_train, idx_meta_train = train_test_split(np.arange(len(train_examples)), test_size=0.2)
+        meta_train = [train_examples[i] for i in idx_meta_train]
+        train_examples = [train_examples[i] for i in idx_train]
+
     return RawData(
         train_examples,
         response_data={response_key: KindData(ResponseKind.generic, labels)},
         validation_input_examples=validation_examples,
         test_input_examples=test_examples,
+        meta_train_input_examples=meta_train,
         is_pre_split=True,
-        field_specs={response_key: FieldSpec(is_sequence=False)})
+        field_specs={response_key: FieldSpec(is_sequence=False)},
+        text_labels={response_key: list(sorted(unique_labels, key=lambda k: unique_labels[k]))})
 
 
 @dataclass(frozen=True)
@@ -210,8 +230,10 @@ class PartOfSpeechConll2012(CorpusBase):
     def num_spans(cls) -> int:
         return 1
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -291,9 +313,10 @@ class SimplifiedPartOfSpeechConll2012(CorpusBase):
     def simplify_pos(cls, pos: str) -> str:
         return cls._pos_map[pos]
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_probing_task(
-            example_manager, self.path, type(self).response_key(), type(self).num_classes(), type(self).simplify_pos)
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(), type(self).simplify_pos,
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -312,8 +335,10 @@ class ConstituentsConll2012(CorpusBase):
     def num_spans(cls) -> int:
         return 1
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -332,8 +357,10 @@ class SemanticRoleLabelConll2012(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -352,8 +379,10 @@ class NamedEntityRecognitionConll2012(CorpusBase):
     def num_spans(cls) -> int:
         return 1
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -372,8 +401,10 @@ class CoreferenceResolutionConll2012(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
-        return _load_probing_task(example_manager, self.path, type(self).response_key(), type(self).num_classes())
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
+        return _load_probing_task(
+            example_manager, self.path, type(self).response_key(), type(self).num_classes(),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -392,14 +423,15 @@ class DependenciesEnglishWeb(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_probing_task(
             example_manager,
             os.path.join(self.path, 'en_ewt-ud-train.json'),
             type(self).response_key(),
             type(self).num_classes(),
             validation_path=os.path.join(self.path, 'en_ewt-ud-dev.json'),
-            test_path=os.path.join(self.path, 'en_ewt-ud-test.json'))
+            test_path=os.path.join(self.path, 'en_ewt-ud-test.json'),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -418,14 +450,15 @@ class DefinitePronounResolution(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_probing_task(
             example_manager,
             os.path.join(self.path, 'train.json'),
             type(self).response_key(),
             type(self).num_classes(),
             validation_path=os.path.join(self.path, 'dev.json'),
-            test_path=os.path.join(self.path, 'test.json'))
+            test_path=os.path.join(self.path, 'test.json'),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -444,14 +477,15 @@ class SemEval(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_probing_task(
             example_manager,
             os.path.join(self.path, 'train.0.85.json'),
             type(self).response_key(),
             type(self).num_classes(),
             validation_path=os.path.join(self.path, 'dev.json'),
-            test_path=os.path.join(self.path, 'test.json'))
+            test_path=os.path.join(self.path, 'test.json'),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -466,13 +500,14 @@ class SemanticProtoRoles1(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_multi_binary_label_probing_task(
             example_manager,
             os.path.join(self.path, 'spr1.train.json'),
             'spr1',
             validation_path=os.path.join(self.path, 'spr1.dev.json'),
-            test_path=os.path.join(self.path, 'spr1.test.json'))
+            test_path=os.path.join(self.path, 'spr1.test.json'),
+            use_meta_train=use_meta_train)
 
 
 @dataclass(frozen=True)
@@ -487,10 +522,11 @@ class SemanticProtoRoles2(CorpusBase):
     def num_spans(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         return _load_multi_binary_label_probing_task(
             example_manager,
             os.path.join(self.path, 'edges.train.json'),
             'spr2',
             validation_path=os.path.join(self.path, 'edges.dev.json'),
-            test_path=os.path.join(self.path, 'edges.test.json'))
+            test_path=os.path.join(self.path, 'edges.test.json'),
+            use_meta_train=use_meta_train)

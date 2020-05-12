@@ -186,6 +186,7 @@ class LinearContextualParameterGeneration(GraphPart):
                 with torch.no_grad():
                     norm = torch.norm(self._generated_weights[key].data, p=2, dim=-1, keepdim=True)
                     self._generated_weights[key].data /= norm
+                    setattr(self._generated_weights[key], 'no_decay', True)
                     self._scales[key] = nn.Parameter(torch.mean(norm, dim=0), requires_grad=True)
 
         self.embedding = torch.nn.Embedding(
@@ -295,6 +296,8 @@ class ContextualBottleneckSum(GraphPart):
                 context_embedding = torch.pow(context_embedding, 1 / temperature)
                 context_embedding = context_embedding / torch.sum(context_embedding)
         result[self.output_name] = nn.functional.linear(batch[self.bottleneck_source_name], context_embedding)
+        if len(result[self.output_name].size()) < 3:
+            result[self.output_name] = torch.unsqueeze(result[self.output_name], dim=2)
         return result
 
 

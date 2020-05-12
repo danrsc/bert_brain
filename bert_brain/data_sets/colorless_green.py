@@ -121,7 +121,7 @@ class ColorlessGreenCorpus(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
         english_web_paths = [
             os.path.join(self.path, 'en_ewt-ud-train.conllu'),
             os.path.join(self.path, 'en_ewt-ud-dev.conllu'),
@@ -140,7 +140,9 @@ class ColorlessGreenCorpus(CorpusBase):
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,
-            validation_proportion_of_train=0.1, field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
+            validation_proportion_of_train=0.1,
+            meta_proportion_of_train=0.2 if use_meta_train else 0,
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
 
 
 @dataclass(frozen=True)
@@ -155,7 +157,7 @@ class LinzenAgreementCorpus(CorpusBase):
     def num_classes(cls) -> int:
         return 2
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
 
         classes = _agreement_data(example_manager, _iterate_linzen(self.path), type(self).response_key())
 
@@ -168,4 +170,6 @@ class LinzenAgreementCorpus(CorpusBase):
 
         return RawData(
             list(example_manager.iterate_examples(fill_data_keys=True)), classes,
-            validation_proportion_of_train=0.1, field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})
+            validation_proportion_of_train=0.1,
+            meta_proportion_of_train=0.2 if use_meta_train else 0,
+            field_specs={type(self).response_key(): FieldSpec(is_sequence=False)})

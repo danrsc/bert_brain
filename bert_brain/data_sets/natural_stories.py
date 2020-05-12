@@ -11,13 +11,13 @@ import numpy as np
 from scipy.io import loadmat
 
 from .corpus_base import CorpusBase, CorpusExampleUnifier, path_attribute_field
+from .spacy_token_meta import BertSpacyTokenAligner
 from .fmri_example_builders import FMRICombinedSentenceExamples, FMRIExample
-from .spacy_token_meta import make_tokenizer_model
 from .input_features import RawData, KindData, ResponseKind
 from .praat_textgrid import TextGrid
 
 
-__all__ = ['read_natural_story_codings', 'NaturalStoriesCorpus', 'NaturalStoriesLeaveStoriesOut',
+__all__ = ['NaturalStoriesCorpus', 'NaturalStoriesLeaveStoriesOut',
            'NaturalStoriesMakeLeaveStoriesOut']
 
 
@@ -339,7 +339,7 @@ class NaturalStoriesCorpus(CorpusBase):
             sentence_mode=self.froi_sentence_mode))
         super().__post_init__(index_run)
 
-    def _load(self, example_manager: CorpusExampleUnifier):
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool):
 
         data = OrderedDict()
         story_ids = list()
@@ -414,11 +414,16 @@ class NaturalStoriesCorpus(CorpusBase):
         for k in data:
             data[k].data.setflags(write=False)
 
-        return RawData(examples, data, test_proportion=0., validation_proportion_of_train=0.1,
-                       metadata=dict(
-                           story_ids=story_ids,
-                           froi_subject_stories_subjects=froi_subject_stories_subjects,
-                           froi_subject_stories_stories=froi_subject_stories_stories))
+        return RawData(
+            examples,
+            data,
+            test_proportion=0.,
+            validation_proportion_of_train=0.1,
+            meta_proportion_of_train=0.2 if use_meta_train else 0.,
+            metadata=dict(
+                story_ids=story_ids,
+                froi_subject_stories_subjects=froi_subject_stories_subjects,
+                froi_subject_stories_stories=froi_subject_stories_stories))
 
     def _read_reaction_time_batches(self):
         groups = dict()
@@ -673,30 +678,25 @@ class NaturalStoriesCorpus(CorpusBase):
                 allow_new_examples=False)
             assert(features is not None)
 
+    def read_natural_story_codings(self, bert_spacy_token_aligner: BertSpacyTokenAligner):
+        example_manager = CorpusExampleUnifier(bert_spacy_token_aligner, None)
 
-def read_natural_story_codings(directory_path, corpus_loader):
-
-    bert_tokenizer = corpus_loader.make_bert_tokenizer()
-    spacy_tokenize_model = make_tokenizer_model()
-
-    example_manager = CorpusExampleUnifier(spacy_tokenize_model, bert_tokenizer)
-
-    codings = _read_codings(directory_path)
-    result = dict()
-    for unique_id, sentence_word_records in enumerate(_read_story_sentences(directory_path)):
-        words = [wr.word for wr in sentence_word_records]
-        text = ' '.join(words)
-        input_features = example_manager.add_example(
-            tuple((w.item, w.zone) for w in sentence_word_records),
-            [w.word for w in sentence_word_records],
-            [w.sentence for w in sentence_word_records],
-            None,
-            None)
-        token_key = ' '.join(input_features.tokens)
-        if text not in codings:
-            raise ValueError('Unable to find codings for sentence: {}'.format(text))
-        result[token_key] = codings[text]
-    return result
+        codings = _read_codings(self.path)
+        result = dict()
+        for unique_id, sentence_word_records in enumerate(_read_story_sentences(self.path)):
+            words = [wr.word for wr in sentence_word_records]
+            text = ' '.join(words)
+            input_features = example_manager.add_example(
+                tuple((w.item, w.zone) for w in sentence_word_records),
+                [w.word for w in sentence_word_records],
+                [w.sentence for w in sentence_word_records],
+                None,
+                None)
+            token_key = ' '.join(input_features.tokens)
+            if text not in codings:
+                raise ValueError('Unable to find codings for sentence: {}'.format(text))
+            result[token_key] = codings[text]
+        return result
 
 
 @dataclasses.dataclass(frozen=True)
@@ -712,7 +712,7 @@ class NaturalStoriesLeaveStoriesOut:
     index_variation_run: int
     shuffle: bool = True
 
-    def __call__(self, raw_data, random_state=None):
+    def __call__(self, raw_data, random_state=None, use_meta_train=False):
         story_ids = raw_data.metadata['story_ids']
         stories_with_froi = set()
         stories_without_froi = set()
@@ -741,21 +741,39 @@ class NaturalStoriesLeaveStoriesOut:
         else:
             folds = list(itertools.product(stories_without_froi, stories_with_froi))
 
-        validation_stories = folds[self.index_variation_run % len(folds)]
-        if np.isscalar(validation_stories):
-            validation_stories = {validation_stories}
+        if use_meta_train:
+            hold_outs = list(itertools.permutations(range(len(folds)), 2))
+            index_validation, index_meta = hold_outs[self.index_variation_run % len(hold_outs)]
+            validation_stories = folds[index_validation]
+            if np.ndim(validation_stories) == 0:
+                validation_stories = {validation_stories}
+            else:
+                validation_stories = set(validation_stories)
+            meta_train_stories = folds[index_meta]
+            if np.ndim(meta_train_stories) == 0:
+                meta_train_stories = {meta_train_stories}
+            else:
+                meta_train_stories = set(meta_train_stories)
         else:
-            validation_stories = set(validation_stories)
+            validation_stories = folds[self.index_variation_run % len(folds)]
+            if np.ndim(validation_stories) == 0:
+                validation_stories = {validation_stories}
+            else:
+                validation_stories = set(validation_stories)
+            meta_train_stories = set()
 
         # noinspection PyTypeChecker
         validation_story_names = [item_to_story[s] for s in sorted(validation_stories)]
         logger.info('Validation stories: {}'.format(validation_story_names))
 
         train_examples = list()
+        meta_train_examples = list()
         validation_examples = list()
         for example in raw_data.input_examples:
             if story_ids[example.unique_id] in validation_stories:
                 validation_examples.append(example)
+            elif story_ids[example.unique_id] in meta_train_stories:
+                meta_train_examples.append(example)
             else:
                 train_examples.append(example)
 
@@ -763,12 +781,14 @@ class NaturalStoriesLeaveStoriesOut:
             if random_state is not None:
                 random_state.shuffle(train_examples)
                 random_state.shuffle(validation_examples)
+                random_state.shuffle(meta_train_examples)
             else:
                 np.random.shuffle(train_examples)
                 np.random.shuffle(validation_examples)
+                np.random.shuffle(meta_train_examples)
 
         test_examples = list()
-        return train_examples, validation_examples, test_examples
+        return train_examples, validation_examples, test_examples, meta_train_examples
 
 
 # library(plyr)

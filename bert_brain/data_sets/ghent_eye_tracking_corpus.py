@@ -17,7 +17,7 @@ class GhentEyeTrackingCorpus(CorpusBase):
     path: str = path_attribute_field('geco_path')
     active_fields: Optional[Sequence[str]] = None
 
-    def _load(self, example_manager: CorpusExampleUnifier) -> RawData:
+    def _load(self, example_manager: CorpusExampleUnifier, use_meta_train: bool) -> RawData:
         participants = dict()
         word_data = dict()
         id_to_word = dict()
@@ -130,7 +130,8 @@ class GhentEyeTrackingCorpus(CorpusBase):
             examples,
             response_data=dict(
                 (k.lower(), KindData(ResponseKind.geco, flat_word_data[k])) for k in flat_word_data),
-            validation_proportion_of_train=0.25)
+            validation_proportion_of_train=0.25,
+            meta_proportion_of_train=0.2 if use_meta_train else 0)
 
     def _run_info(self, index_run):
         # use 4-fold CV

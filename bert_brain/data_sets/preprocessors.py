@@ -157,7 +157,11 @@ class PreprocessDetrend:
     def __call__(self, loaded_data_tuple, metadata, random_state):
         train_examples = loaded_data_tuple.train
         if self.train_on_all:
-            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+            train_examples = chain(
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train)
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
@@ -167,7 +171,11 @@ class PreprocessDetrend:
                     self.metadata_example_group_by))
             data = np.copy(loaded_data_tuple.data)
             grouped_examples = _unsorted_group_by(
-                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                chain(
+                    loaded_data_tuple.train,
+                    loaded_data_tuple.validation,
+                    loaded_data_tuple.test,
+                    loaded_data_tuple.meta_train),
                 lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
             for group, group_examples in grouped_examples:
                 indicator_group = _indicator_from_examples(len(data), group_examples)
@@ -328,7 +336,11 @@ class PreprocessQuantileDigitize:
 
         train_examples = loaded_data_tuple.train
         if self.train_on_all:
-            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+            train_examples = chain(
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train)
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
@@ -338,7 +350,11 @@ class PreprocessQuantileDigitize:
                     self.metadata_example_group_by))
             data = np.copy(loaded_data_tuple.data)
             grouped_examples = _unsorted_group_by(
-                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                chain(
+                    loaded_data_tuple.train,
+                    loaded_data_tuple.validation,
+                    loaded_data_tuple.test,
+                    loaded_data_tuple.meta_train),
                 lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
             indicator_not_in_group = np.full(len(data), True)
             for group, group_examples in grouped_examples:
@@ -411,12 +427,15 @@ class PreprocessBaseline:
         loaded_data_tuple = replace(loaded_data_tuple, validation=clean_validation)
         _, _, clean_test = self._find_max_mins(loaded_data_tuple.test, keep_if_greater_than=max_train)
         loaded_data_tuple = replace(loaded_data_tuple, test=clean_test)
+        _, _, clean_meta_train = self._find_max_mins(loaded_data_tuple.meta_train, keep_if_greater_than=max_train)
+        loaded_data_tuple = replace(loaded_data_tuple, meta_train=clean_meta_train)
 
         data = np.copy(loaded_data_tuple.data)
 
         self._subtract_baseline(loaded_data_tuple.train, data)
         self._subtract_baseline(loaded_data_tuple.validation, data)
         self._subtract_baseline(loaded_data_tuple.test, data)
+        self._subtract_baseline(loaded_data_tuple.meta_train, data)
 
         return replace(loaded_data_tuple, data=data)
 
@@ -445,7 +464,11 @@ class PreprocessSequenceStandardize:
     def __call__(self, loaded_data_tuple, metadata, random_state):
 
         data = np.copy(loaded_data_tuple.data)
-        for ex in chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test):
+        for ex in chain(
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train):
 
             data_indices = ex.data_ids
             compute_indices = data_indices
@@ -567,7 +590,11 @@ class PreprocessStandardize:
 
         train_examples = loaded_data_tuple.train
         if self.train_on_all:
-            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+            train_examples = chain(
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train)
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
@@ -581,7 +608,11 @@ class PreprocessStandardize:
                     loaded_data_tuple.data.shape[:self.average_axis]
                     + loaded_data_tuple.data.shape[(self.average_axis + 1):], np.nan)
             grouped_examples = _unsorted_group_by(
-                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                chain(
+                    loaded_data_tuple.train,
+                    loaded_data_tuple.validation,
+                    loaded_data_tuple.test,
+                    loaded_data_tuple.meta_train),
                 lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
             for group, group_examples in grouped_examples:
                 indicator_group = _indicator_from_examples(len(data), group_examples)
@@ -667,7 +698,11 @@ class PreprocessRankData:
     def __call__(self, loaded_data_tuple, metadata, random_state):
         train_examples = loaded_data_tuple.train
         if self.train_on_all:
-            train_examples = chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test)
+            train_examples = chain(
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train)
         indicator_train = _indicator_from_examples(
             len(loaded_data_tuple.data), train_examples, self.stop_mode)
 
@@ -677,7 +712,11 @@ class PreprocessRankData:
                     self.metadata_example_group_by))
             data = np.copy(loaded_data_tuple.data)
             grouped_examples = _unsorted_group_by(
-                chain(loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test),
+                chain(
+                    loaded_data_tuple.train,
+                    loaded_data_tuple.validation,
+                    loaded_data_tuple.test,
+                    loaded_data_tuple.meta_train),
                 lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
             indicator_not_in_group = np.full(len(data), True)
             for group, group_examples in grouped_examples:
@@ -962,7 +1001,7 @@ class PreprocessRandomPair:
         metadata_indices = list()
         unique_id = 0
         new_word_ids = OrderedDict()
-        for split_name in ['train', 'validation', 'test']:
+        for split_name in ['train', 'validation', 'test', 'meta_train']:
             split = getattr(loaded_data_tuple, split_name)
             grouped_examples = _unsorted_group_by(
                 split, lambda ex: metadata[self.metadata_example_group_by][ex.unique_id])
@@ -1101,7 +1140,10 @@ class PreprocessToDisk:
         lengths = list()
         data_ids = list()
         for ex in chain(
-                loaded_data_tuple.train, loaded_data_tuple.validation, loaded_data_tuple.test):
+                loaded_data_tuple.train,
+                loaded_data_tuple.validation,
+                loaded_data_tuple.test,
+                loaded_data_tuple.meta_train):
             unique_ids.append(ex.unique_id)
             lengths.append(len(ex.data_ids))
             data_ids.extend(ex.data_ids)
