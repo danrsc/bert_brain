@@ -160,7 +160,7 @@ class KeyedLinear(KeyedBase):
                 hidden_modules.append(
                     LinearWithLayerNorm(
                         current_in,
-                        hidden_sizes[index_hidden],s
+                        hidden_sizes[index_hidden],
                         self.bias_hidden,
                         self.hidden_activation,
                         should_norm=self.should_norm_hidden))
