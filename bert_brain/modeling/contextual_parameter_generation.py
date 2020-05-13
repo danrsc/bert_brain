@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,11 +7,17 @@ import torch
 from torch import nn
 import torch.nn.functional
 
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
-__all__ = ['LinearContextualParameterGeneration', 'ContextualBottleneckSum', 'ContextAttention',
-           'LinearDecreasingTemperatureSchedule']
+__all__ = [
+    'LinearContextualParameterGeneration',
+    'LinearContextualParameterGenerationFactory',
+    'ContextualBottleneckSum',
+    'ContextualBottleneckSumFactory',
+    'ContextAttention',
+    'ContextAttentionFactory',
+    'LinearDecreasingTemperatureSchedule']
 
 
 class ContextualizedLinear(nn.Module):
@@ -77,6 +83,26 @@ def _calculate_fan_in_and_fan_out(shape):
     fan_out = num_output_fmaps * receptive_field_size
 
     return fan_in, fan_out
+
+
+@dataclass(frozen=True)
+class LinearContextualParameterGenerationFactory(GraphPartFactory):
+    context_id_source_name: str
+    num_contexts: Union[int, str]
+    embedding_size: int
+    inner_graph_part_factories: OrderedDict
+    use_softmax_embedding: bool = False
+    use_weight_norm: bool = False
+
+    def make_graph_part(self):
+        return LinearContextualParameterGeneration(
+            self.context_id_source_name,
+            self.num_contexts,
+            self.embedding_size,
+            OrderedDict(
+                (k, self.inner_graph_part_factories[k].make_graph_part()) for k in self.inner_graph_part_factories),
+            self.use_softmax_embedding,
+            self.use_weight_norm)
 
 
 class LinearContextualParameterGeneration(GraphPart):
@@ -237,6 +263,25 @@ class LinearDecreasingTemperatureSchedule:
         return max((1 - self.start_temp) * global_step / self.num_steps, 1)
 
 
+@dataclass(frozen=True)
+class ContextualBottleneckSumFactory(GraphPartFactory):
+    context_id_source_name: str
+    num_contexts: Union[int, str]
+    bottleneck_source_name: str
+    output_name: str
+    softmax_weights: bool = False
+    softmax_temperature_schedule_fn: Optional[Callable[[int], float]] = None
+
+    def make_graph_part(self):
+        return ContextualBottleneckSum(
+            self.context_id_source_name,
+            self.num_contexts,
+            self.bottleneck_source_name,
+            self.output_name,
+            self.softmax_weights,
+            self.softmax_temperature_schedule_fn)
+
+
 class ContextualBottleneckSum(GraphPart):
 
     def __init__(
@@ -299,6 +344,19 @@ class ContextualBottleneckSum(GraphPart):
         if len(result[self.output_name].size()) < 3:
             result[self.output_name] = torch.unsqueeze(result[self.output_name], dim=2)
         return result
+
+
+@dataclass(frozen=True)
+class ContextAttentionFactory(GraphPartFactory):
+    context_id_source_name: str
+    num_contexts: Union[int, str]
+    key_name: str
+    value_name: str
+    output_name: str
+
+    def make_graph_part(self):
+        return ContextAttention(
+            self.context_id_source_name, self.num_contexts, self.key_name, self.value_name, self.output_name)
 
 
 class ContextAttention(GraphPart):

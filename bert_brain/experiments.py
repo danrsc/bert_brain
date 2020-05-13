@@ -17,10 +17,11 @@ from .data_sets import ResponseKind, PreprocessDetrend, PreprocessStandardize, \
     BatchOneTaskSamplerFactory, BatchOneTaskRandomSamplerFactory, BatchOneTaskProportionalSamplerFactory, \
     BatchOneTaskTemperatureProportionalSamplerFactory, BatchOneTaskTaskPermutedSamplerFactory, \
     BatchOneTaskManualWeightSamplerFactory, BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory
-from .modeling import KeyedLinear, LinearContextualParameterGeneration, PooledFromSequence, PooledFromKTokens, \
-    MarkedTokenConcatFixedNumTokens, GroupMultipart, KeyedSingleTargetSpanAttention, critic_types, \
-    learning_rate_schedules, MultiLayerBottleneck, ContextualBottleneckSum, AttentionKeyValues, AttentionPool, \
-    ContextAttention, LinearDecreasingTemperatureSchedule, KeyedConcat, KeyedSingleTargetSpanMaxPool, \
+from .modeling import KeyedLinearFactory, LinearContextualParameterGenerationFactory, PooledFromSequenceFactory, \
+    PooledFromKTokensFactory, MarkedTokenConcatFixedNumTokensFactory, GroupMultipartFactory, \
+    KeyedSingleTargetSpanAttentionFactory, critic_types, learning_rate_schedules, MultiLayerBottleneckFactory, \
+    ContextualBottleneckSumFactory, AttentionKeyValuesFactory, AttentionPoolFactory, ContextAttentionFactory, \
+    LinearDecreasingTemperatureSchedule, KeyedConcatFactory, KeyedSingleTargetSpanMaxPoolFactory, \
     weight_losses_by_inverse_example_counts, ManuallyRescaleLosses
 from .modeling import gelu_new as gelu
 from .settings import Settings, OptimizationSettings
@@ -97,27 +98,27 @@ def make_standard_head_graph(corpus, sequence_key=None, pooled_key=None):
 
     if isinstance(corpus, corpus_types.NaturalStoriesCorpus):
         head[ResponseKind.ns_froi] = OrderedDict(
-            froi_linear=KeyedLinear(
+            froi_linear=KeyedLinearFactory(
                 pooled_key, apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.ns_froi))
         return head
     elif isinstance(corpus, corpus_types.HarryPotterCorpus):
         if corpus.meg_subjects is None or len(corpus.meg_subjects) > 0:
-            head[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+            head[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinearFactory(
                 sequence_key, targets=ResponseKind.hp_meg))
         if corpus.fmri_subjects is None or len(corpus.fmri_subjects) > 0:
-            head[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinear(
+            head[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinearFactory(
                 pooled_key,
                 apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         return head
     elif isinstance(corpus, corpus_types.WordInContext):
-        head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokens(
+        head['{}_group'.format(response_key)] = MarkedTokenConcatFixedNumTokensFactory(
             2,
             response_key, 'data_ids',
             '{}_concat'.format(response_key),
             sequence_key)
-        head['{}_linear'.format(response_key)] = KeyedLinear(
+        head['{}_linear'.format(response_key)] = KeyedLinearFactory(
             '{}_concat'.format(response_key),
             output_key_to_shape={response_key: 1}, apply_at_most_one_data_id=True)
         return head
@@ -126,14 +127,14 @@ def make_standard_head_graph(corpus, sequence_key=None, pooled_key=None):
             (corpus_types.ChoiceOfPlausibleAlternatives,
              corpus_types.ReadingComprehensionWithCommonSenseReasoning,
              corpus_types.MultiSentenceReadingComprehension)):
-        head['{}_linear'.format(response_key)] = KeyedLinear(
+        head['{}_linear'.format(response_key)] = KeyedLinearFactory(
             pooled_key, output_key_to_shape={
                 '{}_choice'.format(response_key): 1}, apply_at_most_one_data_id=True)
-        head['{}_mc'.format(response_key)] = GroupMultipart(
+        head['{}_mc'.format(response_key)] = GroupMultipartFactory(
             None, 'multipart_id', response_key, '{}_choice'.format(response_key))
         return head
     elif isinstance(corpus, corpus_types.WinogradSchemaChallenge):
-        head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttention(
+        head['{}_span_linear'.format(response_key)] = KeyedSingleTargetSpanAttentionFactory(
             2, sequence_key, 'span_ids', conv_hidden_channels=1024, conv_hidden_kernel=1,
             output_key_to_shape={response_key: 1})
         return head
@@ -162,8 +163,8 @@ def standard_edge_probing_graph(corpora, sequence_key):
                 if corpus.num_spans() == 1 else 'max_pool_linear_{}_spans'.format(corpus.num_spans())
             if corpus.num_spans() not in num_spans_to_head:
                 num_spans_to_head[corpus.num_spans()] = OrderedDict()
-                num_spans_to_head[corpus.num_spans()][inner_name] = KeyedSingleTargetSpanMaxPool(
-                    corpus.num_spans(), sequence_key, 'span_ids')
+                num_spans_to_head[corpus.num_spans()][inner_name] = KeyedSingleTargetSpanMaxPoolFactory(
+                    corpus.num_spans(), sequence_key, 'span_ids', targets=set())
             num_spans_to_head[corpus.num_spans()][inner_name].targets.add(corpus.corpus_key)
             result[corpus.corpus_key] = num_spans_to_head[corpus.num_spans()]
     return result
@@ -282,7 +283,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             optimization_settings=OptimizationSettings(num_train_epochs=50),
             num_runs=10)
         settings.head_graph_parts[ResponseKind.ns_froi] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.ns_froi))
         return [replace(settings, loss_tasks=set(t)) for t in [
@@ -305,7 +306,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             num_runs=7,
             loss_tasks=set(corpus_types.NaturalStoriesCorpus.all_froi_tasks))
         settings.head_graph_parts[ResponseKind.ns_froi] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.ns_froi))
         return settings
@@ -340,7 +341,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         return settings
@@ -366,7 +367,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         return settings
@@ -394,11 +395,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(
-            sequence_linear=KeyedLinear(
+            sequence_linear=KeyedLinearFactory(
                 ('bert', 'sequence'), targets=ResponseKind.hp_meg))
         settings.loss_tasks = set(hp_fmri_tasks + ('hp_meg',))
         return settings
@@ -424,7 +425,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         return settings
@@ -451,7 +452,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         training_variations = list()
@@ -492,7 +493,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             PreprocessMakeBinary(threshold=0)]
         settings.preprocess_fork_fn = PreprocessForkNoClusterToDisk()
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri, hidden_sizes=[20]))
         settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleBinaryCrossEntropyWithLogits()
@@ -548,8 +549,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 stop_mode='content',
                 metadata_example_group_by='fmri_runs',
                 train_on_all=True,
-                use_one_hot=False)
-        ]
+                use_one_hot=False)]
         settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
         return settings
     elif name == 'hp_meg_p75_drc_one':
@@ -576,10 +576,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 stop_mode='content',
                 metadata_example_group_by='fmri_runs',
                 train_on_all=True,
-                use_one_hot=False)
-        ]
+                use_one_hot=False)]
 
-        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
                 hidden_sizes=[100], hidden_activation=None, targets=ResponseKind.hp_meg))
 
@@ -611,15 +610,15 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 train_on_all=True,
                 use_one_hot=False)
         ]
-        settings.common_graph_parts = OrderedDict(contextual_bottleneck=LinearContextualParameterGeneration(
+        settings.common_graph_parts = OrderedDict(contextual_bottleneck=LinearContextualParameterGenerationFactory(
             'response_id', 'num_response_data_fields', 3,
             OrderedDict(
-                bottleneck=KeyedLinear(
+                bottleneck=KeyedLinearFactory(
                     ('bert', 'sequence', 'all'),
                     output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                     should_norm=True))))
 
-        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinearFactory(
             'sequence_all_bottleneck', targets=ResponseKind.hp_meg))
 
         settings.critics[ResponseKind.hp_meg] = critic_types.NamedTargetStopWordAwareCrossEntropy(num_classes=2)
@@ -654,7 +653,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 train_on_all=True,
                 use_one_hot=False)]
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            untransformed_pooled_linear=KeyedLinear(
+            untransformed_pooled_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
         settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleCrossEntropy(num_classes=2)
@@ -698,23 +697,23 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 train_on_all=True,
                 use_one_hot=False)]
         # settings.common_graph_parts = OrderedDict(
-        #     bottleneck=KeyedLinear(
+        #     bottleneck=KeyedLinearFactory(
         #         ('bert', 'sequence', 'all'), is_sequence=True,
         #         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
         #         should_norm=True))
 
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 3,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
-        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinear(
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+        settings.head_graph_parts[ResponseKind.hp_meg] = OrderedDict(meg_linear=KeyedLinearFactory(
             'sequence_all_bottleneck', targets=ResponseKind.hp_meg))
-        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinear(
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(fmri_linear=KeyedLinearFactory(
             'pooled_all_bottleneck',
             apply_at_most_one_data_id='if_no_target',
             targets=ResponseKind.hp_fmri))
@@ -776,14 +775,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 3,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         for corpus in settings.corpora:
             heads = make_standard_head_graph(
                 corpus, sequence_key='sequence_all_bottleneck', pooled_key='pooled_all_bottleneck')
@@ -817,14 +816,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 3,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         for corpus in settings.corpora:
             heads = make_standard_head_graph(
                 corpus, pooled_key='pooled_all_bottleneck', sequence_key='sequence_all_bottleneck')
@@ -871,14 +870,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=1)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 3,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -932,14 +931,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 20,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -994,7 +993,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            multi_layer_bottleneck=MultiLayerBottleneck(
+            multi_layer_bottleneck=MultiLayerBottleneckFactory(
                 ('bert', 'sequence', 'all'),
                 output_name='multi_layer_sequence_bottleneck',
                 num_bottleneck_channels=10,
@@ -1004,12 +1003,12 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 should_norm_hidden=True,
                 should_transpose_output=False,
                 should_norm=True),
-            contextual_bottleneck=ContextualBottleneckSum(
+            contextual_bottleneck=ContextualBottleneckSumFactory(
                 'response_id',
                 'num_response_data_fields',
                 'multi_layer_sequence_bottleneck',
                 'sequence_all_bottleneck'),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1064,7 +1063,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            multi_layer_bottleneck=MultiLayerBottleneck(
+            multi_layer_bottleneck=MultiLayerBottleneckFactory(
                 ('bert', 'sequence', 'all'),
                 output_name='multi_layer_sequence_bottleneck',
                 num_bottleneck_channels=1,
@@ -1074,12 +1073,12 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 should_norm_hidden=True,
                 should_transpose_output=False,
                 should_norm=False),
-            contextual_bottleneck=ContextualBottleneckSum(
+            contextual_bottleneck=ContextualBottleneckSumFactory(
                 'response_id',
                 'num_response_data_fields',
                 'multi_layer_sequence_bottleneck',
                 'sequence_all_bottleneck'),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1134,9 +1133,9 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            bottleneck=KeyedLinear(
+            bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'), output_key_to_shape={'sequence_all_bottleneck': 10}, should_norm=True),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1191,20 +1190,20 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            kv_layer=AttentionKeyValues(
+            kv_layer=AttentionKeyValuesFactory(
                 ('bert', 'sequence', 'all'),
                 output_key_name='attn_key',
                 output_value_name='attn_value',
                 num_heads=20,
                 num_key_channels=5,
                 num_value_channels=1),
-            context_attn=ContextAttention(
+            context_attn=ContextAttentionFactory(
                 'response_id',
                 'num_response_data_fields',
                 'attn_key',
                 'attn_value',
                 'sequence_all_bottleneck'),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1261,20 +1260,20 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            kv_layer=AttentionKeyValues(
+            kv_layer=AttentionKeyValuesFactory(
                 ('bert', 'sequence', 'all'),
                 output_key_name='attn_key',
                 output_value_name='attn_value',
                 num_heads=100,
                 num_key_channels=5,
                 num_value_channels=1),
-            context_attn=ContextAttention(
+            context_attn=ContextAttentionFactory(
                 'response_id',
                 'num_response_data_fields',
                 'attn_key',
                 'attn_value',
                 'sequence_all_bottleneck'),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1331,7 +1330,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            multi_layer_bottleneck=MultiLayerBottleneck(
+            multi_layer_bottleneck=MultiLayerBottleneckFactory(
                 ('bert', 'sequence', 'all'),
                 output_name='multi_layer_sequence_bottleneck',
                 num_bottleneck_channels=1,
@@ -1341,14 +1340,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 should_norm_hidden=True,
                 should_transpose_output=False,
                 should_norm=False),
-            contextual_bottleneck=ContextualBottleneckSum(
+            contextual_bottleneck=ContextualBottleneckSumFactory(
                 'response_id',
                 'num_response_data_fields',
                 'multi_layer_sequence_bottleneck',
                 'sequence_all_bottleneck',
                 softmax_weights=True,
                 softmax_temperature_schedule_fn=LinearDecreasingTemperatureSchedule(100, 500)),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         # remove any trend from individual runs before computing the median on the training data
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -1404,11 +1403,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             num_runs=4)
         settings.head_graph_parts = OrderedDict()
         settings.head_graph_parts[ResponseKind.generic] = OrderedDict(
-            ling_linear=KeyedLinear(
+            ling_linear=KeyedLinearFactory(
                 ('bert', 'untransformed_pooled'), targets=(ResponseKind.generic,)),
-            ling_concat=KeyedConcat([ResponseKind.generic], 'ling_basis'))
+            ling_concat=KeyedConcatFactory([ResponseKind.generic], 'ling_basis'))
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            fmri_linear=KeyedLinear('ling_basis', targets=(ResponseKind.hp_fmri,)))
+            fmri_linear=KeyedLinearFactory('ling_basis', targets=(ResponseKind.hp_fmri,)))
         # remove any trend from individual runs before computing the median on the training data
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(stop_mode=None, metadata_example_group_by='fmri_runs', train_on_all=True),
@@ -1547,7 +1546,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            attn_kv=AttentionKeyValues(
+            attn_kv=AttentionKeyValuesFactory(
                 source_name=('bert', 'sequence'),
                 output_key_name='latent_keys',
                 output_value_name='latent_values',
@@ -1555,11 +1554,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 num_key_channels=10,
                 num_value_channels=1,
                 value_activation_fn=gelu),
-            attn_pool=AttentionPool(
+            attn_pool=AttentionPoolFactory(
                 'latent_keys', 'latent_values', 'bottleneck', should_layer_norm=False, flatten=True))
         settings.head_graph_parts = OrderedDict()
         settings.head_graph_parts[ResponseKind.generic] = OrderedDict(
-            predictions=KeyedLinear(
+            predictions=KeyedLinearFactory(
                 'bottleneck',
                 targets=(ResponseKind.generic, ResponseKind.hp_fmri),
                 hidden_activation=gelu,
@@ -1621,7 +1620,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            attn_kv=AttentionKeyValues(
+            attn_kv=AttentionKeyValuesFactory(
                 source_name=('bert', 'sequence'),
                 output_key_name='latent_keys',
                 output_value_name='latent_values',
@@ -1629,11 +1628,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 num_key_channels=10,
                 num_value_channels=1,
                 value_activation_fn=gelu),
-            attn_pool=AttentionPool(
+            attn_pool=AttentionPoolFactory(
                 'latent_keys', 'latent_values', 'bottleneck', should_layer_norm=False, flatten=True))
         settings.head_graph_parts = OrderedDict()
         settings.head_graph_parts[ResponseKind.generic] = OrderedDict(
-            predictions=KeyedLinear(
+            predictions=KeyedLinearFactory(
                 'bottleneck',
                 targets=(ResponseKind.generic, ResponseKind.hp_fmri),
                 hidden_activation=gelu,
@@ -1695,7 +1694,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            attn_kv=AttentionKeyValues(
+            attn_kv=AttentionKeyValuesFactory(
                 source_name=('bert', 'sequence'),
                 output_key_name='latent_keys',
                 output_value_name='latent_values',
@@ -1703,11 +1702,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 num_key_channels=10,
                 num_value_channels=1,
                 value_activation_fn=gelu),
-            attn_pool=AttentionPool(
+            attn_pool=AttentionPoolFactory(
                 'latent_keys', 'latent_values', 'bottleneck', should_layer_norm=False, flatten=True))
         settings.head_graph_parts = OrderedDict()
         settings.head_graph_parts[ResponseKind.generic] = OrderedDict(
-            predictions=KeyedLinear(
+            predictions=KeyedLinearFactory(
                 'bottleneck',
                 targets=(ResponseKind.generic, ResponseKind.hp_fmri),
                 hidden_activation=gelu,
@@ -1769,14 +1768,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskProportionalSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 20,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True))),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1831,15 +1830,15 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskSamplerFactory(500),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 20,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True)),
                 use_softmax_embedding=True),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -1903,15 +1902,15 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             sampler_factory=BatchOneTaskSamplerFactory(5000),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 10,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=1),
                         should_norm=False)),
                 use_softmax_embedding=True),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'))
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessQuantileDigitize(
                 quantiles=2,
@@ -2008,22 +2007,22 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=100)
         settings.common_graph_parts = OrderedDict(
-            contextual_bottleneck=LinearContextualParameterGeneration(
+            contextual_bottleneck=LinearContextualParameterGenerationFactory(
                 'response_id', 'num_response_data_fields', 8,
                 OrderedDict(
-                    bottleneck=KeyedLinear(
+                    bottleneck=KeyedLinearFactory(
                         ('bert', 'sequence', 'all'),
                         output_key_to_shape=OrderedDict(sequence_all_bottleneck=10),
                         should_norm=True)),
                 use_softmax_embedding=True),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
-            hdr_bottleneck=PooledFromKTokens(
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokensFactory(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
 
         settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
 
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            fmri_linear=KeyedLinear(
+            fmri_linear=KeyedLinearFactory(
                 'hdr_pooled',
                 apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
@@ -2152,19 +2151,19 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            sigmoid_bottleneck=KeyedLinear(
+            sigmoid_bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
                 output_key_to_shape=OrderedDict(sequence_all_bottleneck=100),
                 should_norm=False,
                 activation_fn=sigmoid),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
-            hdr_bottleneck=PooledFromKTokens(
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokensFactory(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
 
         settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
 
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            fmri_linear=KeyedLinear(
+            fmri_linear=KeyedLinearFactory(
                 'hdr_pooled',
                 apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
@@ -2297,19 +2296,19 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            sigmoid_bottleneck=KeyedLinear(
+            sigmoid_bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
                 output_key_to_shape=OrderedDict(sequence_all_bottleneck=100),
                 should_norm=False,
                 activation_fn=sigmoid),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
-            hdr_bottleneck=PooledFromKTokens(
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokensFactory(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
 
         settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
 
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            fmri_linear=KeyedLinear(
+            fmri_linear=KeyedLinearFactory(
                 'hdr_pooled',
                 apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))
@@ -2421,7 +2420,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.SemanticProtoRoles2()),
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=6,
+                num_train_epochs=11,
                 num_epochs_train_prediction_heads_only=0,
                 num_final_epochs_train_prediction_heads_only=1,
                 learning_rate_head=1e-3,
@@ -2438,29 +2437,29 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 update_frequency_in_batches=100,
                 initial_sample_rate_proportional_temperature=5,
                 learning_rate=0.1,
-                preferences={ResponseKind.hp_fmri: 5}),
+                preferences={ResponseKind.hp_fmri: 10}),
             # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
-            latent_task_bottleneck=KeyedLinear(
+            latent_task_bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
-                output_key_to_shape=OrderedDict(sequence_all_bottleneck=50),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=20),
                 should_norm=True,
                 activation_fn=gelu),
-            pooled_bottleneck=PooledFromSequence('sequence_all_bottleneck', 'pooled_all_bottleneck'),
-            hdr_bottleneck=PooledFromKTokens(
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokensFactory(
                 num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
 
         settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
 
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
-            fmri_linear=KeyedLinear(
+            fmri_linear=KeyedLinearFactory(
                 'hdr_pooled',
-                output_key_to_shape=OrderedDict(fmri_compressed=10),
+                output_key_to_shape=OrderedDict(fmri_compressed=5),
                 should_norm=True,
                 activation_fn=gelu),
-            fmri_output=KeyedLinear(
+            fmri_output=KeyedLinearFactory(
                 'fmri_compressed',
                 apply_at_most_one_data_id='if_no_target',
                 targets=ResponseKind.hp_fmri))

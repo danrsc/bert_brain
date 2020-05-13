@@ -1,9 +1,20 @@
 from collections import OrderedDict
+from dataclasses import dataclass
 from torch import nn
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
-__all__ = ['TaskUncertaintyModule']
+__all__ = ['TaskUncertaintyModule', 'TaskUncertaintyModuleFactory']
+
+
+@dataclass(frozen=True)
+class TaskUncertaintyModuleFactory(GraphPartFactory):
+    task_id_source_name: str
+    output_name: str
+    num_tasks: int
+
+    def make_graph_part(self):
+        return TaskUncertaintyModule(self.task_id_source_name, self.output_name, self.num_tasks)
 
 
 class TaskUncertaintyModule(GraphPart):

@@ -1,14 +1,25 @@
+from dataclasses import dataclass
 from collections import OrderedDict
+from typing import Union, Optional, Iterable, Any
 
 import numpy as np
 import torch
 import torch.nn
 import torch.nn.functional
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
-__all__ = ['at_most_one_data_id', 'k_data_ids', 'GroupConcatFixedGroupSize', 'GroupPool',
-           'MarkedTokenConcatFixedNumTokens', 'GroupMultipart']
+__all__ = [
+    'at_most_one_data_id',
+    'k_data_ids',
+    'GroupConcatFixedGroupSizeFactory',
+    'GroupConcatFixedGroupSize',
+    'GroupPoolFactory',
+    'GroupPool',
+    'MarkedTokenConcatFixedNumTokens',
+    'MarkedTokenConcatFixedNumTokensFactory',
+    'GroupMultipart',
+    'GroupMultipartFactory']
 
 
 def at_most_one_data_id(data_ids, return_first_index=False, return_last_index=False):
@@ -195,6 +206,25 @@ def _sequence_sort_info(x, return_unique_id=False, return_counts=False):
     return (example_ids, indices_sort, values) + optional_result
 
 
+@dataclass(frozen=True)
+class GroupConcatFixedGroupSizeFactory(GraphPartFactory):
+    num_per_group: int
+    groupby_prefixes: Union[str, Iterable[str]]
+    groupby_suffix: str
+    output_name: str
+    sequence_source_name: str
+    pooled_source_name: Optional[str] = None
+
+    def make_graph_part(self):
+        return GroupConcatFixedGroupSize(
+            self.num_per_group,
+            self.groupby_prefixes,
+            self.groupby_suffix,
+            self.output_name,
+            self.sequence_source_name,
+            self. pooled_source_name)
+
+
 class GroupConcatFixedGroupSize(GroupBase):
 
     def __init__(
@@ -255,6 +285,17 @@ class GroupConcatFixedGroupSize(GroupBase):
         return x, groups, example_ids
 
 
+@dataclass(frozen=True)
+class GroupPoolFactory(GraphPartFactory):
+    groupby_prefixes: Union[str, Iterable[str]]
+    groupby_suffix: str
+    output_name: str
+    sequence_source_name: str
+
+    def make_graph_part(self):
+        return GroupPool(self.groupby_prefixes, self.groupby_suffix, self.output_name, self.sequence_source_name)
+
+
 class GroupPool(GroupBase):
 
     def __init__(
@@ -305,6 +346,21 @@ class GroupPool(GroupBase):
         return pooled, groups, example_ids
 
 
+@dataclass(frozen=True)
+class MarkedTokenConcatFixedNumTokensFactory(GraphPartFactory):
+    num_tokens: int
+    marker_prefixes: Union[str, Iterable[str]]
+    marker_suffix: str
+    output_name: str
+    sequence_source_name: str
+    pooled_source_name: Optional[str] = None
+
+    def make_graph_part(self):
+        return MarkedTokenConcatFixedNumTokens(
+            self.num_tokens, self.marker_prefixes, self.marker_suffix,
+            self.output_name, self.sequence_source_name, self.pooled_source_name)
+
+
 class MarkedTokenConcatFixedNumTokens(GroupBase):
 
     def __init__(
@@ -339,6 +395,19 @@ class MarkedTokenConcatFixedNumTokens(GroupBase):
                 [torch.unsqueeze(batch[self.pooled_source_name], dim=1), gathered_outputs], dim=1)
 
         return gathered_outputs, marker_ids, torch.arange(len(marker_ids), device=marker_ids.device)
+
+
+@dataclass(frozen=True)
+class GroupMultipartFactory(GraphPartFactory):
+    groupby_prefixes: Union[str, Iterable[str]]
+    groupby_suffix: str
+    output_name: str
+    source_name: str
+    fill_value: Any = np.nan
+
+    def make_graph_part(self):
+        return GroupMultipart(
+            self.groupby_prefixes, self.groupby_suffix, self.output_name, self.source_name, self.fill_value)
 
 
 class GroupMultipart(GroupBase):

@@ -1,7 +1,7 @@
 from torch.nn import Module
 
 
-__all__ = ['GraphPart']
+__all__ = ['GraphPart', 'GraphPartFactory']
 
 
 class GraphPart(Module):
@@ -17,3 +17,9 @@ class GraphPart(Module):
 
     def compute_penalties(self, batch, predictions, loss_dict):
         return None
+
+
+class GraphPartFactory:
+
+    def make_graph_part(self) -> GraphPart:
+        raise NotImplementedError('{} does not implement make_graph_part'.format(type(self)))

@@ -12,7 +12,7 @@ from .data_sets import PreprocessStandardize, PreprocessLog, \
     PreprocessPCA, PreprocessClip, PreprocessDetrend, HarryPotterMakeLeaveOutFmriRun, \
     ResponseKind, NaturalStoriesMakeLeaveStoriesOut, corpus_types, CorpusBase, \
     UclCorpus, PreprocessorSequenceT, PreprocessForkFnT, SplitFunctionT, SamplerFactory, RandomSamplerFactory
-from .modeling import critic_types, GraphPart, NamedTargetMaskedLossBase, LearningRateScheduleFactory, \
+from .modeling import critic_types, GraphPartFactory, NamedTargetMaskedLossBase, LearningRateScheduleFactory, \
     learning_rate_schedules
 
 
@@ -200,7 +200,7 @@ class Settings:
 
     # Graph parts which are applied after BERT but before head_graph_parts. These can be used to apply a common mapping
     # from BERT to a different representation which is then used by head_graph_parts
-    common_graph_parts: Optional[OrderedDictT[str, GraphPart]] = None
+    common_graph_parts: Optional[OrderedDictT[str, GraphPartFactory]] = None
 
     # Mapping from [response_key, kind, or corpus_key] to a prediction head. Lookups fall back in that order.
     # This determines how the output from BERT is used to make predictions for each target. Note that whenever two
@@ -209,7 +209,7 @@ class Settings:
     # to PredictionHeadSettings instances that have different keys, then the predictions for those fields will be made
     # by two different instances of the prediction head even if the head has the same type. This enables different kinds
     # of parameter-sharing between fields.
-    head_graph_parts: MutableMapping[str, OrderedDictT[str, GraphPart]] = field(default_factory=dict)
+    head_graph_parts: MutableMapping[str, OrderedDictT[str, GraphPartFactory]] = field(default_factory=dict)
 
     # Default prediction heads will use these locations in the graph as the source
     default_sequence_source: Union[str, Tuple[str, ...]] = ('bert', 'sequence')

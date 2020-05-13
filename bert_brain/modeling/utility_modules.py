@@ -1,20 +1,34 @@
 from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any
 import numpy as np
 import torch
 import torch.nn
 from torch import nn
 from .gelu_new_module import gelu_new as gelu
 
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
 __all__ = [
     'Conv1DCausal',
+    'PooledFromSequenceFactory',
     'PooledFromSequence',
+    'PooledFromKTokensFactory',
     'PooledFromKTokens',
     'LinearWithLayerNorm',
     'QuasiAttention',
     'HiddenReconstructionPenalty']
+
+
+@dataclass(frozen=True)
+class PooledFromSequenceFactory(GraphPartFactory):
+    source_name: str
+    output_name: str
+    transform_fn: Any = None
+
+    def make_graph_part(self):
+        return PooledFromSequence(self.source_name, self.output_name, self.transform_fn)
 
 
 class PooledFromSequence(GraphPart):
@@ -44,6 +58,19 @@ class PooledFromSequence(GraphPart):
             if isinstance(key, tuple) and key[0] == self.source_name:
                 result[(self.output_name,) + key[1:]] = batch[key]
         return result
+
+
+@dataclass(frozen=True)
+class PooledFromKTokensFactory(GraphPartFactory):
+    num_tokens: int
+    source_name: str
+    output_name: str
+    transform_fn: Any = None
+    use_first_k: bool = False
+
+    def make_graph_part(self):
+        return PooledFromKTokens(
+            self.num_tokens, self.source_name, self.output_name, self.transform_fn, self.use_first_k)
 
 
 class PooledFromKTokens(GraphPart):

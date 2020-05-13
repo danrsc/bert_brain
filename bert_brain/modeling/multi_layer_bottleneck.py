@@ -1,15 +1,16 @@
 from collections import OrderedDict
 from typing import Union, Tuple, Sequence, Optional, Callable
+from dataclasses import dataclass
 
 import numpy as np
 from torch import Tensor, nn
 
 from .gelu_new_module import gelu_new as gelu
 
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
-__all__ = ['MultiLayerBottleneck']
+__all__ = ['MultiLayerBottleneck', 'MultiLayerBottleneckFactory']
 
 
 def multi_layer_bottleneck_layer_norm(x: Tensor, eps, weight, bias, axis=-2):
@@ -84,6 +85,25 @@ class _BottleneckCombineWithLayerNormModule(nn.Module):
         elif self.should_transpose_output:
             x = x.transpose(-2, -1)
         return x
+
+
+@dataclass(frozen=True)
+class MultiLayerBottleneckFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    output_name: str
+    num_bottleneck_channels: int
+    num_output_bottlenecks: int
+    num_hidden_bottlenecks: Optional[Union[int, Sequence[int]]] = None
+    hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu
+    should_norm_hidden: bool = True
+    should_norm: bool = False
+    should_transpose_output: bool = True
+
+    def make_graph_part(self):
+        return MultiLayerBottleneck(
+            self.source_name, self.output_name, self.num_bottleneck_channels, self.num_output_bottlenecks,
+            self.num_hidden_bottlenecks, self.hidden_activation, self.should_norm_hidden, self.should_norm,
+            self.should_transpose_output)
 
 
 class MultiLayerBottleneck(GraphPart):

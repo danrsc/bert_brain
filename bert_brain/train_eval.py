@@ -323,12 +323,14 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             loss_handlers[i] = replace(loss_handler, weight=loss_weights[loss_handler.field])
 
     graph_parts = OrderedDict()
+    factory_sources = OrderedDict()
     common_graph_keys = set()
     if settings.common_graph_parts is not None:
         for k in settings.common_graph_parts:
-            settings.common_graph_parts[k].resolve_placeholders(
+            graph_part = settings.common_graph_parts[k].make_graph_part()
+            graph_part.resolve_placeholders(
                 placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
-            graph_parts[k] = settings.common_graph_parts[k]
+            graph_parts[k] = graph_part
             common_graph_keys.add(k)
 
     default_sequence_head = None
@@ -371,11 +373,12 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
         if head_key in reachable_head_graph_parts:
             for key in settings.head_graph_parts[head_key]:
                 if key not in graph_parts:
-                    graph_parts[key] = settings.head_graph_parts[head_key][key]
+                    graph_parts[key] = settings.head_graph_parts[head_key][key].make_graph_part()
+                    factory_sources[key] = settings.head_graph_parts[head_key][key]
                     graph_parts[key].resolve_placeholders(
                         placeholder_name_to_fields, prediction_shapes, len(data_set.response_fields))
                 else:
-                    if id(graph_parts[key]) != id(settings.head_graph_parts[head_key][key]):
+                    if id(factory_sources[key]) != id(settings.head_graph_parts[head_key][key]):
                         raise ValueError('Duplicate graph_part name: {}'.format(key))
 
     if default_sequence_head is not None:
@@ -408,8 +411,9 @@ def setup_prediction_heads_and_losses(settings: Settings, data_set):
             else:
                 pooled_supplemental_key_to_shape[k] = data_set.value_shape(k)
 
-    return (graph_parts, common_graph_keys,
-            token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers)
+    return (
+        graph_parts, common_graph_keys,
+        token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers)
 
 
 @dataclass

@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Optional, Union, Sequence, Callable, Mapping, Tuple, Iterable
 
 import numpy as np
@@ -10,17 +11,23 @@ from .gelu_new_module import gelu_new as gelu
 
 from .utility_modules import LinearWithLayerNorm, HiddenReconstructionPenalty, QuasiAttention
 from ..common import NamedSpanEncoder
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 from .grouping_modules import at_most_one_data_id, GroupConcatFixedGroupSize
 
 
 __all__ = [
+    'KeyedLinearFactory',
     'KeyedLinear',
+    'KeyedQuasiAttentionFactory',
     'KeyedQuasiAttention',
+    'KeyedCombinedLinearFactory',
     'KeyedCombinedLinear',
+    'KeyedSingleTargetSpanAttentionFactory',
     'KeyedSingleTargetSpanAttention',
+    'KeyedSingleTargetSpanMaxPoolFactory',
     'KeyedSingleTargetSpanMaxPool',
     'group_concat_linear',
+    'KeyedConcatFactory',
     'KeyedConcat']
 
 
@@ -74,7 +81,7 @@ class KeyedBase(GraphPart):
         self.splits = KeyedBase._output_shape_normalize(self.output_key_to_shape)
         if targets is None:
             self.targets = set()
-        elif np.ndim(targets) == 0:
+        elif isinstance(targets, str):
             self.targets = {targets}
         else:
             self.targets = set(targets)
@@ -110,6 +117,31 @@ class KeyedBase(GraphPart):
 
     def _instantiate(self, name_to_num_channels):
         raise NotImplementedError('{} does not implement instantiate'.format(type(self)))
+
+
+@dataclass(frozen=True)
+class KeyedLinearFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    hidden_sizes: Optional[Union[int, Sequence[int]]] = None
+    hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu
+    should_norm_hidden: bool = True
+    bias_hidden: bool = True
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+    apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False
+    should_norm: bool = False
+    bias: bool = True
+    activation_fn: Optional[Callable[[Tensor], Tensor]] = None
+    penultimate_reconstruction_penalty_coefficient: float = 0
+    penultimate_reconstruction_l1_weight_coefficient: float = 0
+    penultimate_reconstruction_output_name: str = 'rcn'
+
+    def make_graph_part(self):
+        return KeyedLinear(
+            self.source_name, self.hidden_sizes, self.hidden_activation, self.should_norm_hidden,
+            self.bias_hidden, self.output_key_to_shape, self.targets, self.apply_at_most_one_data_id,
+            self.should_norm, self.bias, self.activation_fn, self.penultimate_reconstruction_penalty_coefficient,
+            self.penultimate_reconstruction_l1_weight_coefficient, self.penultimate_reconstruction_output_name)
 
 
 class KeyedLinear(KeyedBase):
@@ -166,7 +198,6 @@ class KeyedLinear(KeyedBase):
                         should_norm=self.should_norm_hidden))
             self.hidden = torch.nn.Sequential(*hidden_modules)
             in_channels = hidden_sizes[-1]
-        print(self.output_key_to_shape)
         self.linear = nn.Linear(in_channels, sum(self.splits), self.bias)
         result = OrderedDict()
         for key in self.output_key_to_shape:
@@ -229,6 +260,29 @@ class KeyedLinear(KeyedBase):
                 weight = weight.numpy()
             result[key] = weight
         return result
+
+
+@dataclass(frozen=True)
+class KeyedQuasiAttentionFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    hidden_sizes: Optional[Union[int, Sequence[int]]] = None
+    hidden_activation: Optional[Callable[[Tensor], Tensor]] = gelu
+    should_norm_hidden: bool = True
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+    apply_at_most_one_data_id: Union[str, bool, Mapping[str, Union[str, bool]]] = False
+    should_norm: bool = False
+    activation_fn: Optional[Callable[[Tensor], Tensor]] = None
+    penultimate_reconstruction_penalty_coefficient: float = 0
+    penultimate_reconstruction_l1_weight_coefficient: float = 0
+    penultimate_reconstruction_output_name: str = 'rcn'
+
+    def make_graph_part(self):
+        return KeyedQuasiAttention(
+            self.source_name, self.hidden_sizes, self.hidden_activation, self.should_norm_hidden,
+            self.output_key_to_shape, self.targets, self.apply_at_most_one_data_id, self.should_norm,
+            self.activation_fn, self.penultimate_reconstruction_penalty_coefficient,
+            self.penultimate_reconstruction_l1_weight_coefficient, self.penultimate_reconstruction_output_name)
 
 
 class KeyedQuasiAttention(KeyedBase):
@@ -335,6 +389,18 @@ class KeyedQuasiAttention(KeyedBase):
         return self.penultimate_reconstruction_penalty.compute_penalties(batch, predictions, loss_dict)
 
 
+@dataclass(frozen=True)
+class KeyedCombinedLinearFactory(GraphPartFactory):
+    sequence_source_name: str
+    pooled_source_name: str
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]]
+    targets: Optional[Union[str, Iterable[str]]]
+
+    def make_graph_part(self):
+        return KeyedCombinedLinear(
+            self.sequence_source_name, self.pooled_source_name, self.output_key_to_shape, self.targets)
+
+
 class KeyedCombinedLinear(KeyedBase):
 
     def __init__(
@@ -370,6 +436,23 @@ class KeyedCombinedLinear(KeyedBase):
             result[k] = p
 
         return result
+
+
+@dataclass(frozen=True)
+class KeyedSingleTargetSpanAttentionFactory(GraphPartFactory):
+    num_spans: int
+    sequence_source_name: str
+    span_source_name: str
+    pooled_source_name: Optional[str] = None
+    conv_hidden_channels: Optional[int] = None
+    conv_hidden_kernel: int = 1
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+
+    def make_graph_part(self):
+        return KeyedSingleTargetSpanAttention(
+            self.num_spans, self.sequence_source_name, self.span_source_name, self.pooled_source_name,
+            self.conv_hidden_channels, self.conv_hidden_kernel, self.output_key_to_shape, self.targets)
 
 
 class KeyedSingleTargetSpanAttention(KeyedBase):
@@ -470,6 +553,19 @@ class KeyedSingleTargetSpanAttention(KeyedBase):
         return result
 
 
+@dataclass(frozen=True)
+class KeyedSingleTargetSpanMaxPoolFactory(GraphPartFactory):
+    num_spans: int
+    sequence_source_name: str
+    span_source_name: str
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+
+    def make_graph_part(self):
+        return KeyedSingleTargetSpanMaxPool(
+            self.num_spans, self.sequence_source_name, self.span_source_name, self.output_key_to_shape, self.targets)
+
+
 class KeyedSingleTargetSpanMaxPool(KeyedBase):
 
     def __init__(
@@ -536,6 +632,16 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
                 weight = weight.numpy()
             result[key] = weight
         return result
+
+
+@dataclass(frozen=True)
+class KeyedConcatFactory(GraphPartFactory):
+    source_names: Iterable[Union[str, Tuple[str, ...]]]
+    output_name: str
+    activation_fn: Optional[Callable[[Tensor], Tensor]] = None
+
+    def make_graph_part(self):
+        return KeyedConcat(self.source_names, self.output_name, self.activation_fn)
 
 
 class KeyedConcat(GraphPart):

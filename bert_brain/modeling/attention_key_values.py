@@ -1,14 +1,35 @@
 from collections import OrderedDict
-from typing import Union, Tuple
+from typing import Union, Tuple, Any
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 from torch import nn
 
-from .graph_part import GraphPart
+from .graph_part import GraphPart, GraphPartFactory
 
 
-__all__ = ['AttentionKeyValues', 'AttentionPool']
+__all__ = ['AttentionKeyValues', 'AttentionPool', 'AttentionKeyValuesFactory', 'AttentionPoolFactory']
+
+
+@dataclass(frozen=True)
+class AttentionKeyValuesFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    output_key_name: str
+    output_value_name: str
+    num_heads: int
+    num_key_channels: int
+    num_value_channels: int
+    value_activation_fn: Any = None
+
+    def make_graph_part(self):
+        return AttentionKeyValues(
+            self.source_name,
+            self.output_key_name,
+            self.output_value_name,
+            self.num_heads,
+            self.num_key_channels,
+            self.value_activation_fn)
 
 
 class AttentionKeyValues(GraphPart):
@@ -62,6 +83,18 @@ class AttentionKeyValues(GraphPart):
         result[self.output_key_name] = key
         result[self.output_value_name] = value
         return result
+
+
+@dataclass(frozen=True)
+class AttentionPoolFactory(GraphPartFactory):
+    key_name: str
+    value_name: str
+    output_name: str
+    should_layer_norm: bool = False
+    flatten: bool = False
+
+    def make_graph_part(self):
+        return AttentionPool(self.key_name, self.value_name, self.output_name, self.should_layer_norm, self.flatten)
 
 
 class AttentionPool(GraphPart):
