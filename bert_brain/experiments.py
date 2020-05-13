@@ -24,7 +24,7 @@ from .modeling import KeyedLinearFactory, LinearContextualParameterGenerationFac
     LinearDecreasingTemperatureSchedule, KeyedConcatFactory, KeyedSingleTargetSpanMaxPoolFactory, \
     weight_losses_by_inverse_example_counts, ManuallyRescaleLosses
 from .modeling import gelu_new as gelu
-from .settings import Settings, OptimizationSettings
+from .settings import Settings, OptimizationSettings, ParameterGroupOptimizationSettings
 
 
 __all__ = [
@@ -257,6 +257,25 @@ def named_variations(name: Union[str, Tuple[str, int]]) -> Mapping[Tuple[str, st
         return OrderedDict(((name, '{}'.format(i)), r) for i, r in enumerate(result))
 
 
+# convert from old format to new format
+def _convert_head_only(learning_rate=None, learning_rate_head=None, num_head_only_start=0, num_head_only_end=0):
+    default_settings = ParameterGroupOptimizationSettings()
+    if learning_rate is not None:
+        default_settings.learning_rate = learning_rate
+    if learning_rate_head is not None or num_head_only_start != 0 or num_head_only_end != 0:
+        head_settings = ParameterGroupOptimizationSettings()
+        if learning_rate_head is not None:
+            head_settings.learning_rate = learning_rate_head
+        elif learning_rate is not None:
+            head_settings.learning_rate = learning_rate
+        base_settings = ParameterGroupOptimizationSettings(
+            num_inactive_start_epochs=num_head_only_start, num_inactive_end_epochs=num_head_only_end)
+        if learning_rate is not None:
+            base_settings.learning_rate = learning_rate
+        return {'head': head_settings, 'default': base_settings}
+    return default_settings
+
+
 def _named_variations(name: Union[str, Tuple[str, int]]) -> \
         Union[Settings, Iterable[Settings], Mapping[str, Settings], Iterable[str]]:
 
@@ -333,8 +352,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=2,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=2)),
             loss_tasks={'hp_fmri_I'},
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_fmri] = [
@@ -355,9 +373,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 group_meg_sentences_like_fmri=False,
                 meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=2,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0),
+                num_train_epochs=2),
             meta_learn_gradient_loss_tasks={'hp_fmri_I'},
             num_meta_learn_gradient_samples=10,
             num_meta_learn_no_gradient_samples=0,
@@ -383,8 +399,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=None),),  # None means everyone
             optimization_settings=OptimizationSettings(
                 num_train_epochs=60,
-                num_epochs_train_prediction_heads_only=10,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=10)),
             num_runs=4)
         settings.preprocessors[ResponseKind.hp_meg] = [
             PreprocessDetrend(
@@ -416,8 +431,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=[]),),  # None means everyone
             optimization_settings=OptimizationSettings(
                 num_train_epochs=30,
-                num_epochs_train_prediction_heads_only=10,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=10)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             num_runs=100,
             loss_tasks={'hp_fmri_{}'.format(subject_)})
@@ -445,7 +459,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=-1),
+                parameter_group_settings=_convert_head_only(num_head_only_start=-1)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             num_runs=100)
         settings.preprocessors[ResponseKind.hp_fmri] = [
@@ -477,8 +491,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=1,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=1)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             num_runs=4,
             loss_tasks=set(hp_fmri_tasks))
@@ -510,8 +523,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=None),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=100,
-                num_epochs_train_prediction_heads_only=50,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=50)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             num_runs=4,
             loss_tasks=set('hp_meg_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_meg_subjects))
@@ -537,8 +549,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=None),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=100,
-                num_epochs_train_prediction_heads_only=50,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=50)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             sampler_factory=BatchOneTaskSamplerFactory(100),
             num_runs=4,
@@ -564,8 +575,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 meg_subjects=None),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=1000,
-                num_epochs_train_prediction_heads_only=100,
-                num_final_epochs_train_prediction_heads_only=0),
+                parameter_group_settings=_convert_head_only(num_head_only_start=100)),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             weight_losses_fn=weight_losses_by_inverse_example_counts,
             num_runs=4,
@@ -594,10 +604,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 group_meg_sentences_like_fmri=True,
                 meg_kind='direct_rank_clustered_percentile_75_25_ms',
                 meg_subjects=None),),
-            optimization_settings=OptimizationSettings(
-                num_train_epochs=1,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0),
+            optimization_settings=OptimizationSettings(num_train_epochs=1),
             filter_when_not_in_loss_keys=(ResponseKind.hp_fmri, ResponseKind.hp_meg),
             sampler_factory=BatchOneTaskSamplerFactory(100),
             loss_tasks=set('hp_meg_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_meg_subjects),
@@ -635,10 +642,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 group_meg_sentences_like_fmri=True,
                 meg_subjects=[],
                 meg_kind='direct_rank_clustered_percentile_75_25_ms'),),
-            optimization_settings=OptimizationSettings(
-                num_train_epochs=2,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0),
+            optimization_settings=OptimizationSettings(num_train_epochs=2),
             meta_learn_gradient_loss_tasks=set(
                 'hp_fmri_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_fmri_subjects),
             num_meta_learn_gradient_samples=10,
@@ -670,10 +674,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 group_meg_sentences_like_fmri=True,
                 meg_subjects=None,  # None means all
                 meg_kind='direct_rank_clustered_percentile_75_25_ms'),),
-            optimization_settings=OptimizationSettings(
-                num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0),
+            optimization_settings=OptimizationSettings(num_train_epochs=20),
             # loss_tasks=set('hp_fmri_{}'.format(s) for s in hp_fmri_subjects),
             meta_learn_gradient_loss_tasks=set(
                 'hp_fmri_{}'.format(s) for s in corpus_types.HarryPotterCorpus.all_fmri_subjects).union(
@@ -734,9 +735,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             max_sequence_length=256,
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
@@ -763,9 +762,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             max_sequence_length=256,
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
@@ -804,9 +801,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8),
@@ -855,9 +850,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(400),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -915,10 +908,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -977,10 +967,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1047,10 +1034,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1117,10 +1101,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-4,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-4),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1174,10 +1155,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-4,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-4),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1244,10 +1222,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-4,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-4),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1314,10 +1289,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1386,10 +1358,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1436,10 +1405,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                     meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1479,10 +1445,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                     meg_subjects=[]),),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-5),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1530,10 +1493,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-3,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1604,10 +1564,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-3,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1678,10 +1635,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=20,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                # learning_rate_head=1e-3,
-                learning_rate=1e-3,
+                parameter_group_settings=ParameterGroupOptimizationSettings(learning_rate=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1752,10 +1706,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1814,10 +1765,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(1000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1886,10 +1834,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(10000),
                 train_batch_size=8,
                 predict_batch_size=8,
@@ -1990,10 +1935,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=16,
                 predict_batch_size=16,
@@ -2134,10 +2076,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=16,
                 predict_batch_size=16,
@@ -2275,10 +2214,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
                 num_train_epochs=10,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=0,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                parameter_group_settings=_convert_head_only(learning_rate=1e-5, learning_rate_head=1e-3),
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=16,
                 predict_batch_size=16,
@@ -2420,11 +2356,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.SemanticProtoRoles2()),
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=11,
-                num_epochs_train_prediction_heads_only=0,
-                num_final_epochs_train_prediction_heads_only=1,
-                learning_rate_head=1e-3,
-                learning_rate=1e-5,
+                num_train_epochs=10,
+                parameter_group_settings={
+                    'default': ParameterGroupOptimizationSettings(learning_rate=1e-5),
+                    'common_head': ParameterGroupOptimizationSettings(learning_rate=1e-3),
+                    'individual_head': ParameterGroupOptimizationSettings(learning_rate=1e-3)},
                 learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
                 train_batch_size=16,
                 predict_batch_size=16,
@@ -2438,13 +2374,14 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 initial_sample_rate_proportional_temperature=5,
                 learning_rate=0.1,
                 preferences={ResponseKind.hp_fmri: 10}),
+            update_individual_heads_on_dds_sample=True,
             # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
             num_runs=4)
         settings.common_graph_parts = OrderedDict(
             latent_task_bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
-                output_key_to_shape=OrderedDict(sequence_all_bottleneck=20),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=40),
                 should_norm=True,
                 activation_fn=gelu),
             pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),

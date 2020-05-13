@@ -544,6 +544,56 @@ def _train_step(
     return True
 
 
+def group_parameters(settings, named_parameters, common_graph_keys, num_train_steps_per_epoch):
+
+    def is_no_decay(param_name, param):
+        if hasattr(param, 'no_decay'):
+            return getattr(param, 'no_decay')
+        name_parts = param_name.split('.')
+        if name_parts[-1] in ['bias', 'gamma', 'beta']:
+            return True
+        if len(name_parts) > 1 and name_parts[-2] == 'LayerNorm' and name_parts[-1] == 'weight':
+            return True
+        return False
+
+    def optimization_group_name(param_name, param):
+        if hasattr(param, 'optimization_group_name'):
+            return getattr(param, 'optimization_group_name')
+        name_parts = param_name.split('.')
+        if name_parts[0] == 'prediction_head':
+            if name_parts[2] in common_graph_keys:
+                return 'common_head'
+            return 'individual_head'
+        return 'default'
+
+    groups = OrderedDict()
+    for name, parameter in named_parameters:
+        no_decay = is_no_decay(name, parameter)
+        group_name = optimization_group_name(name, parameter)
+        group_name, group_settings = settings.optimization_settings.get_parameter_group_settings(group_name)
+        key = group_name, no_decay
+        if key not in groups:
+            num_train_steps = num_train_steps_per_epoch * (
+                    settings.optimization_settings.num_train_epochs
+                    - group_settings.num_inactive_start_epochs
+                    - group_settings.num_inactive_end_epochs)
+            groups[key] = {
+                'params': list(),
+                'weight_decay': 0.0 if no_decay else 0.01,
+                'lr': group_settings.learning_rate,
+                't_total': num_train_steps,
+                'group_settings': group_settings,
+                'group_name': group_name
+            }
+            if group_settings.kwargs is not None:
+                for kwarg in group_settings.kwargs:
+                    groups[key][kwarg] = group_settings.kwargs[kwarg]
+        group = groups[key]
+        group['params'].append(parameter)
+
+    return list(groups[k] for k in groups)
+
+
 def iterate_and_update(update_fn, iterable):
     for item in iterable:
         yield item
@@ -558,7 +608,7 @@ def train(
         train_data_set: DataIdMultiDataset,
         validation_data_set: DataIdMultiDataset,
         test_data_set: DataIdMultiDataset,
-        meta_train_data_set: DataIdMultiDataset,  # not currently used
+        meta_train_data_set: DataIdMultiDataset,
         device: torch.device,
         progress_update,
         load_from_path: str = None):
@@ -678,19 +728,6 @@ def train(
     num_total_batches = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
     progress_update.update_batch_total(num_total_batches)
 
-    num_train_steps_prediction_heads = num_train_steps_per_epoch * settings.optimization_settings.num_train_epochs
-    num_train_steps_other = num_train_steps_per_epoch * (
-        settings.optimization_settings.num_train_epochs
-        - settings.optimization_settings.num_epochs_train_prediction_heads_only
-        - settings.optimization_settings.num_final_epochs_train_prediction_heads_only)
-
-    num_epochs_prediction_head_only_train = settings.optimization_settings.num_epochs_train_prediction_heads_only
-    if num_epochs_prediction_head_only_train < 0:
-        num_epochs_prediction_head_only_train = settings.optimization_settings.num_train_epochs
-    start_final_epochs_prediction_head_only_train = int(
-        settings.optimization_settings.num_train_epochs
-        - settings.optimization_settings.num_final_epochs_train_prediction_heads_only)
-
     graph_parts, common_graph_keys, token_supplemental_key_to_shape, pooled_supplemental_key_to_shape, loss_handlers = \
         setup_prediction_heads_and_losses(settings, train_data_set)
 
@@ -720,66 +757,39 @@ def train(
     else:
         param_optimizer = list(model.named_parameters())
         
-    def is_no_decay(param_name, param):
-        if hasattr(param, 'no_decay'):
-            return getattr(param, 'no_decay')
-        name_parts = param_name.split('.')
-        if name_parts[-1] in ['bias', 'gamma', 'beta']:
-            return True
-        if len(name_parts) > 1 and name_parts[-2] == 'LayerNorm' and name_parts[-1] == 'weight':
-            return True
-        return False
+    optimizer_grouped_parameters = group_parameters(
+        settings, param_optimizer, common_graph_keys, num_train_steps_per_epoch)
 
-    def is_prediction_head(param_name, param):
-        if hasattr(param, 'prediction_head'):
-            return getattr(param, 'prediction_head')
-        name_parts = param_name.split('.')
-        if name_parts[0] == 'prediction_head' and name_parts[2] not in common_graph_keys:
-            return True
-        return False
+    _, default_parameter_group_settings = settings.optimization_settings.get_parameter_group_settings('default')
 
-    non_prediction_head_parameters = None
-    if num_epochs_prediction_head_only_train > 0 \
-            or start_final_epochs_prediction_head_only_train < settings.optimization_settings.num_train_epochs:
-        non_prediction_head_parameters = [p for n, p in param_optimizer if not is_prediction_head(n, p)]
-        for p in non_prediction_head_parameters:
-            p.requires_grad = False
-
-    prediction_head_weight_decay_group = {
-        'params': [p for n, p in param_optimizer if not is_no_decay(n, p) and is_prediction_head(n, p)],
-        'weight_decay': 0.01,
-        't_total': num_train_steps_prediction_heads}
-    prediction_head_no_decay_group = {
-        'params': [p for n, p in param_optimizer if is_no_decay(n, p) and is_prediction_head(n, p)],
-        'weight_decay': 0.0,
-        't_total': num_train_steps_prediction_heads}
-
-    if settings.optimization_settings.learning_rate_head is not None:
-        prediction_head_weight_decay_group['lr'] = settings.optimization_settings.learning_rate_head
-        prediction_head_no_decay_group['lr'] = settings.optimization_settings.learning_rate_head
-
-    # noinspection PyUnresolvedReferences
-    optimizer_grouped_parameters = [
-        # weight decay, prediction head
-        prediction_head_weight_decay_group,
-        # no weight decay, prediction head
-        prediction_head_no_decay_group,
-        # weight decay, non-prediction head
-        {'params': [p for n, p in param_optimizer if not is_no_decay(n, p) and not is_prediction_head(n, p)],
-         'weight_decay': 0.01,
-         't_total': num_train_steps_other},
-        # no weight decay, prediction head
-        {'params': [p for n, p in param_optimizer if is_no_decay(n, p) and not is_prediction_head(n, p)],
-         'weight_decay': 0.0,
-         't_total': num_train_steps_other}]
-
+    dds_sample_optimizer = None
+    dds_scheduler = None
     if task_sample_logits is not None:
-        optimizer_grouped_parameters.append(
-            {'params': [task_sample_logits],
-             'weight_decay': 0.0,
-             't_total': num_train_steps_prediction_heads / task_sample_weights_train_frequency_in_batches})
-        if batch_sampler.learning_rate is not None:
-            optimizer_grouped_parameters[-1]['lr'] = batch_sampler.learning_rate
+        group_name, logit_settings = settings.optimization_settings.get_parameter_group_settings('task_sample_logits')
+        logit_group = {
+            'params': [task_sample_logits],
+            'weight_decay': 0.0,
+            't_total': num_total_batches / task_sample_weights_train_frequency_in_batches,
+            'lr': logit_settings.learning_rate
+            if batch_sampler.learning_rate is None else batch_sampler.learning_rate,
+            'group_settings': logit_settings,
+            'group_name': group_name}
+        if logit_settings.kwargs is not None:
+            for kwarg in logit_settings.kwargs:
+                logit_group[kwarg] = logit_settings.kwargs[kwarg]
+        optimizer_grouped_parameters.append(logit_group)
+        if settings.update_individual_heads_on_dds_sample:
+            individual_group = None
+            for group in optimizer_grouped_parameters:
+                if group['group_name'] == 'individual_head':
+                    individual_group = group
+                    break
+            if individual_group is None:
+                raise ValueError('Cannot find individual_head group')
+            dds_sample_optimizer = settings.optimization_settings.make_optimizer(
+                [individual_group], lr=default_parameter_group_settings.learning_rate)
+            dds_scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
+                dds_sample_optimizer, [individual_group])
 
     inner_optimizer_grouped_parameters = None
     if (is_meta_learn_active and not settings.use_pc_grad) or task_sample_logits is not None:
@@ -788,8 +798,7 @@ def train(
             g['t_total'] *= settings.num_meta_learn_no_gradient_samples + settings.num_meta_learn_gradient_samples
 
     optimizer = settings.optimization_settings.make_optimizer(
-        optimizer_grouped_parameters,
-        lr=settings.optimization_settings.learning_rate)
+        optimizer_grouped_parameters, lr=default_parameter_group_settings.learning_rate)
     scheduler = settings.optimization_settings.learning_rate_schedule.get_schedule(
         optimizer, optimizer_grouped_parameters)
 
@@ -798,7 +807,7 @@ def train(
         inner_meta_learn_optimizer = settings.optimization_settings.make_inner_meta_learn_optimizer(
             optimizer,
             inner_optimizer_grouped_parameters,
-            lr=settings.optimization_settings.learning_rate)
+            lr=default_parameter_group_settings.learning_rate)
         inner_meta_learn_scheduler = LambdaLR(inner_meta_learn_optimizer, scheduler.lr_lambdas, last_epoch=-1)
         scheduler = MetaLearnScheduler(scheduler, inner_meta_learn_scheduler)
 
@@ -810,8 +819,11 @@ def train(
     # for now we set max_sequence_length so these are never split
     logger.info("  Num split examples = %d", len(train_data_set))
     logger.info("  Batch size = %d", settings.optimization_settings.train_batch_size)
-    logger.info("  Num steps (heads) = %d", num_train_steps_prediction_heads)
-    logger.info("  Num steps (all param) = %d", num_train_steps_other)
+    seen_group_names = set()
+    for group in optimizer_grouped_parameters:
+        if group['group_name'] not in seen_group_names:
+            logger.info('  Num steps ({}) = {}'.format(group['group_name'], group['t_total']))
+            seen_group_names.add(group['group_name'])
 
     gradient_consumer = None
     if task_sample_logits is not None:
@@ -826,25 +838,24 @@ def train(
 
         model.train()
 
-        if index_epoch == start_final_epochs_prediction_head_only_train:
-            for p in non_prediction_head_parameters:
-                p.requires_grad = False
-            if batch_sampler is not None and hasattr(batch_sampler, 'change_temperature'):
-                batch_sampler.change_temperature(100)
-            if train_sampler is not None and hasattr(train_sampler, 'change_temperature'):
-                train_sampler.change_temperature(100)
-        elif index_epoch == num_epochs_prediction_head_only_train:
-            for p in non_prediction_head_parameters:
-                p.requires_grad = True
+        for group in optimizer_grouped_parameters:
+            if (group['group_settings'].num_inactive_start_epochs < 0
+                    or group['group_settings'].num_inactive_end_epochs < 0
+                    or index_epoch < group['group_settings'].num_inactive_start_epochs
+                    or index_epoch >= (settings.optimization_settings.num_train_epochs
+                                       - group['group_settings'].num_inactive_end_epochs)):
+                for p in group['params']:
+                    p.requires_grad = False
+            else:
+                for p in group['params']:
+                    p.requires_grad = True
 
         if is_meta_learn_active:
             no_gradient_meta_learn_iterator = iter(no_gradient_meta_learn_loader) \
                 if no_gradient_meta_learn_loader is not None else None
             gradient_meta_learn_iterator = iter(gradient_meta_learn_loader)
 
-            for step in iterate_and_update(
-                    progress_update.update_batch,
-                    range(num_train_steps_prediction_heads // settings.optimization_settings.num_train_epochs)):
+            for step in iterate_and_update(progress_update.update_batch, range(num_train_steps_per_epoch)):
                 restore_state = None
                 gradient_state = None
                 gradient_consumer = None
@@ -923,12 +934,13 @@ def train(
                         meta_train_iterator = iter(meta_train_loader)
                         meta_train_batch = next(meta_train_iterator)
 
-                    # update the similarities with a random meta_train task, don't step
+                    # update the similarities with a random meta_train task
                     _train_step(
                         settings,
                         settings.loss_tasks,
                         meta_train_data_set, device, model, meta_train_batch, step, index_epoch, global_step,
-                        loss_handlers, None, None, None, None, None, gradient_consumer, log_tag='smp')
+                        loss_handlers, None, param_optimizer, dds_sample_optimizer, dds_scheduler, None,
+                        gradient_consumer, log_tag='smp')
 
                 if is_stepped:
                     global_step += 1

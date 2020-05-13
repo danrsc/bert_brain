@@ -16,7 +16,8 @@ from .modeling import critic_types, GraphPartFactory, NamedTargetMaskedLossBase,
     learning_rate_schedules
 
 
-__all__ = ['OptimizationSettings', 'Settings', 'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory']
+__all__ = ['OptimizationSettings', 'Settings', 'make_optimizer_factory', 'make_inner_meta_learn_optimizer_factory',
+           'ParameterGroupOptimizationSettings']
 
 
 def make_optimizer_factory(optimizer_type: type, **kwargs) -> Callable[[Iterable[Mapping[str, Any]], float], Optimizer]:
@@ -59,6 +60,18 @@ def make_inner_meta_learn_optimizer_factory(
     return make_optimizer
 
 
+class ParameterGroupOptimizationSettings:
+
+    def __init__(self, learning_rate=5e-5, num_inactive_start_epochs=0, num_inactive_end_epochs=0, **kwargs):
+        self.learning_rate = learning_rate
+        self.num_inactive_start_epochs = num_inactive_start_epochs
+        self.num_inactive_end_epochs = num_inactive_end_epochs
+        self.kwargs = kwargs
+
+
+ParameterGroupSettingsT = Union[ParameterGroupOptimizationSettings, Mapping[str, ParameterGroupOptimizationSettings]]
+
+
 @dataclass
 class OptimizationSettings:
     # Total number of training epochs to perform.
@@ -67,9 +80,9 @@ class OptimizationSettings:
         AdamW, correct_bias=False)
     make_inner_meta_learn_optimizer: Callable[[Optimizer, Iterable[Mapping[str, Any]], float], Optimizer] = \
         make_inner_meta_learn_optimizer_factory(AdamW, betas=(0, None))
-    # initial learning rate for Adam
-    learning_rate: float = 5e-5
-    learning_rate_head: Optional[float] = None  # if None, uses learning_rate
+
+    parameter_group_settings: ParameterGroupSettingsT = ParameterGroupOptimizationSettings()
+
     learning_rate_schedule: LearningRateScheduleFactory = \
         learning_rate_schedules.LinearWithWarmupLearningRateScheduleFactory()
     train_batch_size: int = 32
@@ -84,12 +97,17 @@ class OptimizationSettings:
     loss_scale: float = 128
     # Number of updates steps to accumulate before performing a backward/update pass.
     gradient_accumulation_steps: int = 1
-    # During the first num_epochs_train_prediction_heads_only, only the prediction heads will be trained
-    num_epochs_train_prediction_heads_only: int = 0
-    # During the last num_final_prediction_head_only_epochs, only the prediction heads will be trained
-    num_final_epochs_train_prediction_heads_only: int = 0
     # Passed as num_workers to torch.utils.DataLoader
     num_loader_workers: int = 0
+
+    def get_parameter_group_settings(self, candidate_name):
+        if isinstance(self.parameter_group_settings, ParameterGroupOptimizationSettings):
+            return 'default', self.parameter_group_settings
+        if candidate_name in self.parameter_group_settings:
+            return candidate_name, self.parameter_group_settings[candidate_name]
+        if candidate_name.endswith('_head') and 'head' in self.parameter_group_settings:
+            return 'head', self.parameter_group_settings['head']
+        return 'default', self.parameter_group_settings['default']
 
 
 def _default_split_functions():
@@ -287,6 +305,8 @@ class Settings:
     # When use_pc_grad is True, num_meta_learn_no_gradient_samples must be 0, and meta_learn_no_gradient_loss_tasks must
     # be empty
     use_pc_grad: bool = False
+
+    update_individual_heads_on_dds_sample: bool = False
 
     @property
     def all_loss_tasks(self):
