@@ -7,6 +7,7 @@ from ocular import TextGrid, TextWrapStyle, write_text_grid_to_console
 
 
 output_order_regression = (
+    'r',         # correlation
     'mse',       # mean squared error
     'mae',       # mean absolute error
     'pove',      # proportion of variance explained

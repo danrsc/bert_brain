@@ -1,6 +1,7 @@
 from .specialized_loss import (
     NamedTargetStopWordAwareMSE,
     NamedTargetStopWordAwareMAE,
+    NamedTargetStopWordAwareRobustLoss,
     NamedTargetStopWordAwareKLeastSE,
     NamedTargetStopWordAwareKLeastSEEvalUpdate,
     NamedTargetStopWordAwareKLeastAE,
@@ -14,6 +15,7 @@ from .specialized_loss import (
     NamedTargetStopWordAwareSoftLabelNLL,
     NamedTargetSingleMSE,
     NamedTargetSingleMAE,
+    NamedTargetSingleRobustLoss,
     NamedTargetSingleKLeastSE,
     NamedTargetSingleKLeastSEEvalUpdate,
     NamedTargetSingleKLeastAE,
@@ -30,6 +32,7 @@ from .specialized_loss import (
 __all__ = [
     'NamedTargetStopWordAwareMSE',
     'NamedTargetStopWordAwareMAE',
+    'NamedTargetStopWordAwareRobustLoss',
     'NamedTargetStopWordAwareKLeastSE',
     'NamedTargetStopWordAwareKLeastSEEvalUpdate',
     'NamedTargetStopWordAwareKLeastAE',
@@ -43,6 +46,7 @@ __all__ = [
     'NamedTargetStopWordAwareSoftLabelNLL',
     'NamedTargetSingleMSE',
     'NamedTargetSingleMAE',
+    'NamedTargetSingleRobustLoss',
     'NamedTargetSingleKLeastSE',
     'NamedTargetSingleKLeastSEEvalUpdate',
     'NamedTargetSingleKLeastAE',

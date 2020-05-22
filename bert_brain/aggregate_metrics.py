@@ -337,6 +337,17 @@ def aggregator_regression_handler(aggregator, k_vs_k_num_samples=0, k_vs_k_k=20,
         predictions, target, mask, k_vs_k_num_samples, k_vs_k_k, k_vs_k_feature_axes, splits, is_single_example=False)
 
 
+def _corr(x, y):
+    indicator_valid = np.logical_and(np.isfinite(x), np.isfinite(y))
+    x = np.where(indicator_valid, x, np.nan)
+    y = np.where(indicator_valid, y, np.nan)
+    std_x = np.nanstd(x, axis=0, keepdims=True, ddof=1)
+    std_y = np.nanstd(y, axis=0, keepdims=True, ddof=1)
+    x = np.divide(x - np.nanmean(x, axis=0, keepdims=True), std_x, where=std_x > 0)
+    y = np.divide(y - np.nanmean(y, axis=0, keepdims=True), std_y, where=std_y > 0)
+    return np.nanmean(x * y, axis=0)
+
+
 def regression_handler(
         predictions, target, mask,
         k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1,
@@ -378,6 +389,7 @@ def regression_handler(
         mae=mae,
         pove=1 - (mse / variance),
         povu=(mse / variance),
+        r=_corr(predictions, masked_target),
         pode=1 - (mse / mean_abs_deviation),
         podu=(mae / mean_abs_deviation),
         variance=variance,

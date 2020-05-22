@@ -108,7 +108,7 @@ def _load_multi_binary_label_probing_task(
                     example_key=data_ids[0],
                     words=words,
                     sentence_ids=[data_ids[0]] * len(words),
-                    data_key=['{}.{}'.format(response_key, choice) for choice in label_choices],
+                    data_key=['{}_{}'.format(response_key, choice) for choice in label_choices],
                     data_ids=data_ids,
                     span_ids=span_ids)
                 for choice in label_choices:
@@ -118,7 +118,7 @@ def _load_multi_binary_label_probing_task(
                 pass
 
     output_labels = OrderedDict(
-        ('{}.{}'.format(response_key, k),
+        ('{}_{}'.format(response_key, k),
          KindData(ResponseKind.generic, np.array(output_labels[k], dtype=np.float64))) for k in output_labels)
     for k in output_labels:
         output_labels[k].data.setflags(write=False)

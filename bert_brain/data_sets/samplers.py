@@ -644,6 +644,7 @@ class BatchOneTaskMultiDifferentiableDataSelectionSampler(torch.utils.data.Sampl
 
         optimizer = torch.optim.SGD(params=[sample_rate_logits], lr=1)
 
+        logger.info('Starting gradient descent to initialize logits in {}'.format(type(self)))
         loss = None
         while loss is None or loss > 0.000001:
             sm_rates = torch.nn.functional.softmax(sample_rate_logits, dim=-1)
@@ -652,6 +653,7 @@ class BatchOneTaskMultiDifferentiableDataSelectionSampler(torch.utils.data.Sampl
             optimizer.step()
             optimizer.zero_grad()
             loss = loss.item()
+        logger.info('Logits initialized in {}'.format(type(self)))
 
         self._sample_rates = torch.nn.functional.softmax(sample_rate_logits, dim=-1).detach().numpy()
         self._sample_rate_logits = sample_rate_logits.detach().numpy()

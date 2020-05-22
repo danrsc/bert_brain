@@ -22,7 +22,7 @@ from .modeling import KeyedLinearFactory, LinearContextualParameterGenerationFac
     KeyedSingleTargetSpanAttentionFactory, critic_types, learning_rate_schedules, MultiLayerBottleneckFactory, \
     ContextualBottleneckSumFactory, AttentionKeyValuesFactory, AttentionPoolFactory, ContextAttentionFactory, \
     LinearDecreasingTemperatureSchedule, KeyedConcatFactory, KeyedSingleTargetSpanMaxPoolFactory, \
-    weight_losses_by_inverse_example_counts, ManuallyRescaleLosses
+    weight_losses_by_inverse_example_counts, ManuallyRescaleLosses, KeyedGumbelGateLinearFactory, KeyedGumbelGateFactory
 from .modeling import gelu_new as gelu
 from .settings import Settings, OptimizationSettings, ParameterGroupOptimizationSettings
 
@@ -2313,7 +2313,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
         # settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 5})
 
         return settings
-    elif name == 'fmri_cram_maxima_dds':
+    elif name == 'fmri_raw_dds':
         settings = Settings(
             corpora=(
                 corpus_types.HarryPotterCorpus(
@@ -2321,7 +2321,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                     fmri_sentence_mode='ignore',
                     fmri_window_duration=10.1,
                     fmri_minimum_duration_required=9.6,
-                    fmri_kind='local_maxima_of_projected',
+                    fmri_kind='raw',
                     fmri_smooth_factor=None,
                     separate_fmri_components=False,
                     group_meg_sentences_like_fmri=True,
@@ -2356,7 +2356,7 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
                 corpus_types.SemanticProtoRoles2()),
             # corpus_types.WordContent()),
             optimization_settings=OptimizationSettings(
-                num_train_epochs=10,
+                num_train_epochs=6,
                 parameter_group_settings={
                     'default': ParameterGroupOptimizationSettings(learning_rate=1e-5),
                     'common_head': ParameterGroupOptimizationSettings(learning_rate=1e-3),
@@ -2377,11 +2377,11 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
             update_individual_heads_on_dds_sample=True,
             # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
             # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
-            num_runs=4)
+            num_runs=100)
         settings.common_graph_parts = OrderedDict(
             latent_task_bottleneck=KeyedLinearFactory(
                 ('bert', 'sequence', 'all'),
-                output_key_to_shape=OrderedDict(sequence_all_bottleneck=40),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=30),
                 should_norm=True,
                 activation_fn=gelu),
             pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
@@ -2393,31 +2393,48 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
         settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
             fmri_linear=KeyedLinearFactory(
                 'hdr_pooled',
-                output_key_to_shape=OrderedDict(fmri_compressed=5),
-                should_norm=True,
-                activation_fn=gelu),
-            fmri_output=KeyedLinearFactory(
-                'fmri_compressed',
-                apply_at_most_one_data_id='if_no_target',
-                targets=ResponseKind.hp_fmri))
+                output_key_to_shape=OrderedDict(fmri_basis=10),
+                should_norm=False),
+            fmri_output=KeyedGumbelGateFactory(
+                'fmri_basis',
+                targets=ResponseKind.hp_fmri,
+                initial_temperature=1,
+                minimum_temperature=0.5,
+                annealing_rate=(0.5 - 1) / 1000,
+                hard=False))
+            # fmri_linear=KeyedLinearFactory(
+            #     'hdr_pooled',
+            #     targets=ResponseKind.hp_fmri))
         settings.preprocessors[ResponseKind.hp_fmri] = [
             PreprocessDetrend(metadata_example_group_by='fmri_runs', train_on_all=True),
             PreprocessStandardize(metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
         settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleMSE()
+        for kind in [
+                ResponseKind.ucl_eye,
+                ResponseKind.ucl_self_paced,
+                ResponseKind.dundee_eye,
+                ResponseKind.geco]:
+            # settings.preprocessors[kind] = [
+            #     PreprocessLog(),
+            #     PreprocessStandardize(stop_mode='content')]
+            settings.preprocessors[kind] = [
+                PreprocessLog(),
+                PreprocessStandardize(stop_mode='content')]
+                # PreprocessQuantileDigitize(quantiles=10, use_one_hot=False, stop_mode='content'),
+                # PreprocessStandardize(stop_mode='content', average_axis=None)]
+        # settings.preprocessors[ResponseKind.ucl_erp] = [PreprocessStandardize(stop_mode='content')]
+        settings.preprocessors[ResponseKind.ucl_erp] = [
+            PreprocessStandardize(stop_mode='content'),]  # use standardize to average
+            # PreprocessQuantileDigitize(quantiles=19, use_one_hot=False, stop_mode='content'),
+            # PreprocessStandardize(stop_mode='content', average_axis=None)]
         for kind in [
                 ResponseKind.ucl_erp,
                 ResponseKind.ucl_eye,
                 ResponseKind.ucl_self_paced,
                 ResponseKind.dundee_eye,
                 ResponseKind.geco]:
-            settings.preprocessors[kind] = [
-                # use standardize to average subjects
-                PreprocessStandardize(stop_mode='content'),
-                PreprocessQuantileDigitize(
-                    quantiles=2,
-                    stop_mode='content',
-                    use_one_hot=False)]
-            settings.critics[kind] = critic_types.NamedTargetStopWordAwareBinaryCrossEntropyWithLogits()
+            settings.critics[kind] = critic_types.NamedTargetStopWordAwareMSE()
+
         settings.default_pooled_source = 'pooled_all_bottleneck'
         settings.default_sequence_source = 'sequence_all_bottleneck'
         settings.loss_tasks.add(ResponseKind.generic)

@@ -28,7 +28,11 @@ __all__ = [
     'KeyedSingleTargetSpanMaxPool',
     'group_concat_linear',
     'KeyedConcatFactory',
-    'KeyedConcat']
+    'KeyedConcat',
+    'KeyedGumbelGateLinearFactory',
+    'KeyedGumbelGateLinear',
+    'KeyedGumbelGate',
+    'KeyedGumbelGateFactory']
 
 
 def group_concat_linear(
@@ -694,3 +698,197 @@ class KeyedConcat(GraphPart):
         if self.activation_fn is not None:
             output[self.output_name] = self.activation_fn(output[self.output_name])
         return output
+
+
+@dataclass(frozen=True)
+class KeyedGumbelGateLinearFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+    should_norm: bool = False
+    bias: bool = True
+    activation_fn: Optional[Callable[[Tensor], Tensor]] = None
+
+    def make_graph_part(self):
+        return KeyedGumbelGateLinear(
+            self.source_name, self.output_key_to_shape, self.targets, self.should_norm, self.bias, self.activation_fn)
+
+
+class KeyedGumbelGateLinear(KeyedBase):
+
+    def __init__(
+            self,
+            source_name: Union[str, Tuple[str, ...]],
+            output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
+            targets: Optional[Union[str, Iterable[str]]] = None,
+            should_norm: bool = False,
+            bias: bool = True,
+            activation_fn: Optional[Callable[[Tensor], Tensor]] = None):
+        super().__init__(output_key_to_shape, targets)
+        self.source_name = source_name
+        self.should_norm = should_norm
+        self.should_bias = bias
+        self.activation_fn = activation_fn
+        self.weight = None
+        self.bias = None
+        self.logits = None
+        
+    @staticmethod
+    def _make_linear(in_channels, out_channels, should_bias):
+        weight = nn.Parameter(torch.empty(out_channels, in_channels), requires_grad=True)
+        nn.init.kaiming_uniform_(weight, a=np.sqrt(5))
+        if should_bias:
+            bias = nn.Parameter(torch.empty(out_channels), requires_grad=True)
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(weight)
+            bound = 1 / np.sqrt(fan_in)
+            nn.init.uniform_(bias, -bound, bound)
+        else:
+            bias = None
+        return weight, bias
+
+    @staticmethod
+    def _make_logits(in_channels, out_channels):
+        logits = nn.Parameter(torch.empty(out_channels, in_channels), requires_grad=True)
+        nn.init.uniform_(logits, np.log(1 - 1 / in_channels), np.log(1 + 1 / in_channels))
+        return logits
+
+    def _instantiate(self, name_to_num_channels):
+        in_channels = name_to_num_channels[self.source_name]
+        self.weight, self.bias = KeyedGumbelGateLinear._make_linear(in_channels, sum(self.splits), self.should_bias)
+        self.logits = KeyedGumbelGateLinear._make_logits(in_channels, sum(self.splits))
+        result = OrderedDict()
+        for key in self.output_key_to_shape:
+            result[key] = int(np.prod(self.output_key_to_shape[key]))
+        if self.should_norm:
+            self.norm_layers = torch.nn.ModuleDict()
+            for k in result:
+                self.norm_layers[k] = torch.nn.LayerNorm(result[k])
+        for key in name_to_num_channels:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                for result_key in self.output_key_to_shape:
+                    result[(result_key,) + key[1:]] = name_to_num_channels[key]
+        return result
+
+    @staticmethod
+    def _predict(x, logits, weight, bias):
+        gate = torch.nn.functional.gumbel_softmax(logits, hard=True)
+        return torch.nn.functional.linear(x, weight * gate, bias)
+
+    def forward(self, batch):
+        x = batch[self.source_name]
+        result = OrderedDict()
+        predictions = KeyedGumbelGateLinear._predict(x, self.logits, self.weight, self.bias)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        assert (len(self.output_key_to_shape) == len(predictions))
+        for k, p in zip(self.output_key_to_shape, predictions):
+            if self.activation_fn is not None:
+                p = self.activation_fn(p)
+            if self.should_norm:
+                p = self.norm_layers[k](p)
+            p = p.view(p.size()[:-1] + self.output_key_to_shape[k])
+            result[k] = p
+            for key in batch:
+                if isinstance(key, tuple) and key[0] == self.source_name:
+                    result[(k,) + key[1:]] = batch[key]
+
+        return result
+
+    def get_output_weights(self, as_numpy=True):
+        result = OrderedDict()
+        with torch.no_grad():
+            weights = torch.sum(torch.softmax(self.logits, dim=-1) * self.weight, dim=-1)
+        split_weights = torch.split(weights, self.splits, dim=0)
+        for key, weight in zip(self.output_key_to_shape, split_weights):
+            weight = torch.reshape(weight, self.output_key_to_shape[key] + weight.size()[1:])
+            if as_numpy:
+                weight = weight.numpy()
+            result[key] = weight
+        return result
+
+
+@dataclass(frozen=True)
+class KeyedGumbelGateFactory(GraphPartFactory):
+    source_name: Union[str, Tuple[str, ...]]
+    output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
+    targets: Optional[Union[str, Iterable[str]]] = None
+    should_norm: bool = False
+    activation_fn: Optional[Callable[[Tensor], Tensor]] = None
+    hard: bool = False
+    initial_temperature: float = 1
+    minimum_temperature: float = 1
+    annealing_rate: Optional[float] = None
+
+    def make_graph_part(self) -> GraphPart:
+        return KeyedGumbelGate(
+            self.source_name, self.output_key_to_shape, self.targets, self.should_norm, self.activation_fn,
+            self.hard, self.initial_temperature, self.minimum_temperature, self.annealing_rate)
+
+
+class KeyedGumbelGate(KeyedBase):
+
+    def __init__(
+            self,
+            source_name: Union[str, Tuple[str, ...]],
+            output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None,
+            targets: Optional[Union[str, Iterable[str]]] = None,
+            should_norm: bool = False,
+            activation_fn: Optional[Callable[[Tensor], Tensor]] = None,
+            hard: bool = False,
+            initial_temperature: float = 1,
+            minimum_temperature: float = 1,
+            annealing_rate: Optional[float] = None):
+        super().__init__(output_key_to_shape, targets)
+        self.source_name = source_name
+        self.should_norm = should_norm
+        self.activation_fn = activation_fn
+        self.logits = None
+        self.hard = hard
+        self.initial_temperature = initial_temperature
+        self.minimum_temperature = minimum_temperature
+        self.annealing_rate = annealing_rate
+        if self.annealing_rate is None:
+            self.annealing_rate = (self.minimum_temperature - self.initial_temperature) / 1000
+
+    @staticmethod
+    def _make_logits(in_channels, out_channels):
+        logits = nn.Parameter(torch.empty(out_channels, in_channels), requires_grad=True)
+        nn.init.uniform_(logits, -1, 1)
+        return logits
+
+    def _instantiate(self, name_to_num_channels):
+        in_channels = name_to_num_channels[self.source_name]
+        self.logits = KeyedGumbelGate._make_logits(in_channels, sum(self.splits))
+        result = OrderedDict()
+        for key in self.output_key_to_shape:
+            result[key] = int(np.prod(self.output_key_to_shape[key]))
+        if self.should_norm:
+            self.norm_layers = torch.nn.ModuleDict()
+            for k in result:
+                self.norm_layers[k] = torch.nn.LayerNorm(result[k])
+        for key in name_to_num_channels:
+            if isinstance(key, tuple) and key[0] == self.source_name:
+                for result_key in self.output_key_to_shape:
+                    result[(result_key,) + key[1:]] = name_to_num_channels[key]
+        return result
+
+    def forward(self, batch):
+        x = batch[self.source_name]
+        result = OrderedDict()
+        temperature = max(
+            self.initial_temperature + self.annealing_rate * batch['global_step'], self.minimum_temperature)
+        gate = torch.nn.functional.gumbel_softmax(self.logits, tau=temperature, hard=self.hard)
+        predictions = torch.nn.functional.linear(x, gate)
+        predictions = torch.split(predictions, self.splits, dim=-1)
+        assert (len(self.output_key_to_shape) == len(predictions))
+        for k, p in zip(self.output_key_to_shape, predictions):
+            if self.activation_fn is not None:
+                p = self.activation_fn(p)
+            if self.should_norm:
+                p = self.norm_layers[k](p)
+            p = p.view(p.size()[:-1] + self.output_key_to_shape[k])
+            result[k] = p
+            for key in batch:
+                if isinstance(key, tuple) and key[0] == self.source_name:
+                    result[(k,) + key[1:]] = batch[key]
+
+        return result

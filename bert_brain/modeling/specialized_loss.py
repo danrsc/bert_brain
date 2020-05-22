@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import dataclasses
-from typing import Optional, Callable, List, Mapping, Tuple
+from typing import Optional, Callable, List, Mapping, Tuple, Union
 
 import numpy as np
 import torch
@@ -19,10 +19,13 @@ __all__ = [
     'masked_binary_cross_entropy',
     'masked_soft_label_cross_entropy',
     'masked_soft_label_negative_log_likelihood',
+    'masked_robust_loss',
+    'robust_loss',
     'stop_word_and_target_not_nan_mask',
     'NamedTargetMaskedLossBase',
     'NamedTargetStopWordAwareMSE',
     'NamedTargetStopWordAwareMAE',
+    'NamedTargetStopWordAwareRobustLoss',
     'NamedTargetStopWordAwareKLeastSE',
     'NamedTargetStopWordAwareKLeastSEEvalUpdate',
     'NamedTargetStopWordAwareKLeastAE',
@@ -35,6 +38,7 @@ __all__ = [
     'NamedTargetStopWordAwareSoftLabelCrossEntropy',
     'NamedTargetStopWordAwareSoftLabelNLL',
     'NamedTargetSingleMSE',
+    'NamedTargetSingleRobustLoss',
     'NamedTargetSingleMAE',
     'NamedTargetSingleKLeastSE',
     'NamedTargetSingleKLeastSEEvalUpdate',
@@ -65,6 +69,114 @@ def masked_squared_error(mask, predictions, target):
     sq_err = (torch.masked_select(predictions, mask) - torch.masked_select(target, mask)) ** 2
     result = torch.zeros_like(target)
     result.masked_scatter_(mask, sq_err)
+    return result, valid_count
+
+
+def log1p_safe(x):
+    # https://github.com/jonbarron/robust_loss_pytorch/blob/master/robust_loss_pytorch/util.py
+    """The same as torch.log1p(x), but clamps the input to prevent NaNs."""
+    x = torch.as_tensor(x)
+    return torch.log1p(torch.min(x, torch.tensor(33e37).to(x)))
+
+
+def expm1_safe(x):
+    # https://github.com/jonbarron/robust_loss_pytorch/blob/master/robust_loss_pytorch/util.py
+    """The same as tf.math.expm1(x), but clamps the input to prevent NaNs."""
+    x = torch.as_tensor(x)
+    return torch.expm1(torch.min(x, torch.tensor(87.5).to(x)))
+
+
+def robust_loss(x, alpha, scale, approximate=False, epsilon=1e-6):
+    # taken from https://github.com/jonbarron/robust_loss_pytorch/blob/master/robust_loss_pytorch/general.py
+    """Implements the general form of the loss.
+    This implements the rho(x, \alpha, c) function described in "A General and
+    Adaptive Robust Loss Function", Jonathan T. Barron,
+    https://arxiv.org/abs/1701.03077.
+    Args:
+      x: The residual for which the loss is being computed. x can have any shape,
+        and alpha and scale will be broadcasted to match x's shape if necessary.
+        Must be a tensor of floats.
+      alpha: The shape parameter of the loss (\alpha in the paper), where more
+        negative values produce a loss with more robust behavior (outliers "cost"
+        less), and more positive values produce a loss with less robust behavior
+        (outliers are penalized more heavily). Alpha can be any value in
+        [-infinity, infinity], but the gradient of the loss with respect to alpha
+        is 0 at -infinity, infinity, 0, and 2. Must be a tensor of floats with the
+        same precision as `x`. Varying alpha allows
+        for smooth interpolation between a number of discrete robust losses:
+        alpha=-Infinity: Welsch/Leclerc Loss.
+        alpha=-2: Geman-McClure loss.
+        alpha=0: Cauchy/Lortentzian loss.
+        alpha=1: Charbonnier/pseudo-Huber loss.
+        alpha=2: L2 loss.
+      scale: The scale parameter of the loss. When |x| < scale, the loss is an
+        L2-like quadratic bowl, and when |x| > scale the loss function takes on a
+        different shape according to alpha. Must be a tensor of single-precision
+        floats.
+      approximate: a bool, where if True, this function returns an approximate and
+        faster form of the loss, as described in the appendix of the paper. This
+        approximation holds well everywhere except as x and alpha approach zero.
+      epsilon: A float that determines how inaccurate the "approximate" version of
+        the loss will be. Larger values are less accurate but more numerically
+        stable. Must be great than single-precision machine epsilon.
+    Returns:
+      The losses for each element of x, in the same shape and precision as x.
+    """
+    if approximate:
+        # `epsilon` must be greater than single-precision machine epsilon.
+        assert epsilon > np.finfo(np.float32).eps
+        # Compute an approximate form of the loss which is faster, but innacurate
+        # when x and alpha are near zero.
+        b = torch.abs(alpha - 2) + epsilon
+        d = torch.where(alpha >= 0, alpha + epsilon, alpha - epsilon)
+        loss = (b / d) * (torch.pow((x / scale) ** 2 / b + 1., 0.5 * d) - 1.)
+    else:
+        # Compute the exact loss.
+
+        # This will be used repeatedly.
+        squared_scaled_x = (x / scale) ** 2
+
+        # The loss when alpha == 2.
+        loss_two = 0.5 * squared_scaled_x
+        # The loss when alpha == 0.
+        loss_zero = log1p_safe(0.5 * squared_scaled_x)
+        # The loss when alpha == -infinity.
+        loss_neginf = -torch.expm1(-0.5 * squared_scaled_x)
+        # The loss when alpha == +infinity.
+        loss_posinf = expm1_safe(0.5 * squared_scaled_x)
+
+        # The loss when not in one of the above special cases.
+        machine_epsilon = torch.tensor(np.finfo(np.float32).eps).to(x)
+        # Clamp |2-alpha| to be >= machine epsilon so that it's safe to divide by.
+        beta_safe = torch.max(machine_epsilon, torch.abs(alpha - 2.))
+        # Clamp |alpha| to be >= machine epsilon so that it's safe to divide by.
+        alpha_safe = torch.where(alpha >= 0, torch.ones_like(alpha),
+                                 -torch.ones_like(alpha)) * torch.max(
+            machine_epsilon, torch.abs(alpha))
+        loss_otherwise = (beta_safe / alpha_safe) * (
+                torch.pow(squared_scaled_x / beta_safe + 1., 0.5 * alpha) - 1.)
+
+        # Select which of the cases of the loss to return.
+        loss = torch.where(
+            alpha == -float('inf'), loss_neginf,
+            torch.where(
+                alpha == 0, loss_zero,
+                torch.where(
+                    alpha == 2, loss_two,
+                    torch.where(alpha == float('inf'), loss_posinf,
+                                loss_otherwise))))
+
+    return loss
+
+
+def masked_robust_loss(mask, predictions, target, alpha, scale, approximate=False, epsilon=1e-6):
+    valid_count = mask.sum().item()
+    if valid_count == 0:
+        raise NoValidInputs()
+    residual = torch.masked_select(predictions, mask) - torch.masked_select(target, mask)
+    loss = robust_loss(residual, alpha, scale, approximate=approximate, epsilon=epsilon)
+    result = torch.zeros_like(target)
+    result.masked_scatter_(mask, loss)
     return result, valid_count
 
 
@@ -880,6 +992,26 @@ class NamedTargetStopWordAwarePearsonDistance(_NamedTargetStopWordAwareLoss):
 
 
 @dataclass(frozen=True)
+class NamedTargetStopWordAwareRobustLoss(_NamedTargetStopWordAwareLoss):
+    alpha: Union[float, torch.Tensor] = 2
+    scale: Union[float, torch.Tensor] = np.sqrt(0.5)
+    approximate: bool = False
+    epsilon: float = 1e-6
+    _is_initialized: bool = dataclasses.field(default=False, init=False, repr=False, compare=False)
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        if not self._is_initialized:
+            object.__setattr__(self, 'alpha', torch.as_tensor(self.alpha, dtype=target.dtype, device=target.device))
+            object.__setattr__(self, 'scale', torch.as_tensor(self.scale, dtype=target.dtype, device=target.device))
+            object.__setattr__(self, '_is_initialized', True)
+        return masked_robust_loss(mask, predictions, target, self.alpha, self.scale, self.approximate, self.epsilon)
+
+    @classmethod
+    def is_classification_loss(cls):
+        return False
+
+
+@dataclass(frozen=True)
 class NamedTargetStopWordAwareCrossEntropy(_NamedTargetStopWordAwareLoss):
     num_classes: Optional[int] = None
 
@@ -1021,6 +1153,26 @@ class NamedTargetSingleMAE(NamedTargetMaskedLossBase):
 
     def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
         return masked_absolute_error(mask, predictions, target)
+
+    @classmethod
+    def is_classification_loss(cls):
+        return False
+
+
+@dataclass(frozen=True)
+class NamedTargetSingleRobustLoss(NamedTargetMaskedLossBase):
+    alpha: Union[float, torch.Tensor] = 2
+    scale: Union[float, torch.Tensor] = np.sqrt(0.5)
+    approximate: bool = False
+    epsilon: float = 1e-6
+    _is_initialized: bool = dataclasses.field(default=False, init=False, repr=False, compare=False)
+
+    def _masked_loss(self, is_eval, epoch, global_step, mask, predictions, target):
+        if not self._is_initialized:
+            object.__setattr__(self, 'alpha', torch.as_tensor(self.alpha, dtype=target.dtype, device=target.device))
+            object.__setattr__(self, 'scale', torch.as_tensor(self.scale, dtype=target.dtype, device=target.device))
+            object.__setattr__(self, '_is_initialized', True)
+        return masked_robust_loss(mask, predictions, target, self.alpha, self.scale, self.approximate, self.epsilon)
 
     @classmethod
     def is_classification_loss(cls):
