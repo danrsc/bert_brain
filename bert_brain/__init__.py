@@ -5,6 +5,7 @@ from . import aggregate_metrics
 from . import experiments
 from . import false_discovery_rate
 from . import loss_curves
+from . import meta_data
 from . import paired_metrics
 from . import result_output
 from . import sentence_level_metrics
@@ -18,6 +19,7 @@ from .aggregate_metrics import *
 from .experiments import *
 from .false_discovery_rate import *
 from .loss_curves import *
+from .meta_data import *
 from .paired_metrics import *
 from .result_output import *
 from .sentence_level_metrics import *
@@ -25,7 +27,7 @@ from .settings import *
 from .train_eval import *
 
 __all__ = ['common', 'data_sets', 'modeling', 'experiments', 'false_discovery_rate', 'loss_curves', 'paired_metrics',
-           'aggregate_metrics', 'result_output', 'sentence_level_metrics', 'settings', 'train_eval']
+           'aggregate_metrics', 'result_output', 'sentence_level_metrics', 'settings', 'train_eval', 'meta_data']
 __all__.extend(common.__all__)
 __all__.extend(data_sets.__all__)
 __all__.extend(modeling.__all__)
@@ -33,6 +35,7 @@ __all__.extend(aggregate_metrics.__all__)
 __all__.extend(experiments.__all__)
 __all__.extend(false_discovery_rate.__all__)
 __all__.extend(loss_curves.__all__)
+__all__.extend(meta_data.__all__)
 __all__.extend(paired_metrics.__all__)
 __all__.extend(result_output.__all__)
 __all__.extend(sentence_level_metrics.__all__)

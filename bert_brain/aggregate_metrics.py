@@ -3,17 +3,21 @@ import os
 import warnings
 from collections import OrderedDict
 import dataclasses
-from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
+from tqdm.auto import tqdm
 
 import numpy as np
 from scipy.special import logsumexp
 from scipy.stats.mstats import rankdata
+from scipy.stats import ttest_rel, ttest_1samp
 
 from .experiments import singleton_variation, task_hash
 from .modeling import critic_types, NamedTargetMaskedLossBase
-from .result_output import read_predictions
+from .result_output import read_predictions, get_output_keys
 from .data_sets import DataIdDataset
+from .meta_data import TextLabels
 
 __all__ = [
     'Aggregator',
@@ -27,7 +31,11 @@ __all__ = [
     'make_prediction_handler',
     'get_field_predictions',
     'assemble_indexed_predictions',
-    'k_vs_k']
+    'k_vs_k',
+    'compute_statistics_on_aggregated',
+    'StatisticsSpec',
+    'StatisticsResult',
+    'spatial_neighbor_edges']
 
 
 class Aggregator:
@@ -126,12 +134,22 @@ def expand_predictions(prediction, cluster_ids):
         return np.reshape(expanded, (prediction.shape[0],) + cluster_ids.shape)
 
 
+_process_paths_obj = None
+_process_text_labels = dict()
+
+
+def _set_process_paths_obj(paths_obj):
+    global _process_paths_obj
+    _process_paths_obj = paths_obj
+
+
 def _read_variation_parallel_helper(item):
-    (result_path, model_path, variation_name, index_run,
+    (variation_name, index_run,
      compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) = item
+    paths_obj = _process_paths_obj
     (variation_set_name, training_variation_name), settings = singleton_variation(variation_name)
-    output_dir = os.path.join(result_path, variation_set_name, task_hash(settings))
-    model_dir = os.path.join(model_path, variation_set_name, task_hash(settings), 'run_{}'.format(index_run))
+    output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(settings))
+    model_dir = os.path.join(paths_obj.model_path, variation_set_name, task_hash(settings), 'run_{}'.format(index_run))
     if not os.path.exists(os.path.join(output_dir, 'run_{}'.format(index_run), 'completed.txt')):
         return index_run, None
     validation_dir = os.path.join(output_dir, 'run_{}'.format(index_run), 'validation_predictions')
@@ -189,12 +207,25 @@ def _read_variation_parallel_helper(item):
         else:
             loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
         handler = make_prediction_handler(loss, loss_handler_kwargs)
-        result_dict = handler(run_aggregated)
-        if compute_scalar:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning)
-                result_dict = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
-        run_results[name] = result_dict
+        handler_result = handler(run_aggregated)
+        is_many = isinstance(handler_result, list)
+        if not is_many:
+            handler_result = [handler_result]
+            if compute_scalar:
+                for index_result_dict in range(len(handler_result)):
+                    result_dict = handler_result[index_result_dict]
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=RuntimeWarning)
+                        handler_result[index_result_dict] = dict((k, np.nanmean(result_dict[k])) for k in result_dict)
+        if not is_many:
+            run_results[name] = handler_result[0]
+        else:
+            if variation_name not in _process_text_labels:
+                _process_text_labels[variation_name] = TextLabels(paths_obj, variation_name, index_run)
+            label_maker = _process_text_labels[variation_name]
+            text_labels = label_maker.labels(name, len(handler_result))
+            for text_label, result_dict in zip(text_labels, handler_result):
+                run_results[text_label] = result_dict
     return index_run, run_results
 
 
@@ -248,17 +279,17 @@ def read_variation_results(
         runs = [index_run]
     else:
         runs = index_run
-    task_arguments = [(paths.result_path, paths.model_path, variation_name, i,
-                       compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in runs]
 
-    with ThreadPoolExecutor() as ex:
+    task_arguments = [(variation_name, i, compute_scalar, k_vs_k_feature_axes, loss_handler_kwargs) for i in runs]
+
+    with ThreadPoolExecutor(initializer=_set_process_paths_obj, initargs=(paths,)) as ex:
         mapped = ex.map(_read_variation_parallel_helper, task_arguments)
     # mapped = map(_read_variation_parallel_helper, task_arguments)
 
     has_warned = False
     count_runs = 0
     aggregated = dict()
-    for index_run, run_results in mapped:
+    for index_run, run_results in tqdm(mapped):
         if run_results is None:
             if not has_warned:
                 print('Warning: results incomplete. Some output files not found')
@@ -351,7 +382,8 @@ def _corr(x, y):
 def regression_handler(
         predictions, target, mask,
         k_vs_k_num_samples=0, k_vs_k_k=20, k_vs_k_feature_axes=-1,
-        splits=None, is_single_example=False):
+        splits=None, is_single_example=False, class_wise=False):
+    # class_wise is not used in regression_handler, but we keep the signature consistent with class_handler
 
     if is_single_example and len(target) > 1:
         seq_r = nan_pearson(predictions, target)
@@ -456,16 +488,17 @@ def bincount_axis(x, weights=None, minlength=None, axis=-1):
     return np.transpose(x, transpose_axes)
 
 
-def aggregator_class_handler(aggregator, pos_weight=None, is_binary=False):
+def aggregator_class_handler(aggregator, pos_weight=None, is_binary=False, class_wise=False):
 
     target = np.array(aggregator.values('target'))
     predictions = np.array(aggregator.values('prediction'))
     mask = np.array(aggregator.values('mask'))
 
-    return class_handler(predictions, target, mask, pos_weight, is_binary)
+    return class_handler(predictions, target, mask, pos_weight, is_binary, class_wise=class_wise)
 
 
-def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, is_single_example=False):
+def class_handler(
+        predictions, target, mask, pos_weight=None, is_binary=False, is_single_example=False, class_wise=False):
     # is_single_example is not currently used; it is there so the caller can pass it without knowing
     # what the loss handler is
 
@@ -560,24 +593,64 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
         log_softmax = predictions - log_sum
         predicted_class = np.argmax(predictions, axis=-1)
         if is_hard_label:
-            cross_entropy = np.where(
-                np.isnan(target),
-                np.nan,
-                np.squeeze(
-                    np.take_along_axis(
-                        -log_softmax,
-                        np.expand_dims(np.where(np.isnan(target), 0, target).astype(np.intp), -1), axis=-1),
-                    axis=-1))
-            cross_entropy = np.nanmean(cross_entropy, axis=0)
-            accuracy = (np.sum(np.equal(predicted_class, target), axis=0)
-                        / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
             bin_counts = bincount_axis(
                 np.where(np.isnan(target), np.nanmax(target) + 1, target).astype(np.intp), axis=0)
             if len(bin_counts) == np.nanmax(target + 1):
                 bin_counts = bin_counts[:-1]  # trim off the nan bin
             modes = np.argmax(bin_counts, axis=0)
-            mode_accuracy = (np.sum(np.equal(modes, target), axis=0)
-                             / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
+
+            if class_wise:
+                class_wise_results = list()
+                for target_class in range(log_softmax.shape[-1]):
+                    current_target = np.where(target == target_class, target, np.nan)
+                    cross_entropy = np.where(
+                        np.isnan(current_target),
+                        np.nan,
+                        np.squeeze(
+                            np.take_along_axis(
+                                -log_softmax,
+                                np.expand_dims(
+                                    np.where(np.isnan(current_target), 0, current_target).astype(np.intp), -1),
+                                axis=-1),
+                            axis=-1))
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=RuntimeWarning)
+                        cross_entropy = np.nanmean(cross_entropy, axis=0)
+
+                    denom_model = np.sum(
+                        np.greater_equal(np.where(np.isnan(current_target), -1, current_target), 0), axis=0)
+
+                    accuracy = np.where(denom_model == 0, 0, np.divide(
+                        np.sum(np.equal(predicted_class, current_target), axis=0), denom_model, where=denom_model != 0))
+
+                    denom_mode = np.sum(
+                        np.greater_equal(np.where(np.isnan(current_target), -1, current_target), 0), axis=0)
+
+                    mode_accuracy = np.where(denom_mode == 0, 0, np.divide(
+                        np.sum(np.equal(modes, current_target), axis=0), denom_mode, where=denom_mode != 0))
+
+                    poma = 1 if mode_accuracy == 0 else accuracy / mode_accuracy
+                    rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
+                    class_wise_results.append(
+                        dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy))
+                return class_wise_results
+            else:
+                cross_entropy = np.where(
+                    np.isnan(target),
+                    np.nan,
+                    np.squeeze(
+                        np.take_along_axis(
+                            -log_softmax,
+                            np.expand_dims(np.where(np.isnan(target), 0, target).astype(np.intp), -1), axis=-1),
+                        axis=-1))
+                cross_entropy = np.nanmean(cross_entropy, axis=0)
+                accuracy = (np.sum(np.equal(predicted_class, target), axis=0)
+                            / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
+                mode_accuracy = (np.sum(np.equal(modes, target), axis=0)
+                                 / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
+                poma = accuracy / mode_accuracy
+                rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
+                return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy)
         else:
             # soft class labels
             cross_entropy = np.nanmean(np.sum(-log_softmax * target, axis=-1), axis=0)
@@ -600,10 +673,10 @@ def class_handler(predictions, target, mask, pos_weight=None, is_binary=False, i
             partial_credit = np.reshape(partial_credit, target.shape[:-1])
             accuracy = np.nanmean(partial_credit, axis=0)
 
-        poma = accuracy / mode_accuracy
-        rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
+            poma = accuracy / mode_accuracy
+            rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
 
-        return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy)
+            return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy)
 
 
 def make_prediction_handler(which_loss, loss_kwargs=None, using_aggregator=True):
@@ -827,3 +900,195 @@ def assemble_indexed_predictions(paths_obj, variation_set_name, index_run=None):
                     assembled[f.name] = np.squeeze(assembled[f.name], axis=-1)
         result[key] = dataclasses.replace(to_assemble[key][0], **assembled)
     return result
+
+
+def get_field_names(paths_obj, variation_set_name, index_run=None):
+    (variation_set_name, _), settings = singleton_variation(variation_set_name)
+    output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(settings))
+    run_iterable = (index_run,) if index_run is not None else range(settings.num_runs)
+    field_names = set()
+    for index_run in run_iterable:
+        output_dir_run = os.path.join(output_dir, 'run_{}'.format(index_run))
+        if not os.path.exists(os.path.join(output_dir_run, 'completed.txt')):
+            raise ValueError('Incomplete results')
+        validation_dir = os.path.join(output_dir_run, 'validation_predictions')
+        if not os.path.exists(validation_dir):
+            raise ValueError('Path does not exist: {}'.format(validation_dir))
+        field_names.update(get_output_keys(validation_dir))
+    return list(sorted(field_names))
+
+
+@dataclasses.dataclass
+class StatisticsSpec:
+    regression_metric: Optional[str] = None
+    classifier_metric: Optional[str] = None
+    test_type: str = 'ttest_rel'
+
+
+@dataclasses.dataclass
+class StatisticsResult:
+    field_name: str
+    metric_name: str
+    test_type: str
+    model_mean: np.ndarray
+    model_std: np.ndarray
+    baseline_mean: np.ndarray
+    baseline_std: np.ndarray
+    p_values: np.ndarray
+
+
+def _statistics_helper(item):
+    (variation_name, field_name, statistics_spec, index_run,
+     k_vs_k_feature_axes, loss_handler_kwargs) = item
+
+    (variation_set_name, training_variation_name), settings = singleton_variation(variation_name)
+    paths_obj = _process_paths_obj
+
+    run_iterable = [index_run] if index_run is not None else range(settings.num_runs)
+    missing_runs = False
+
+    aggregated = dict()
+    metrics = dict()
+    for index_run in run_iterable:
+        output_dir = os.path.join(
+            paths_obj.result_path, variation_set_name, task_hash(settings))
+        if not os.path.exists(os.path.join(output_dir, 'run_{}'.format(index_run), 'completed.txt')):
+            missing_runs = True
+            continue
+        validation_dir = os.path.join(output_dir, 'run_{}'.format(index_run), 'validation_predictions')
+        output_results = read_predictions(validation_dir, keys=field_name)
+        run_aggregated = Aggregator()
+        loss = None
+        is_active_loss = True
+        for output_result in output_results:
+            if not output_result.is_active_loss:
+                is_active_loss = False
+                break
+            if loss is None:
+                loss = output_result.critic_type
+            else:
+                assert (loss == output_result.critic_type)
+            run_aggregated.update(output_result, is_sequence=output_result.sequence_type != 'single')
+
+        if not is_active_loss:
+            continue
+
+        loss_handler_kwargs = dict(loss_handler_kwargs)
+        if isinstance(k_vs_k_feature_axes, dict):
+            if field_name in k_vs_k_feature_axes:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes[field_name]
+            else:
+                loss_handler_kwargs['k_vs_k_feature_axes'] = -1
+        else:
+            loss_handler_kwargs['k_vs_k_feature_axes'] = k_vs_k_feature_axes
+        handler = make_prediction_handler(loss, loss_handler_kwargs)
+        handler_result = handler(run_aggregated)
+        is_many = isinstance(handler_result, list)
+        if not is_many:
+            handler_result = [handler_result]
+            text_labels = [field_name]
+        else:
+            if variation_name not in _process_text_labels:
+                _process_text_labels[variation_name] = TextLabels(paths_obj, variation_name, index_run)
+            label_maker = _process_text_labels[variation_name]
+            text_labels = label_maker.labels(field_name, len(handler_result))
+        for text_label, result_dict in zip(text_labels, handler_result):
+            if statistics_spec.regression_metric is not None and statistics_spec.regression_metric in result_dict:
+                if text_label not in aggregated:
+                    if statistics_spec.regression_metric == 'r':
+                        # use 1 sample ttest with population mean = 0
+                        aggregated[text_label] = (list(),)
+                    else:
+                        aggregated[text_label] = (list(), list())
+                    metrics[text_label] = statistics_spec.regression_metric
+                aggregated[text_label][0].append(result_dict[statistics_spec.regression_metric])
+                if statistics_spec.regression_metric != 'r':
+                    aggregated[text_label][1].append(
+                        result_dict['mean_model_{}'.format(statistics_spec.regression_metric)])
+            elif statistics_spec.classifier_metric is not None and statistics_spec.classifier_metric in result_dict:
+                if text_label not in aggregated:
+                    aggregated[text_label] = (list(), list())
+                    metrics[text_label] = statistics_spec.classifier_metric
+                aggregated[text_label][0].append(result_dict[statistics_spec.classifier_metric])
+                aggregated[text_label][1].append(result_dict['m{}'.format(statistics_spec.classifier_metric)])
+
+    result = dict()
+    for text_label in aggregated:
+        if len(aggregated[text_label]) == 2:
+            model_values, baseline_values = aggregated[text_label]
+            model_values = np.array(model_values)
+            baseline_values = np.array(baseline_values)
+            baseline_values = np.reshape(
+                baseline_values, baseline_values.shape + (1,) * (len(model_values.shape) - len(baseline_values.shape)))
+            if statistics_spec.test_type != 'ttest_rel':
+                raise ValueError('Unknown test_type: {}'.format(statistics_spec.test_type))
+            _, p_values = ttest_rel(model_values, baseline_values)
+        else:
+            model_values = aggregated[text_label][0]
+            baseline_values = None
+            if statistics_spec.test_type != 'ttest_rel':
+                raise ValueError('Unknown test_type: {}'.format(statistics_spec.test_type))
+            # shouldn't really assume the population mean here, but works for now since the only case is 'r'
+            _, p_values = ttest_1samp(model_values, popmean=0)
+        result[text_label] = StatisticsResult(
+            text_label,
+            statistics_spec.regression_metric,
+            statistics_spec.test_type,
+            np.mean(model_values, axis=0),
+            np.std(model_values, axis=0),
+            np.mean(baseline_values, axis=0) if baseline_values is not None else 0,
+            np.std(baseline_values, axis=0) if baseline_values is not None else 0,
+            p_values)
+
+    return result, missing_runs
+
+
+def compute_statistics_on_aggregated(
+        paths_obj, variation_set_name, statistics_spec, field_names=None,
+        index_run=None, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
+
+    if field_names is None:
+        field_names = get_field_names(paths_obj, variation_set_name, index_run)
+
+    task_arguments = [
+        (variation_set_name, field_name, statistics_spec, index_run, k_vs_k_feature_axes, loss_handler_kwargs)
+        for field_name in field_names]
+
+    has_warned = False
+    final_result = dict()
+    with ProcessPoolExecutor(initializer=_set_process_paths_obj, initargs=(paths_obj,)) as ex:
+        for result, is_missing_runs in tqdm(ex.map(_statistics_helper, task_arguments), total=len(task_arguments)):
+            if is_missing_runs and not has_warned:
+                print('Warning, some runs are missing')
+                has_warned = True
+            final_result.update(result)
+
+    return final_result
+
+
+def spatial_neighbor_edges(mask, order=1):
+
+    def _make_indices():
+        source_indices = np.arange(int(np.prod(mask.shape)))[np.reshape(mask, -1)]
+        destination_indices = np.full(int(np.prod(mask.shape)), -1, dtype=source_indices.dtype)
+        destination_indices[source_indices] = np.arange(len(source_indices))
+        return np.reshape(destination_indices, mask.shape)
+
+    offsets_1d = [np.arange(-order, order + 1)] * len(mask.shape)
+    mesh = np.meshgrid(*offsets_1d)
+    offsets = np.concatenate(list(np.reshape(m, (-1, 1)) for m in mesh), axis=1)
+    offsets = offsets[np.logical_not(np.all(offsets == 0, axis=1))]
+
+    indices = _make_indices()
+    padded_indices = np.pad(indices, order, mode='constant', constant_values=-1)
+    unpad_slices = tuple(slice(order, -order) for _ in range(len(mask.shape)))
+
+    starts = list()
+    ends = list()
+    for offset in offsets:
+        neighbors = np.roll(padded_indices, offset, np.arange(np.ndim(mask)))[unpad_slices][mask]
+        indicator_valid = neighbors >= 0
+        starts.append(np.arange(len(neighbors))[indicator_valid])
+        ends.append(neighbors[indicator_valid])
+
+    return np.concatenate(starts), np.concatenate(ends)

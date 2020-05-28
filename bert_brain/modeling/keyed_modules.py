@@ -892,3 +892,26 @@ class KeyedGumbelGate(KeyedBase):
                     result[(k,) + key[1:]] = batch[key]
 
         return result
+
+    def get_output_weights(self, global_step=None, hard=None, as_numpy=True):
+        result = OrderedDict()
+        if global_step is None:  # assume we are at the minimum
+            temperature = self.minimum_temperature
+        else:
+            temperature = max(
+                self.initial_temperature + self.annealing_rate * global_step, self.minimum_temperature)
+        if hard is None:
+            hard = self.hard
+        with torch.no_grad():
+            gate = torch.softmax(self.logits / temperature, dim=-1)
+            if hard:
+                index, _ = torch.max(gate, dim=-1, keepdim=True)
+                gate = torch.zeros_like(self.logits)
+                gate.scatter_(dim=-1, index=index, src=1.0)
+        split_gate = torch.split(gate, self.splits, dim=0)
+        for key, g in zip(self.output_key_to_shape, split_gate):
+            g = torch.reshape(g, self.output_key_to_shape[key] + g.size()[1:])
+            if as_numpy:
+                g = g.numpy()
+            result[key] = g
+        return result

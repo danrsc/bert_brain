@@ -11,7 +11,8 @@ Low-level functions for reading raw results from experiment output files
 """
 
 
-__all__ = ['OutputResult', 'write_predictions', 'read_predictions', 'write_loss_curve', 'read_loss_curve']
+__all__ = [
+    'OutputResult', 'write_predictions', 'read_predictions', 'write_loss_curve', 'read_loss_curve', 'get_output_keys']
 
 
 logger = logging.getLogger(__name__)
@@ -143,13 +144,22 @@ def write_predictions(output_dir, all_results, data_set, settings):
                 key_file.write('\n')
 
 
+def get_output_keys(output_dir):
+    with open(os.path.join(output_dir, 'keys.txt'), 'rt') as key_file:
+        return [k.strip() for k in key_file.readlines()]
+
+
 def read_predictions(output_dir, keys=None):
 
+    is_single_key = False
     with open(os.path.join(output_dir, 'keys.txt'), 'rt') as key_file:
         file_keys = [k.strip() for k in key_file.readlines()]
         if keys is None:
             keys = file_keys
         else:
+            is_single_key = isinstance(keys, str)
+            if is_single_key:
+                keys = [keys]
             keys_ = list()
             for key in keys:
                 if key not in file_keys:
@@ -214,6 +224,10 @@ def read_predictions(output_dir, keys=None):
                     sequence_type, is_active_loss, word_ids[idx] if word_ids is not None else None))
 
             result[key] = results
+
+    if is_single_key:
+        for key in result:
+            return result[key]
 
     return result
 

@@ -76,15 +76,23 @@ def fdr_correction(p_values, alpha=0.05, method='by', axis=None):
     if axis is None:
         p_values = np.reshape(p_values, -1)
         axis = 0
+    if axis < 0:
+        axis += len(p_values.shape)
+        if axis < 0:
+            raise ValueError('axis out of bounds')
 
     indices_sorted = np.argsort(p_values, axis=axis)
     p_values = np.take_along_axis(p_values, indices_sorted, axis=axis)
 
     correction_factor = np.arange(1, p_values.shape[axis] + 1) / p_values.shape[axis]
+    correction_factor_shape = [1] * len(p_values.shape)
+    correction_factor_shape[axis] = len(correction_factor)
+    correction_factor = np.reshape(correction_factor, correction_factor_shape)
+
     if method == 'bh':
         pass
     elif method == 'by':
-        c_m = np.sum(1 / np.arange(1, p_values.shape[axis] + 1), axis=axis, keepdims=True)
+        c_m = np.sum(1 / np.arange(1, p_values.shape[axis] + 1))
         correction_factor = correction_factor / c_m
     else:
         raise ValueError('Unrecognized method: {}'.format(method))
