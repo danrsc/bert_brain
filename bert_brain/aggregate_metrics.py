@@ -3,7 +3,7 @@ import os
 import warnings
 from collections import OrderedDict
 import dataclasses
-from typing import Optional
+from typing import Optional, Union
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 from tqdm.auto import tqdm
@@ -599,7 +599,7 @@ def class_handler(
                 bin_counts = bin_counts[:-1]  # trim off the nan bin
             modes = np.argmax(bin_counts, axis=0)
 
-            if class_wise:
+            if class_wise is True:  # could also be 'inherit'
                 class_wise_results = list()
                 for target_class in range(log_softmax.shape[-1]):
                     current_target = np.where(target == target_class, target, np.nan)
@@ -650,6 +650,15 @@ def class_handler(
                                  / np.sum(np.greater_equal(np.where(np.isnan(target), -1, target), 0), axis=0))
                 poma = accuracy / mode_accuracy
                 rank_accuracy = np.nanmean(nan_rank_accuracy(predictions, target), axis=0)
+
+                if class_wise == 'inherit':
+                    class_wise_results = list()
+                    for target_class in range(log_softmax.shape[-1]):
+                        class_wise_results.append(
+                            dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy))
+                    return class_wise_results
+                elif class_wise is not False:
+                    raise ValueError('Unexpected value for class_wise: {}'.format(class_wise))
                 return dict(xent=cross_entropy, acc=accuracy, macc=mode_accuracy, poma=poma, racc=rank_accuracy)
         else:
             # soft class labels
@@ -905,7 +914,13 @@ def assemble_indexed_predictions(paths_obj, variation_set_name, index_run=None):
 def get_field_names(paths_obj, variation_set_name, index_run=None):
     (variation_set_name, _), settings = singleton_variation(variation_set_name)
     output_dir = os.path.join(paths_obj.result_path, variation_set_name, task_hash(settings))
-    run_iterable = (index_run,) if index_run is not None else range(settings.num_runs)
+    if index_run is not None:
+        if np.ndim(index_run) == 0:
+            run_iterable = (index_run,)
+        else:
+            run_iterable = tuple(index_run)
+    else:
+        run_iterable = range(settings.num_runs)
     field_names = set()
     for index_run in run_iterable:
         output_dir_run = os.path.join(output_dir, 'run_{}'.format(index_run))
@@ -931,20 +946,52 @@ class StatisticsResult:
     metric_name: str
     test_type: str
     model_mean: np.ndarray
-    model_std: np.ndarray
-    baseline_mean: np.ndarray
-    baseline_std: np.ndarray
-    p_values: np.ndarray
+    model_std: Optional[np.ndarray]
+    baseline_mean: Union[np.ndarray, float]
+    baseline_std: Union[np.ndarray, float]
+    p_values: Optional[np.ndarray]
+
+    def resample(self, index_run=None):
+        if self.model_std is not None:
+            raise ValueError('Only a partial StatisticsResult supports resampling')
+        if index_run is None:
+            index_run = np.arange(len(self.model_mean))
+
+        if np.ndim(self.baseline_mean) > 0:
+            if self.test_type != 'ttest_rel':
+                raise ValueError('Unknown test_type: {}'.format(self.test_type))
+            _, p_values = ttest_rel(self.model_mean, self.baseline_mean)
+        else:
+            if self.test_type != 'ttest_rel':
+                raise ValueError('Unknown test_type: {}'.format(self.test_type))
+            _, p_values = ttest_1samp(self.model_mean, self.baseline_mean)
+
+        return StatisticsResult(
+            self.field_name,
+            self.metric_name,
+            self.test_type,
+            np.mean(self.model_mean[index_run], axis=0),
+            np.std(self.model_mean[index_run], axis=0),
+            np.mean(self.baseline_mean[index_run], axis=0) if np.ndim(self.baseline_mean) > 0 else self.baseline_mean,
+            np.std(self.baseline_mean[index_run], axis=0) if np.ndim(self.baseline_mean) > 0 else 0,
+            p_values)
 
 
 def _statistics_helper(item):
     (variation_name, field_name, statistics_spec, index_run,
-     k_vs_k_feature_axes, loss_handler_kwargs) = item
+     k_vs_k_feature_axes, keep_all, loss_handler_kwargs) = item
 
     (variation_set_name, training_variation_name), settings = singleton_variation(variation_name)
     paths_obj = _process_paths_obj
 
-    run_iterable = [index_run] if index_run is not None else range(settings.num_runs)
+    if index_run is not None:
+        if np.ndim(index_run) == 0:
+            run_iterable = [index_run]
+        else:
+            run_iterable = index_run
+    else:
+        run_iterable = range(settings.num_runs)
+
     missing_runs = False
 
     aggregated = dict()
@@ -1020,38 +1067,35 @@ def _statistics_helper(item):
             baseline_values = np.array(baseline_values)
             baseline_values = np.reshape(
                 baseline_values, baseline_values.shape + (1,) * (len(model_values.shape) - len(baseline_values.shape)))
-            if statistics_spec.test_type != 'ttest_rel':
-                raise ValueError('Unknown test_type: {}'.format(statistics_spec.test_type))
-            _, p_values = ttest_rel(model_values, baseline_values)
         else:
-            model_values = aggregated[text_label][0]
+            model_values = np.array(aggregated[text_label][0])
             baseline_values = None
-            if statistics_spec.test_type != 'ttest_rel':
-                raise ValueError('Unknown test_type: {}'.format(statistics_spec.test_type))
-            # shouldn't really assume the population mean here, but works for now since the only case is 'r'
-            _, p_values = ttest_1samp(model_values, popmean=0)
+
         result[text_label] = StatisticsResult(
             text_label,
-            statistics_spec.regression_metric,
+            metrics[text_label],
             statistics_spec.test_type,
-            np.mean(model_values, axis=0),
-            np.std(model_values, axis=0),
-            np.mean(baseline_values, axis=0) if baseline_values is not None else 0,
+            model_values,
+            None,
+            baseline_values if baseline_values is not None else 0,  # shouldn't really assume pop-mean of 0
             np.std(baseline_values, axis=0) if baseline_values is not None else 0,
-            p_values)
+            None)
+
+        if not keep_all:
+            result[text_label] = result[text_label].resample()
 
     return result, missing_runs
 
 
 def compute_statistics_on_aggregated(
         paths_obj, variation_set_name, statistics_spec, field_names=None,
-        index_run=None, k_vs_k_feature_axes=-1, **loss_handler_kwargs):
+        index_run=None, k_vs_k_feature_axes=-1, keep_all=False, **loss_handler_kwargs):
 
     if field_names is None:
         field_names = get_field_names(paths_obj, variation_set_name, index_run)
 
     task_arguments = [
-        (variation_set_name, field_name, statistics_spec, index_run, k_vs_k_feature_axes, loss_handler_kwargs)
+        (variation_set_name, field_name, statistics_spec, index_run, k_vs_k_feature_axes, keep_all, loss_handler_kwargs)
         for field_name in field_names]
 
     has_warned = False

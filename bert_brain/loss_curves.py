@@ -11,6 +11,7 @@ from .result_output import read_loss_curve
 __all__ = [
     'average_unique_epochs_within_loss_curves',
     'average_unique_steps_within_loss_curves',
+    'average_over_runs',
     'LossCurve',
     'loss_curves_for_variation']
 
