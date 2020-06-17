@@ -189,6 +189,36 @@ def _default_critics():
     return result
 
 
+class MixedTask:
+
+    def __init__(self, alternative_probabilities):
+        probabilities = list()
+        alternatives = list()
+        for alternative, prob in alternative_probabilities:
+            probabilities.append(prob)
+            alternatives.append(alternative)
+        self.probabilities = np.array(probabilities)
+        self.alternatives = np.array(alternatives)
+        self.probabilities.setflags(write=False)
+        self.alternatives.setflags(write=False)
+        if np.sum(self.probabilities) != 1:
+            raise ValueError('probabilities must be == 1')
+
+    def label(self):
+        return np.random.choice(self.alternatives, p=self.probabilities).item()
+
+    @staticmethod
+    def make_symmetric_mixed_tasks(alternatives, primary_proportion):
+        alternate_proportions = (1 - primary_proportion) / (len(alternatives) - 1)
+        result = dict()
+        for i in range(len(alternatives)):
+            primary = alternatives[i]
+            alternates = alternatives[:i] + alternatives[i+1:]
+            result[primary] = MixedTask(
+                [(primary, primary_proportion)] + [(a, alternate_proportions) for a in alternates])
+        return result
+
+
 @dataclass
 class Settings:
     # which data to load
@@ -272,6 +302,11 @@ class Settings:
     # only those fields will be reported in train_loss / eval_loss. Other critic output is available as metrics for
     # reporting, but is otherwise ignored by training.
     loss_tasks: set = field(default_factory=set)
+
+    # fields listed here are sometimes renamed to a different label to simulate tasks being combined together
+    # in different proportions. This enables exploration of how similarity of tasks changes as a function of
+    # the mixing proportions
+    mixed_tasks: Optional[Mapping[str, MixedTask]] = None
 
     # Training can use a meta learning mode similar to Reptile (https://arxiv.org/abs/1803.02999) or First-Order
     # Model Agnostic Meta Learning (FOMAML) depending on the precise configuration. To turn on meta-learning mode,

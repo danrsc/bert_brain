@@ -448,10 +448,24 @@ def _train_step(
     for k in batch:
         batch[k] = batch[k].to(device)
     batch['global_step'] = global_step
+
+    if settings.mixed_tasks is not None:
+        cross_labeled_batch = None
+        for k in settings.mixed_tasks:
+            if k in batch:
+                if cross_labeled_batch is None:
+                    cross_labeled_batch = type(batch)(batch)
+                label = settings.mixed_tasks[k].label()
+                cross_labeled_batch[label] = batch[k]
+                del cross_labeled_batch[k]
+        if cross_labeled_batch is not None:
+            batch = cross_labeled_batch
+
     predictions = model(batch, train_data_set)
     if sampler_to_update is not None and hasattr(sampler_to_update, 'update'):
         sampler_to_update.update(batch, predictions, loss_handlers)
     train_data_set.just_in_time_targets(batch, predictions)
+
     loss_dict = OrderedDict()
     metric_result = OrderedDict()
     for loss_handler in loss_handlers:

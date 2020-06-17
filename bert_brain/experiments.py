@@ -24,7 +24,7 @@ from .modeling import KeyedLinearFactory, LinearContextualParameterGenerationFac
     LinearDecreasingTemperatureSchedule, KeyedConcatFactory, KeyedSingleTargetSpanMaxPoolFactory, \
     weight_losses_by_inverse_example_counts, ManuallyRescaleLosses, KeyedGumbelGateLinearFactory, KeyedGumbelGateFactory
 from .modeling import gelu_new as gelu
-from .settings import Settings, OptimizationSettings, ParameterGroupOptimizationSettings
+from .settings import Settings, OptimizationSettings, ParameterGroupOptimizationSettings, MixedTask
 
 
 __all__ = [
@@ -2572,6 +2572,133 @@ def _named_variations(name: Union[str, Tuple[str, int]]) -> \
         settings.create_meta_train_dataset = True
 
         settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 10})
+
+        return settings
+    elif name == 'fmri_raw_dds_direct_mixed_5':
+        settings = Settings(
+            corpora=(
+                corpus_types.HarryPotterCorpus(
+                    fmri_subjects=None,  # None means all
+                    fmri_sentence_mode='ignore',
+                    fmri_window_duration=10.1,
+                    fmri_minimum_duration_required=9.6,
+                    fmri_kind='raw',
+                    fmri_smooth_factor=None,
+                    separate_fmri_components=False,
+                    group_meg_sentences_like_fmri=True,
+                    meg_subjects=[]),
+                corpus_types.UclCorpus(subtract_erp_baseline=True),
+                corpus_types.GhentEyeTrackingCorpus(active_fields=(
+                    'word_fixation_count',
+                    'word_first_fixation_duration',
+                    'word_gaze_duration',
+                    'word_go_past_time',
+                    'word_total_reading_time')),
+                corpus_types.DundeeCorpus(),
+                corpus_types.StanfordSentimentTreebank(),
+                corpus_types.BigramShift(),
+                corpus_types.CoordinationInversion(),
+                corpus_types.ObjectNumber(),
+                corpus_types.SemanticOddManOut(),
+                corpus_types.SentenceLength(),
+                corpus_types.SubjectNumber(),
+                corpus_types.TopConstituents(),
+                corpus_types.TreeDepth(),
+                corpus_types.VerbTense(),
+                corpus_types.PartOfSpeechConll2012(),
+                corpus_types.ConstituentsConll2012(),
+                corpus_types.SemanticRoleLabelConll2012(),
+                corpus_types.NamedEntityRecognitionConll2012(),
+                corpus_types.CoreferenceResolutionConll2012(),
+                corpus_types.DependenciesEnglishWeb(),
+                corpus_types.DefinitePronounResolution(),
+                corpus_types.SemEval(),
+                corpus_types.SemanticProtoRoles1(),
+                corpus_types.SemanticProtoRoles2()),
+            # corpus_types.WordContent()),
+            optimization_settings=OptimizationSettings(
+                num_train_epochs=6,
+                parameter_group_settings={
+                    'default': ParameterGroupOptimizationSettings(learning_rate=1e-5),
+                    'common_head': ParameterGroupOptimizationSettings(learning_rate=1e-3),
+                    'individual_head': ParameterGroupOptimizationSettings(learning_rate=1e-3)},
+                learning_rate_schedule=learning_rate_schedules.LinearWarmupSqrtDecayLearningRateScheduleFactory(2000),
+                train_batch_size=16,
+                predict_batch_size=16,
+                num_loader_workers=8),
+            loss_tasks=set(),
+            data_id_in_batch_keys=None,
+            field_spec_replacers={corpus_types.HarryPotterCorpus.__name__: {'is_sequence': False}},
+            sampler_factory=BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory(
+                batches_per_epoch=1000,
+                update_frequency_in_batches=100,
+                initial_sample_rate_proportional_temperature=5,
+                learning_rate=0.1,
+                preferences={ResponseKind.hp_fmri: 10}),
+            update_individual_heads_on_dds_sample=True,
+            # sampler_factory=BatchOneTaskTaskPermutedSamplerFactory(10),
+            # sampler_factory=BatchOneTaskTemperatureProportionalSamplerFactory(1000, temperature=5),
+            num_runs=100)
+        settings.common_graph_parts = OrderedDict(
+            latent_task_bottleneck=KeyedLinearFactory(
+                ('bert', 'sequence', 'all'),
+                output_key_to_shape=OrderedDict(sequence_all_bottleneck=30),
+                should_norm=True,
+                activation_fn=gelu),
+            pooled_bottleneck=PooledFromSequenceFactory('sequence_all_bottleneck', 'pooled_all_bottleneck'),
+            hdr_bottleneck=PooledFromKTokensFactory(
+                num_tokens=20, source_name='sequence_all_bottleneck', output_name='hdr_pooled'))
+
+        settings.head_graph_parts.update(standard_edge_probing_graph(settings.corpora, 'sequence_all_bottleneck'))
+
+        settings.head_graph_parts[ResponseKind.hp_fmri] = OrderedDict(
+            fmri_linear=KeyedLinearFactory(
+                'hdr_pooled',
+                targets=ResponseKind.hp_fmri))
+        settings.preprocessors[ResponseKind.hp_fmri] = [
+            PreprocessDetrend(metadata_example_group_by='fmri_runs', train_on_all=True),
+            PreprocessStandardize(metadata_example_group_by='fmri_runs', train_on_all=True, average_axis=None)]
+        settings.critics[ResponseKind.hp_fmri] = critic_types.NamedTargetSingleMSE()
+        for kind in [
+            ResponseKind.ucl_eye,
+            ResponseKind.ucl_self_paced,
+            ResponseKind.dundee_eye,
+            ResponseKind.geco]:
+            # settings.preprocessors[kind] = [
+            #     PreprocessLog(),
+            #     PreprocessStandardize(stop_mode='content')]
+            settings.preprocessors[kind] = [
+                PreprocessLog(),
+                PreprocessStandardize(stop_mode='content')]
+            # PreprocessQuantileDigitize(quantiles=10, use_one_hot=False, stop_mode='content'),
+            # PreprocessStandardize(stop_mode='content', average_axis=None)]
+        # settings.preprocessors[ResponseKind.ucl_erp] = [PreprocessStandardize(stop_mode='content')]
+        settings.preprocessors[ResponseKind.ucl_erp] = [
+            PreprocessStandardize(stop_mode='content'), ]  # use standardize to average
+        # PreprocessQuantileDigitize(quantiles=19, use_one_hot=False, stop_mode='content'),
+        # PreprocessStandardize(stop_mode='content', average_axis=None)]
+        for kind in [
+            ResponseKind.ucl_erp,
+            ResponseKind.ucl_eye,
+            ResponseKind.ucl_self_paced,
+            ResponseKind.dundee_eye,
+            ResponseKind.geco]:
+            settings.critics[kind] = critic_types.NamedTargetStopWordAwareMSE()
+
+        settings.default_pooled_source = 'pooled_all_bottleneck'
+        settings.default_sequence_source = 'sequence_all_bottleneck'
+        settings.loss_tasks.add(ResponseKind.generic)
+        settings.loss_tasks.add(ResponseKind.hp_fmri)
+        settings.loss_tasks.add(ResponseKind.ucl_erp)
+        settings.loss_tasks.add(ResponseKind.ucl_eye)
+        settings.loss_tasks.add(ResponseKind.ucl_self_paced)
+        settings.loss_tasks.add(ResponseKind.dundee_eye)
+        settings.loss_tasks.add(ResponseKind.geco)
+        settings.create_meta_train_dataset = True
+
+        settings.weight_losses_fn = ManuallyRescaleLosses({ResponseKind.hp_fmri: 10})
+
+        settings.mixed_tasks = MixedTask.make_symmetric_mixed_tasks(['obj_num', 'tense'], 0.5)
 
         return settings
     else:
