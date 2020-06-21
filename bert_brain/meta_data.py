@@ -2,6 +2,8 @@ import os
 from collections import OrderedDict
 from dataclasses import dataclass
 import pickle
+import torch
+import gc
 
 import numpy as np
 from scipy.stats import ttest_1samp
@@ -155,6 +157,11 @@ def get_model_weights(paths_obj, variation_name, graph_parts_to_compare, index_r
 
         index_runs.append(index_run)
         output.append(ordered_weights)
+
+    del model
+    # model is somehow getting put onto cuda; need to fix, but at least release it here
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return ordered_names, index_runs, np.array(output)
 

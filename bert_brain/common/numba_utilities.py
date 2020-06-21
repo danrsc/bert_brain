@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit, prange
 
 
-__all__ = ['nandetrend', 'auto_regression_residual', 'modified_gram_schmidt']
+__all__ = ['nandetrend', 'auto_regression_residual', 'modified_gram_schmidt', 'batch_psim_cosine', 'batch_csim_cosine']
 
 
 @njit(parallel=True)
@@ -70,3 +70,54 @@ def _auto_regression_residual(x, max_lag):
 
 def auto_regression_residual(x, max_lag):
     return np.reshape(_auto_regression_residual(np.reshape(x, (len(x), -1)), max_lag), x.shape)
+
+
+@njit(parallel=True)
+def _batch_psim_cosine(x):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = x[i]
+        norms = np.sqrt(np.sum(np.square(z), axis=-1))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                dot = np.vdot(z[j], z[k])
+                cosine = dot / (norms[j] * norms[k])
+                result[i, j, k] = cosine
+                result[i, k, j] = cosine
+
+    return result
+
+
+def batch_psim_cosine(x):
+    x = np.asarray(x)
+    if np.ndim(x) != 3:
+        raise ValueError('Expected shape (batch, variables, components)')
+    return _batch_psim_cosine(x)
+
+
+@njit(parallel=True)
+def _batch_csim_cosine(x, y):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = x[i]
+        w = y[i]
+        norms_z = np.sqrt(np.sum(np.square(z), axis=-1))
+        norms_w = np.sqrt(np.sum(np.square(w), axis=-1))
+        for j in range(len(z)):
+            for k in range(len(w)):
+                dot = np.vdot(z[j], w[k])
+                result[i, j, k] = dot / (norms_z[j] * norms_w[k])
+
+    return result
+
+
+def batch_csim_cosine(x, y):
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if np.ndim(x) != 3 or np.ndim(y) != 3:
+        raise ValueError('Expected shape (batch, variables, components)')
+    if x.shape[0] != y.shape[0]:
+        raise ValueError('Mismatched shape along dimension 0')
+    if x.shape[-1] != y.shape[-1]:
+        raise ValueError('Mismatched shape along dimension -1')
+    return _batch_csim_cosine(x, y)
