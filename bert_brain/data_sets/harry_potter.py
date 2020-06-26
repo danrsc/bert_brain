@@ -1199,3 +1199,19 @@ def get_indices_from_normalized_coordinates(subject, x, y, z, closest_k=None, di
         compressed_distances = np.squeeze(compressed_distances, axis=0)
 
     return compressed_indices, compressed_distances, mask_coord.shape[0]
+
+
+def get_fedorenko_roi_masks():
+    roi_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'harry_potter_fedorenko_rois.npz')
+    result = dict()
+    with np.load(roi_path) as roi_file:
+        roi_names = roi_file['rois']
+        subjects = roi_file['subjects']
+
+        for i, roi_name in enumerate(roi_names):
+            mask_val = 1 << i
+            result[roi_name] = dict()
+            for subject in subjects:
+                result[roi_name][subject] = roi_file[subject] == mask_val
+
+    return result
