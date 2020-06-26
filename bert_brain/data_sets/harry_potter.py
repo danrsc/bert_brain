@@ -1212,6 +1212,6 @@ def get_fedorenko_roi_masks():
             mask_val = 1 << i
             result[roi_name] = dict()
             for subject in subjects:
-                result[roi_name][subject] = roi_file[subject] == mask_val
+                result[roi_name][subject] = np.bitwise_and(roi_file[subject], mask_val) == mask_val
 
     return result
