@@ -21,7 +21,8 @@ from .input_features import RawData, KindData, ResponseKind
 
 
 __all__ = ['HarryPotterCorpus', 'read_harry_potter_story_features', 'HarryPotterLeaveOutFmriRun',
-           'HarryPotterMakeLeaveOutFmriRun', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject']
+           'HarryPotterMakeLeaveOutFmriRun', 'get_indices_from_normalized_coordinates', 'get_mask_for_subject',
+           'get_fedorenko_roi_masks']
 
 
 @dataclasses.dataclass
