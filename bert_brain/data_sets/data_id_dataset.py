@@ -399,6 +399,15 @@ class DataIdDataset(torch.utils.data.Dataset):
     def response_field_for_id(self, response_id):
         return self.response_fields[response_id]
 
+    def get_response_id_and_unique_id(self, item):
+        if self._index_responses_separately:
+            response_id, response_data_key_, item = self._response_key_and_index(item)
+            unique_id = self._response_data_key_to_unique_ids[response_data_key_][item]
+        else:
+            response_id = None
+            unique_id = self._all_unique_ids[item]
+        return response_id, unique_id
+
     def __getitem__(self, item):
         if self._index_responses_separately:
             response_id, response_data_key_, item = self._response_key_and_index(item)

@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit, prange
 
 
-__all__ = ['nandetrend', 'auto_regression_residual', 'modified_gram_schmidt', 'batch_psim_cosine', 'batch_csim_cosine']
+__all__ = ['nandetrend', 'auto_regression_residual', 'modified_gram_schmidt', 'batch_psim', 'batch_csim']
 
 
 @njit(parallel=True)
@@ -88,13 +88,6 @@ def _batch_psim_cosine(x):
     return result
 
 
-def batch_psim_cosine(x):
-    x = np.asarray(x)
-    if np.ndim(x) != 3:
-        raise ValueError('Expected shape (batch, variables, components)')
-    return _batch_psim_cosine(x)
-
-
 @njit(parallel=True)
 def _batch_csim_cosine(x, y):
     result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
@@ -111,7 +104,116 @@ def _batch_csim_cosine(x, y):
     return result
 
 
-def batch_csim_cosine(x, y):
+@njit
+def _mu_sigma_last_keepdim(x, ddof=1):
+    mu = np.zeros(x.shape[:-1], dtype=x.dtype)
+    sum_sq_diff = np.zeros(x.shape[:-1], dtype=x.dtype)
+    count = 0
+    for i in range(x.shape[-1]):
+        count += 1
+        v = x[..., i]
+        delta = v - mu
+        mu += delta / count
+        delta_2 = v - mu
+        sum_sq_diff += delta * delta_2
+
+    mu = np.expand_dims(mu, -1)
+    sum_sq_diff = np.expand_dims(sum_sq_diff, -1)
+
+    if count - ddof < 1:
+        return mu, np.full_like(mu, np.nan)
+    return mu, np.sqrt(sum_sq_diff / (count - ddof))
+
+
+@njit
+def _center_last(x):
+    return x - np.expand_dims(np.sum(x, axis=-1) / x.shape[-1], -1)
+
+
+@njit
+def _standardize_last(x, ddof=1):
+    mu, sigma = _mu_sigma_last_keepdim(x, ddof=ddof)
+    if x.shape[-1] - ddof < 1:
+        return x - mu
+    return (x - mu) / sigma
+
+
+@njit(parallel=True)
+def _batch_psim_corr(x, ddof=1):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _standardize_last(x[i], ddof=ddof)
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = np.vdot(z[j], z[k]) / (x.shape[-1] - ddof)
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_psim_oovariance_scaled_corr(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _center_last(x[i])
+        numerator = np.dot(z, np.transpose(np.dot(z, cov[i])))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_corr(x, y, ddof=1):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _standardize_last(x[i], ddof=ddof)
+        w = _standardize_last(y[i], ddof=ddof)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = np.vdot(z[j], w[k]) / (x.shape[-1] - ddof)
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_corr(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _center_last(x[i])
+        w = _center_last(y[i])
+        scaled_w = np.dot(w, cov[i])
+        denom_z = np.sqrt(np.sum(z * (np.dot(z, cov[i])), axis=-1))
+        denom_w = np.sqrt(np.sum(w * scaled_w, axis=-1))
+        numerator = z @ np.transpose(scaled_w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
+def batch_psim(x, metric='cosine', ddof=1, cov=None):
+    x = np.asarray(x)
+    if np.ndim(x) != 3:
+        raise ValueError('Expected shape (batch, variables, components)')
+    if metric == 'cosine':
+        return _batch_psim_cosine(x)
+    elif metric == 'correlation':
+        return _batch_psim_corr(x, ddof=ddof)
+    elif metric == 'covariance_scaled_correlation':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_corr(x, cov)
+    else:
+        raise ValueError('Unsupported metric: {}'.format(metric))
+
+
+def batch_csim(x, y, metric='cosine', ddof=1, cov=None):
     x = np.asarray(x)
     y = np.asarray(y)
     if np.ndim(x) != 3 or np.ndim(y) != 3:
@@ -120,4 +222,13 @@ def batch_csim_cosine(x, y):
         raise ValueError('Mismatched shape along dimension 0')
     if x.shape[-1] != y.shape[-1]:
         raise ValueError('Mismatched shape along dimension -1')
-    return _batch_csim_cosine(x, y)
+    if metric == 'cosine':
+        return _batch_csim_cosine(x, y)
+    elif metric == 'correlation':
+        return _batch_csim_corr(x, y, ddof=ddof)
+    elif metric == 'covariance_scaled_correlation':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_corr(x, y, cov)
+    else:
+        raise ValueError('Unsupported metric: {}'.format(metric))

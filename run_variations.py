@@ -34,7 +34,7 @@ from bert_brain import cuda_most_free_device, cuda_auto_empty_cache_context, Pro
 from bert_brain_paths import Paths
 
 
-__all__ = ['run_variation']
+__all__ = ['run_variation', 'ProgressUpdater']
 
 
 replace_root_logger_handler()

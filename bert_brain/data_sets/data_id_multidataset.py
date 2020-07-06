@@ -160,6 +160,22 @@ class DataIdMultiDataset(torch.utils.data.Dataset):
             response_id -= len(self._data_sets[data_set_key].response_fields)
         raise IndexError('Index out of bounds: {}'.format(response_id))
 
+    def response_id_for_field(self, response_field):
+        response_id = 0
+        for data_set_key in self._data_sets:
+            for have_response_field in self._data_sets[data_set_key].response_fields:
+                if have_response_field == response_field:
+                    return response_id
+                response_id += 1
+        raise ValueError('Unknown response_field: {}'.format(response_field))
+
+    def get_response_id_and_unique_id(self, item):
+        response_id_offset, data_set_id, data_set_key, item = self._data_set_key_and_index(item)
+        response_id, unique_id = self._data_sets[data_set_key].get_response_id_and_unique_id(item)
+        if response_id is not None:
+            response_id += response_id_offset
+        return response_id, unique_id
+
     def __getitem__(self, item):
         response_id_offset, data_set_id, data_set_key, item = self._data_set_key_and_index(item)
         result = self._data_sets[data_set_key][item]

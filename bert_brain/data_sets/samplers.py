@@ -1,3 +1,4 @@
+import os
 import dataclasses
 from collections import OrderedDict
 from typing import Optional, Container, Iterable, Callable, Mapping
@@ -33,7 +34,8 @@ __all__ = [
     'BatchOneTaskManualWeightSampler',
     'BatchOneTaskEvalSampler',
     'BatchOneTaskMultiDifferentiableDataSelectionSampler',
-    'BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory']
+    'BatchOneTaskMultiDifferentiableDataSelectionSamplerFactory',
+    'ReplaySampler']
 
 
 class SamplerFactory:
@@ -712,3 +714,52 @@ class BatchOneTaskMultiDifferentiableDataSelectionSampler(torch.utils.data.Sampl
 
     def __len__(self):
         return self.batches_per_epoch
+
+
+class ReplaySampler(torch.utils.data.Sampler):
+
+    def __init__(self, data_source: DataIdMultiDataset, output_dir, batch_size):
+        super().__init__(data_source)
+        task_indices = data_source.task_indices()
+        ids_to_item = dict()
+        for task in task_indices:
+            for item in task_indices[task]:
+                response_id, unique_id = data_source.get_response_id_and_unique_id(item[0])
+                ids_to_item[response_id, unique_id] = item
+
+        with open(os.path.join(output_dir, 'keys.txt'), 'rt') as key_file:
+            keys = [k.strip() for k in key_file.readlines()]
+
+        self.items = OrderedDict()
+        for key in keys:
+            self.items[key] = list()
+            response_id = data_source.response_id_for_field(key)
+            with np.load(os.path.join(output_dir, '{}.npz'.format(key)), allow_pickle=True) as npz:
+                unique_ids = npz['unique_ids']
+                for unique_id in unique_ids:
+                    self.items[key].append(ids_to_item[(response_id, unique_id)])
+
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        for task in self.items:
+            batch = list()
+            for i in range(len(self.items[task])):
+                if len(batch) + len(self.items[task][i]) > self.batch_size:
+                    yield np.concatenate(batch)
+                    batch = list()
+                # if a single multipart item > batch_count, we just make a batch that is larger than batch size
+                # so no check here
+                batch.append(self.items[task][i])
+            if len(batch) > 0:
+                yield np.concatenate(batch)
+
+    def true_div_len(self):
+        result = 0
+        for task in self.items:
+            for item in self.items[task]:
+                result += len(item)
+        return result
+
+    def __len__(self):
+        return int(self.true_div_len())
