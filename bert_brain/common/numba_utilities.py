@@ -2,7 +2,8 @@ import numpy as np
 from numba import njit, prange
 
 
-__all__ = ['nandetrend', 'auto_regression_residual', 'modified_gram_schmidt', 'batch_psim', 'batch_csim']
+__all__ = [
+    'nandetrend', 'auto_regression_residual', 'modified_gram_schmidt', 'batch_psim', 'batch_csim', 'indexed_mean']
 
 
 @njit(parallel=True)
@@ -32,6 +33,25 @@ def nandetrend(y, x=None):
     # concatenate seems to sometimes crash in numba, so we add the bias term here
     x = np.concatenate((np.expand_dims(x, 1), np.expand_dims(np.ones_like(x), 1)), axis=1)
     return np.reshape(_nandetrend(y, x), shape)
+
+
+@njit
+def indexed_mean(indices, arr):
+    """
+    Equivalent to np.mean(arr[indices], axis=0), but avoids creating an array
+    Args:
+        indices: which indices to take the mean over
+        arr: The array to take the mean on
+
+    Returns:
+        The mean value
+    """
+    result = np.zeros(arr.shape[1:], np.float64)
+    count = 0
+    for i in indices:
+        result += arr[i]
+        count += 1
+    return result / count
 
 
 @njit
@@ -126,6 +146,18 @@ def _mu_sigma_last_keepdim(x, ddof=1):
 
 
 @njit
+def _cov_transform(x, cov):
+    u, s, vh = np.linalg.svd(cov)
+    return np.dot(x, vh) * np.sqrt(s)
+
+
+@njit
+def _sign_norm(x):
+    signs = np.sign(np.sum(x, axis=-1))
+    return np.expand_dims(signs, -1) * x
+
+
+@njit
 def _center_last(x):
     return x - np.expand_dims(np.sum(x, axis=-1) / x.shape[-1], -1)
 
@@ -168,6 +200,81 @@ def _batch_psim_oovariance_scaled_corr(x, cov):
 
 
 @njit(parallel=True)
+def _batch_psim_oovariance_scaled_cosine(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = x[i]
+        numerator = np.dot(z, np.transpose(np.dot(z, cov[i])))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_psim_oovariance_scaled_corr_abs(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = np.abs(_cov_transform(_center_last(x[i]), cov[i]))
+        numerator = np.dot(z, np.transpose(z))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_psim_oovariance_scaled_cosine_abs(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = np.abs(_cov_transform(x[i], cov[i]))
+        numerator = np.dot(z, np.transpose(z))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_psim_oovariance_scaled_corr_sign_norm(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _sign_norm(_cov_transform(_center_last(x[i]), cov[i]))
+        numerator = np.dot(z, np.transpose(z))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_psim_oovariance_scaled_cosine_sign_norm(x, cov):
+    result = np.empty((x.shape[0], x.shape[1], x.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _sign_norm(_cov_transform(x[i], cov[i]))
+        numerator = np.dot(z, np.transpose(z))
+        for j in range(len(z)):
+            for k in range(j, len(z)):
+                r = numerator[j, k] / np.sqrt(numerator[j, j] * numerator[k, k])
+                result[i, j, k] = r
+                result[i, k, j] = r
+
+    return result
+
+
+@njit(parallel=True)
 def _batch_csim_corr(x, y, ddof=1):
     result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
     for i in prange(x.shape[0]):
@@ -197,6 +304,87 @@ def _batch_csim_oovariance_scaled_corr(x, y, cov):
     return result
 
 
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_cosine(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = x[i]
+        w = y[i]
+        scaled_w = np.dot(w, cov[i])
+        denom_z = np.sqrt(np.sum(z * (np.dot(z, cov[i])), axis=-1))
+        denom_w = np.sqrt(np.sum(w * scaled_w, axis=-1))
+        numerator = z @ np.transpose(scaled_w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_corr_abs(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = np.abs(_cov_transform(_center_last(x[i]), cov[i]))
+        w = np.abs(_cov_transform(_center_last(y[i]), cov[i]))
+        denom_z = np.sqrt(np.sum(np.square(z), axis=-1))
+        denom_w = np.sqrt(np.sum(np.square(w), axis=-1))
+        numerator = z @ np.transpose(w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_cosine_abs(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = np.abs(_cov_transform(x[i], cov[i]))
+        w = np.abs(_cov_transform(y[i], cov[i]))
+        denom_z = np.sqrt(np.sum(np.square(z), axis=-1))
+        denom_w = np.sqrt(np.sum(np.square(w), axis=-1))
+        numerator = z @ np.transpose(w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_corr_sign_norm(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _sign_norm(_cov_transform(_center_last(x[i]), cov[i]))
+        w = _sign_norm(_cov_transform(_center_last(y[i]), cov[i]))
+        denom_z = np.sqrt(np.sum(np.square(z), axis=-1))
+        denom_w = np.sqrt(np.sum(np.square(w), axis=-1))
+        numerator = z @ np.transpose(w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
+@njit(parallel=True)
+def _batch_csim_oovariance_scaled_cosine_sign_norm(x, y, cov):
+    result = np.empty((x.shape[0], x.shape[1], y.shape[1]), dtype=np.float64)
+    for i in prange(x.shape[0]):
+        z = _sign_norm(_cov_transform(x[i], cov[i]))
+        w = _sign_norm(_cov_transform(y[i], cov[i]))
+        denom_z = np.sqrt(np.sum(np.square(z), axis=-1))
+        denom_w = np.sqrt(np.sum(np.square(w), axis=-1))
+        numerator = z @ np.transpose(w)
+        for j in range(len(z)):
+            for k in range(len(w)):
+                result[i, j, k] = numerator[j, k] / (denom_z[j] * denom_w[k])
+
+    return result
+
+
 def batch_psim(x, metric='cosine', ddof=1, cov=None):
     x = np.asarray(x)
     if np.ndim(x) != 3:
@@ -209,6 +397,26 @@ def batch_psim(x, metric='cosine', ddof=1, cov=None):
         if cov is None:
             raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
         return _batch_psim_oovariance_scaled_corr(x, cov)
+    elif metric == 'covariance_scaled_correlation_abs':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_corr_abs(x, cov)
+    elif metric == 'covariance_scaled_correlation_sign_norm':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_corr_sign_norm(x, cov)
+    elif metric == 'covariance_scaled_cosine':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_cosine(x, cov)
+    elif metric == 'covariance_scaled_cosine_abs':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_cosine_abs(x, cov)
+    elif metric == 'covariance_scaled_cosine_sign_norm':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_psim_oovariance_scaled_cosine_sign_norm(x, cov)
     else:
         raise ValueError('Unsupported metric: {}'.format(metric))
 
@@ -230,5 +438,25 @@ def batch_csim(x, y, metric='cosine', ddof=1, cov=None):
         if cov is None:
             raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
         return _batch_csim_oovariance_scaled_corr(x, y, cov)
+    elif metric == 'covariance_scaled_correlation_abs':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_corr_abs(x, y, cov)
+    elif metric == 'covariance_scaled_correlation_sign_norm':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_corr_sign_norm(x, y, cov)
+    elif metric == 'covariance_scaled_cosine':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_cosine(x, y, cov)
+    elif metric == 'covariance_scaled_cosine_abs':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_cosine_abs(x, y, cov)
+    elif metric == 'covariance_scaled_cosine_sign_norm':
+        if cov is None:
+            raise ValueError('Covariance must be passed in for covariance_scaled_correlation')
+        return _batch_csim_oovariance_scaled_cosine_sign_norm(x, y, cov)
     else:
         raise ValueError('Unsupported metric: {}'.format(metric))
