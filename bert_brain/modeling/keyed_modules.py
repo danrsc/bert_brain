@@ -564,10 +564,12 @@ class KeyedSingleTargetSpanMaxPoolFactory(GraphPartFactory):
     span_source_name: str
     output_key_to_shape: Optional[Mapping[str, Union[int, Tuple[int, ...]]]] = None
     targets: Optional[Union[str, Iterable[str]]] = None
+    output_span_representations: bool = False
 
     def make_graph_part(self):
         return KeyedSingleTargetSpanMaxPool(
-            self.num_spans, self.sequence_source_name, self.span_source_name, self.output_key_to_shape, self.targets)
+            self.num_spans, self.sequence_source_name, self.span_source_name, self.output_key_to_shape, self.targets,
+            self.output_span_representations)
 
 
 class KeyedSingleTargetSpanMaxPool(KeyedBase):
@@ -578,7 +580,8 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
             sequence_source_name,
             span_source_name,
             output_key_to_shape=None,
-            targets=None):
+            targets=None,
+            output_span_representations=False):
         super().__init__(output_key_to_shape, targets)
         self.num_spans = num_spans
         self.sequence_source_name = sequence_source_name
@@ -588,6 +591,7 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         masks = named_span_encoder.masks()
         self.masks = torch.reshape(torch.tensor(list(masks[k] for k in masks), dtype=torch.long), (1, 1, len(masks)))
         self.max_value = sum(masks[k] for k in masks)
+        self.output_span_representations = output_span_representations
 
     def _instantiate(self, name_to_num_channels):
         in_sequence_channels = name_to_num_channels[self.sequence_source_name]
@@ -625,6 +629,13 @@ class KeyedSingleTargetSpanMaxPool(KeyedBase):
         for k, p in zip(self.output_key_to_shape, predictions):
             p = p.view(p.size()[:1] + self.output_key_to_shape[k])
             result[k] = p
+        if self.output_span_representations and '{}_span{}'.format(self.sequence_source_name, 0) not in batch:
+            if self.num_spans > 1:
+                span_input = torch.split(prediction_input, prediction_input.size()[-1] // self.num_spans, dim=-1)
+            else:
+                span_input = [prediction_input]
+            for i in range(len(span_input)):
+                result['{}_span{}'.format(self.sequence_source_name, i)] = span_input[i]
         return result
 
     def get_output_weights(self, as_numpy=True):
