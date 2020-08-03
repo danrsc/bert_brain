@@ -116,6 +116,9 @@ class PooledFromKTokens(GraphPart):
                 result[(self.output_name,) + key[1:]] = batch[key]
         return result
 
+    def get_token_weights(self):
+        return self.linear.weight.detach().clone()
+
 
 class Conv1DCausal(torch.nn.Module):
 

@@ -9,7 +9,7 @@ import numpy as np
 from scipy.stats import ttest_1samp
 from tqdm.auto import tqdm
 
-from .modeling import BertMultiPredictionHead, KeyedSingleTargetSpanMaxPool
+from .modeling import BertMultiPredictionHead, KeyedSingleTargetSpanMaxPool, PooledFromKTokens
 from .data_sets import CorpusDatasetFactory, DataIdMultiDataset
 from .experiments import singleton_variation, task_hash
 
@@ -87,6 +87,7 @@ def get_model_weights(paths_obj, variation_name, graph_parts_to_compare, index_r
     index_runs = list()
     ordered_names = None
     output = list()
+    token_weight_output = None
 
     label_maker = None
 
@@ -101,8 +102,13 @@ def get_model_weights(paths_obj, variation_name, graph_parts_to_compare, index_r
 
         model = BertMultiPredictionHead.from_pretrained(model_dir)
         rationalized_output_weights = OrderedDict()
+        local_token_weight_output = OrderedDict()
         for k in model.prediction_head.head_graph_parts:
             if k in graph_parts_to_compare:
+                if isinstance(model.prediction_head.head_graph_parts[k], PooledFromKTokens):
+                    local_token_weight_output[k] = model.prediction_head.head_graph_parts[k].get_token_weights()
+                    continue
+
                 output_weights = model.prediction_head.head_graph_parts[k].get_output_weights()
                 for output_name in output_weights:
                     w = output_weights[output_name]
@@ -155,6 +161,22 @@ def get_model_weights(paths_obj, variation_name, graph_parts_to_compare, index_r
             ordered_names = ordered_names_
         ordered_weights = np.array(ordered_weights)
 
+        if index_run == 0:
+            if len(local_token_weight_output) > 0:
+                token_weight_output = OrderedDict(
+                    (k, list([local_token_weight_output[k]])) for k in local_token_weight_output)
+        else:
+            if len(local_token_weight_output) > 0 and token_weight_output is None:
+                raise ValueError('Inconsistent token weights over runs')
+            if len(local_token_weight_output) == 0 and token_weight_output is not None:
+                raise ValueError('Inconsistent token weights over runs')
+            if token_weight_output is not None and len(local_token_weight_output) != len(token_weight_output):
+                raise ValueError('Inconsistent token weights over runs')
+            for k in local_token_weight_output:
+                if k not in token_weight_output:
+                    raise ValueError('Inconsistent token weights over runs')
+                token_weight_output[k].append(local_token_weight_output[k])
+
         index_runs.append(index_run)
         output.append(ordered_weights)
 
@@ -162,6 +184,10 @@ def get_model_weights(paths_obj, variation_name, graph_parts_to_compare, index_r
     # model is somehow getting put onto cuda; need to fix, but at least release it here
     gc.collect()
     torch.cuda.empty_cache()
+
+    if token_weight_output is not None:
+        token_weight_output = OrderedDict((k, np.concatenate(token_weight_output[k])) for k in token_weight_output)
+        return ordered_names, index_runs, np.array(output), token_weight_output
 
     return ordered_names, index_runs, np.array(output)
 
